@@ -1242,6 +1242,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		MCPConfig:          mcpConfig,
 		OAuth2Provider:     s.Config.OAuthProvider,
 		Logger:             logger,
+		KeySelector:        s.Config.KeySelector,
 		KVStore:            s.Config.KVStore,
 	})
 	if err != nil {

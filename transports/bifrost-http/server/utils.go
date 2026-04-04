@@ -11,6 +11,10 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
+type keySelectorProvider interface {
+	GetKeySelector() schemas.KeySelector
+}
+
 // GetDefaultConfigDir returns the OS-specific default configuration directory for Bifrost.
 // This follows standard conventions:
 // - Linux/macOS: ~/.config/bifrost
@@ -76,6 +80,9 @@ func (s *BifrostHTTPServer) registerPluginWithStatus(ctx context.Context, name s
 	}
 
 	s.Config.ReloadPlugin(plugin)
+	if selectorProvider, ok := plugin.(keySelectorProvider); ok {
+		s.Config.KeySelector = selectorProvider.GetKeySelector()
+	}
 	s.Config.UpdatePluginOverallStatus(name, name, schemas.PluginStatusActive,
 		[]string{fmt.Sprintf("%s plugin initialized successfully", name)}, InferPluginTypes(plugin))
 	return nil

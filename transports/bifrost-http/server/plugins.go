@@ -15,6 +15,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/telemetry"
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	"github.com/maximhq/bifrost/transports/bifrost-http/loadbalancer"
 )
 
 // InferPluginTypes determines which interface types a plugin implements
@@ -79,6 +80,13 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 		return governance.Init(ctx, governanceConfig, logger, bifrostConfig.ConfigStore,
 			bifrostConfig.GovernanceConfig, bifrostConfig.ModelCatalog,
 			bifrostConfig.MCPCatalog, inMemoryStore)
+
+	case loadbalancer.PluginName:
+		loadBalancerConfig, err := MarshalPluginConfig[loadbalancer.Config](pluginConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal load balancer config: %w", err)
+		}
+		return loadbalancer.Init(loadBalancerConfig, logger)
 
 	case maxim.PluginName:
 		maximConfig, err := MarshalPluginConfig[maxim.Config](pluginConfig)
@@ -183,45 +191,52 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 	}
 	s.Config.SetPluginOrderInfo(governance.PluginName, builtinPlacement, schemas.Ptr(3))
 
-	// 4. OTEL (if configured in PluginConfigs)
+	// 4. Adaptive load balancer (if enabled)
+	if s.Config.LoadBalancerConfig != nil && s.Config.LoadBalancerConfig.Enabled {
+		s.registerPluginWithStatus(ctx, loadbalancer.PluginName, nil, s.Config.LoadBalancerConfig, false)
+	} else {
+		s.markPluginDisabled(loadbalancer.PluginName)
+	}
+	s.Config.SetPluginOrderInfo(loadbalancer.PluginName, builtinPlacement, schemas.Ptr(4))
+
+	// 5. OTEL (if configured in PluginConfigs)
 	otelConfig := s.getPluginConfig(otel.PluginName)
 	if otelConfig != nil && otelConfig.Enabled {
 		s.registerPluginWithStatus(ctx, otel.PluginName, nil, otelConfig.Config, false)
 	} else {
 		s.markPluginDisabled(otel.PluginName)
 	}
-	s.Config.SetPluginOrderInfo(otel.PluginName, builtinPlacement, schemas.Ptr(4))
+	s.Config.SetPluginOrderInfo(otel.PluginName, builtinPlacement, schemas.Ptr(5))
 
-	// 5. Semantic Cache (if configured in PluginConfigs)
+	// 6. Semantic Cache (if configured in PluginConfigs)
 	semanticCacheConfig := s.getPluginConfig(semanticcache.PluginName)
 	if semanticCacheConfig != nil && semanticCacheConfig.Enabled {
 		s.registerPluginWithStatus(ctx, semanticcache.PluginName, nil, semanticCacheConfig.Config, false)
 	} else {
 		s.markPluginDisabled(semanticcache.PluginName)
 	}
-	s.Config.SetPluginOrderInfo(semanticcache.PluginName, builtinPlacement, schemas.Ptr(5))
+	s.Config.SetPluginOrderInfo(semanticcache.PluginName, builtinPlacement, schemas.Ptr(6))
 
-	// 6. Litellmcompat (if configured in PluginConfigs)
+	// 7. Litellmcompat (if configured in PluginConfigs)
 	litellmcompatConfig := s.getPluginConfig(litellmcompat.PluginName)
 	if litellmcompatConfig != nil && litellmcompatConfig.Enabled {
 		s.registerPluginWithStatus(ctx, litellmcompat.PluginName, nil, litellmcompatConfig.Config, false)
 	} else {
 		s.markPluginDisabled(litellmcompat.PluginName)
 	}
-	s.Config.SetPluginOrderInfo(litellmcompat.PluginName, builtinPlacement, schemas.Ptr(6))
+	s.Config.SetPluginOrderInfo(litellmcompat.PluginName, builtinPlacement, schemas.Ptr(7))
 
-	// 7. Maxim (if configured in PluginConfigs)
+	// 8. Maxim (if configured in PluginConfigs)
 	maximConfig := s.getPluginConfig(maxim.PluginName)
 	if maximConfig != nil && maximConfig.Enabled {
 		s.registerPluginWithStatus(ctx, maxim.PluginName, nil, maximConfig.Config, false)
 	} else {
 		s.markPluginDisabled(maxim.PluginName)
 	}
-	s.Config.SetPluginOrderInfo(maxim.PluginName, builtinPlacement, schemas.Ptr(7))
+	s.Config.SetPluginOrderInfo(maxim.PluginName, builtinPlacement, schemas.Ptr(8))
 
 	return nil
 }
-
 
 // loadCustomPlugins loads plugins from PluginConfigs
 func (s *BifrostHTTPServer) loadCustomPlugins(ctx context.Context) error {

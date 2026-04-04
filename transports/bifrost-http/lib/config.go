@@ -43,6 +43,8 @@ import (
 	"github.com/maximhq/bifrost/plugins/otel"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
 	"github.com/maximhq/bifrost/plugins/telemetry"
+	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
+	"github.com/maximhq/bifrost/transports/bifrost-http/loadbalancer"
 	"gorm.io/gorm"
 )
 
@@ -103,6 +105,7 @@ func IsBuiltinPlugin(name string) bool {
 	return name == telemetry.PluginName ||
 		name == logging.PluginName ||
 		name == governance.PluginName ||
+		name == loadbalancer.PluginName ||
 		name == litellmcompat.PluginName ||
 		name == maxim.PluginName ||
 		name == semanticcache.PluginName ||
@@ -122,16 +125,22 @@ type ConfigData struct {
 	Client        *configstore.ClientConfig `json:"client"`
 	EncryptionKey *schemas.EnvVar           `json:"encryption_key"`
 	// Deprecated: Use GovernanceConfig.AuthConfig instead
-	AuthConfig        *configstore.AuthConfig               `json:"auth_config,omitempty"`
-	Providers         map[string]configstore.ProviderConfig `json:"providers"`
-	FrameworkConfig   *framework.FrameworkConfig            `json:"framework,omitempty"`
-	MCP               *schemas.MCPConfig                    `json:"mcp,omitempty"`
-	Governance        *configstore.GovernanceConfig         `json:"governance,omitempty"`
-	VectorStoreConfig *vectorstore.Config                   `json:"vector_store,omitempty"`
-	ConfigStoreConfig *configstore.Config                   `json:"config_store,omitempty"`
-	LogsStoreConfig   *logstore.Config                      `json:"logs_store,omitempty"`
-	Plugins           []*schemas.PluginConfig               `json:"plugins,omitempty"`
-	WebSocket         *schemas.WebSocketConfig              `json:"websocket,omitempty"`
+	AuthConfig         *configstore.AuthConfig               `json:"auth_config,omitempty"`
+	Providers          map[string]configstore.ProviderConfig `json:"providers"`
+	FrameworkConfig    *framework.FrameworkConfig            `json:"framework,omitempty"`
+	MCP                *schemas.MCPConfig                    `json:"mcp,omitempty"`
+	Governance         *configstore.GovernanceConfig         `json:"governance,omitempty"`
+	VectorStoreConfig  *vectorstore.Config                   `json:"vector_store,omitempty"`
+	ConfigStoreConfig  *configstore.Config                   `json:"config_store,omitempty"`
+	LogsStoreConfig    *logstore.Config                      `json:"logs_store,omitempty"`
+	ClusterConfig      *enterprisecfg.ClusterConfig          `json:"cluster_config,omitempty"`
+	LoadBalancerConfig *enterprisecfg.LoadBalancerConfig     `json:"load_balancer_config,omitempty"`
+	AuditLogsConfig    *enterprisecfg.AuditLogsConfig        `json:"audit_logs,omitempty"`
+	AlertsConfig       *enterprisecfg.AlertsConfig           `json:"alerts,omitempty"`
+	LogExportsConfig   *enterprisecfg.LogExportsConfig       `json:"log_exports,omitempty"`
+	VaultConfig        *enterprisecfg.VaultConfig            `json:"vault,omitempty"`
+	Plugins            []*schemas.PluginConfig               `json:"plugins,omitempty"`
+	WebSocket          *schemas.WebSocketConfig              `json:"websocket,omitempty"`
 }
 
 // UnmarshalJSON unmarshals the ConfigData from JSON using internal unmarshallers
@@ -140,18 +149,24 @@ type ConfigData struct {
 func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 	// First, unmarshal into a temporary struct to get all fields except the complex configs
 	type TempConfigData struct {
-		FrameworkConfig   json.RawMessage                       `json:"framework,omitempty"`
-		Client            *configstore.ClientConfig             `json:"client"`
-		EncryptionKey     *schemas.EnvVar                       `json:"encryption_key"`
-		AuthConfig        *configstore.AuthConfig               `json:"auth_config,omitempty"`
-		Providers         map[string]configstore.ProviderConfig `json:"providers"`
-		MCP               *schemas.MCPConfig                    `json:"mcp,omitempty"`
-		Governance        *configstore.GovernanceConfig         `json:"governance,omitempty"`
-		VectorStoreConfig json.RawMessage                       `json:"vector_store,omitempty"`
-		ConfigStoreConfig json.RawMessage                       `json:"config_store,omitempty"`
-		LogsStoreConfig   json.RawMessage                       `json:"logs_store,omitempty"`
-		Plugins           []*schemas.PluginConfig               `json:"plugins,omitempty"`
-		WebSocket         *schemas.WebSocketConfig              `json:"websocket,omitempty"`
+		FrameworkConfig    json.RawMessage                       `json:"framework,omitempty"`
+		Client             *configstore.ClientConfig             `json:"client"`
+		EncryptionKey      *schemas.EnvVar                       `json:"encryption_key"`
+		AuthConfig         *configstore.AuthConfig               `json:"auth_config,omitempty"`
+		Providers          map[string]configstore.ProviderConfig `json:"providers"`
+		MCP                *schemas.MCPConfig                    `json:"mcp,omitempty"`
+		Governance         *configstore.GovernanceConfig         `json:"governance,omitempty"`
+		VectorStoreConfig  json.RawMessage                       `json:"vector_store,omitempty"`
+		ConfigStoreConfig  json.RawMessage                       `json:"config_store,omitempty"`
+		LogsStoreConfig    json.RawMessage                       `json:"logs_store,omitempty"`
+		ClusterConfig      *enterprisecfg.ClusterConfig          `json:"cluster_config,omitempty"`
+		LoadBalancerConfig *enterprisecfg.LoadBalancerConfig     `json:"load_balancer_config,omitempty"`
+		AuditLogsConfig    *enterprisecfg.AuditLogsConfig        `json:"audit_logs,omitempty"`
+		AlertsConfig       *enterprisecfg.AlertsConfig           `json:"alerts,omitempty"`
+		LogExportsConfig   *enterprisecfg.LogExportsConfig       `json:"log_exports,omitempty"`
+		VaultConfig        *enterprisecfg.VaultConfig            `json:"vault,omitempty"`
+		Plugins            []*schemas.PluginConfig               `json:"plugins,omitempty"`
+		WebSocket          *schemas.WebSocketConfig              `json:"websocket,omitempty"`
 	}
 
 	var temp TempConfigData
@@ -166,6 +181,12 @@ func (cd *ConfigData) UnmarshalJSON(data []byte) error {
 	cd.Providers = temp.Providers
 	cd.MCP = temp.MCP
 	cd.Governance = temp.Governance
+	cd.ClusterConfig = temp.ClusterConfig
+	cd.LoadBalancerConfig = temp.LoadBalancerConfig
+	cd.AuditLogsConfig = temp.AuditLogsConfig
+	cd.AlertsConfig = temp.AlertsConfig
+	cd.LogExportsConfig = temp.LogExportsConfig
+	cd.VaultConfig = temp.VaultConfig
 	cd.Plugins = temp.Plugins
 	cd.WebSocket = temp.WebSocket
 	// Initialize providers map if nil
@@ -284,12 +305,18 @@ type Config struct {
 	LogsStore   logstore.LogStore
 
 	// In-memory storage
-	ClientConfig     *configstore.ClientConfig
-	Providers        map[schemas.ModelProvider]configstore.ProviderConfig
-	MCPConfig        *schemas.MCPConfig
-	GovernanceConfig *configstore.GovernanceConfig
-	FrameworkConfig  *framework.FrameworkConfig
-	ProxyConfig      *configstoreTables.GlobalProxyConfig
+	ClientConfig       *configstore.ClientConfig
+	Providers          map[schemas.ModelProvider]configstore.ProviderConfig
+	MCPConfig          *schemas.MCPConfig
+	GovernanceConfig   *configstore.GovernanceConfig
+	FrameworkConfig    *framework.FrameworkConfig
+	ProxyConfig        *configstoreTables.GlobalProxyConfig
+	ClusterConfig      *enterprisecfg.ClusterConfig
+	LoadBalancerConfig *enterprisecfg.LoadBalancerConfig
+	AuditLogsConfig    *enterprisecfg.AuditLogsConfig
+	AlertsConfig       *enterprisecfg.AlertsConfig
+	LogExportsConfig   *enterprisecfg.LogExportsConfig
+	VaultConfig        *enterprisecfg.VaultConfig
 
 	// Plugin Storage (SINGLE SOURCE OF TRUTH)
 	// All plugins are stored in BasePlugins. Interface-specific caches are
@@ -317,6 +344,8 @@ type Config struct {
 	AsyncJobExecutor *logstore.AsyncJobExecutor
 	// Shared in-memory kvstore for transport-level protocol coordination.
 	KVStore *kvstore.Store
+	// Optional adaptive key selector injected by enterprise routing components.
+	KeySelector schemas.KeySelector
 
 	// Catalog managers
 	ModelCatalog *modelcatalog.ModelCatalog
@@ -460,6 +489,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 	}
 	// 4. Client config (store → file → defaults)
 	loadClientConfig(ctx, config, &configData)
+	loadEnterpriseConfig(config, &configData)
 	config.SetHeaderMatcher(NewHeaderMatcher(config.ClientConfig.HeaderFilterConfig))
 	// 5. Providers (store → file → auto-detect)
 	if err := loadProviders(ctx, config, &configData); err != nil {
@@ -770,6 +800,19 @@ func processProvider(
 	// Merge with existing config using hash-based reconciliation
 	mergeProviderWithHash(provider, providerCfgInFile, providersInConfigStore)
 	return nil
+}
+
+func loadEnterpriseConfig(config *Config, configData *ConfigData) {
+	if config == nil || configData == nil {
+		return
+	}
+
+	config.ClusterConfig = configData.ClusterConfig
+	config.LoadBalancerConfig = configData.LoadBalancerConfig
+	config.AuditLogsConfig = configData.AuditLogsConfig
+	config.AlertsConfig = configData.AlertsConfig
+	config.LogExportsConfig = configData.LogExportsConfig
+	config.VaultConfig = configData.VaultConfig
 }
 
 // mergeProviderWithHash merges provider config using hash-based reconciliation

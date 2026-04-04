@@ -1430,6 +1430,15 @@
     "audit_logs": {
       "$ref": "#/$defs/audit_logs_config"
     },
+    "alerts": {
+      "$ref": "#/$defs/alerts_config"
+    },
+    "log_exports": {
+      "$ref": "#/$defs/log_exports_config"
+    },
+    "vault": {
+      "$ref": "#/$defs/vault_config"
+    },
     "large_payload_optimization": {
       "$ref": "#/$defs/large_payload_optimization"
     },
@@ -3359,7 +3368,58 @@
         },
         "tracker_config": {
           "type": "object",
-          "description": "Configuration for tracking route metrics and performance"
+          "description": "Configuration for tracking route metrics and computing adaptive key weights",
+          "properties": {
+            "ewma_alpha": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "EWMA smoothing factor for latency and error updates"
+            },
+            "error_penalty": {
+              "type": "number",
+              "minimum": 0,
+              "description": "How aggressively recent errors reduce a route weight"
+            },
+            "latency_penalty": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Exponent applied when comparing a route's latency to the best observed route"
+            },
+            "consecutive_failure_penalty": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Penalty applied per consecutive failure to speed up route de-prioritization"
+            },
+            "minimum_samples": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Minimum observations required before adaptive penalties are applied at full strength"
+            },
+            "exploration_ratio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Probability of falling back to static weighted random selection for route exploration"
+            },
+            "jitter_ratio": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Per-selection random jitter applied to computed weights"
+            },
+            "min_weight_multiplier": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Lower bound multiplier applied to the static key weight"
+            },
+            "max_weight_multiplier": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Upper bound multiplier applied to the static key weight"
+            }
+          },
+          "additionalProperties": false
         },
         "bootstrap": {
           "type": "object",
@@ -3367,17 +3427,47 @@
           "properties": {
             "route_metrics": {
               "type": "object",
-              "description": "Historical metrics per route"
+              "description": "Historical metrics per route, keyed by provider/model/key_id",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "error_rate": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "latency_ms": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "consecutive_failures": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "sample_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              }
             },
             "direction_metrics": {
               "type": "object",
-              "description": "Historical metrics per direction"
+              "description": "Historical provider-direction metrics reserved for provider-level adaptive routing",
+              "additionalProperties": {
+                "type": "object"
+              }
             },
             "routes": {
               "type": "object",
-              "description": "Known routes"
+              "description": "Route registry reserved for provider-level adaptive routing",
+              "additionalProperties": {
+                "type": "object"
+              }
             }
-          }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
@@ -3516,6 +3606,206 @@
           "description": "Number of days to retain audit logs (0 means no retention limit)"
         }
       },
+      "additionalProperties": false
+    },
+    "alerts_config": {
+      "type": "object",
+      "description": "Enterprise alerting configuration for budget, failure, and performance notifications",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether alert evaluation is enabled"
+        },
+        "evaluation_interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How often alert conditions are evaluated"
+        },
+        "budget_thresholds_percent": {
+          "type": "array",
+          "description": "Budget usage thresholds that should trigger alerts",
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "channels": {
+          "type": "object",
+          "properties": {
+            "email": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "smtp_host": { "type": "string" },
+                "smtp_port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                "username": { "type": "string", "description": "SMTP username or env reference" },
+                "password": { "type": "string", "description": "SMTP password or env reference" },
+                "from": { "type": "string" },
+                "to": {
+                  "type": "array",
+                  "items": { "type": "string", "format": "email" }
+                }
+              },
+              "additionalProperties": false
+            },
+            "feishu": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "webhook_url": { "type": "string", "description": "Feishu webhook URL or env reference" },
+                "secret": { "type": "string", "description": "Feishu signing secret or env reference" },
+                "mention_user_ids": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
+              "additionalProperties": false
+            },
+            "webhook": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "url": { "type": "string", "description": "Webhook URL or env reference" },
+                "headers": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                },
+                "timeout_seconds": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["enabled"],
+      "additionalProperties": false
+    },
+    "log_exports_config": {
+      "type": "object",
+      "description": "Enterprise log export configuration for compliance and downstream analytics",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether scheduled log exports are enabled"
+        },
+        "storage_path": {
+          "type": "string",
+          "description": "Filesystem or mounted path used to write exported log batches"
+        },
+        "format": {
+          "type": "string",
+          "enum": ["jsonl", "csv", "parquet"],
+          "description": "Serialization format for exported logs"
+        },
+        "compression": {
+          "type": "string",
+          "enum": ["none", "gzip", "zstd"],
+          "description": "Compression algorithm applied to exported files"
+        },
+        "max_rows_per_file": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of rows written to a single export file"
+        },
+        "flush_interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum time between export flushes"
+        }
+      },
+      "required": ["enabled"],
+      "additionalProperties": false
+    },
+    "vault_config": {
+      "type": "object",
+      "description": "Enterprise secret synchronization configuration for provider keys and virtual keys",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether vault synchronization is enabled"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["hashicorp", "aws_secrets_manager", "google_secret_manager", "azure_key_vault", "kubernetes"],
+          "description": "Backing secret manager type"
+        },
+        "sync_interval": {
+          "type": "string",
+          "description": "Periodic synchronization interval (for example: 300s)"
+        },
+        "sync_paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Secret paths or prefixes to scan for provider keys and virtual keys"
+        },
+        "auto_deprecate": {
+          "type": "boolean",
+          "description": "Whether keys removed from the upstream secret store should be deprecated automatically"
+        },
+        "backup_deprecated_keys": {
+          "type": "boolean",
+          "description": "Whether deprecated keys should be backed up before archival"
+        },
+        "deprecation": {
+          "type": "object",
+          "properties": {
+            "grace_period": { "type": "string" },
+            "notify_admins": { "type": "boolean" },
+            "retain_archived": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "hashicorp": {
+          "type": "object",
+          "properties": {
+            "address": { "type": "string" },
+            "token": { "type": "string", "description": "Vault token or env reference" },
+            "mount": { "type": "string" },
+            "namespace": { "type": "string" },
+            "tls_skip_verify": { "type": "boolean" },
+            "ca_cert_pem": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "aws_secrets_manager": {
+          "type": "object",
+          "properties": {
+            "region": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "google_secret_manager": {
+          "type": "object",
+          "properties": {
+            "project_id": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "azure_key_vault": {
+          "type": "object",
+          "properties": {
+            "vault_url": { "type": "string" },
+            "tenant_id": { "type": "string", "description": "Tenant ID or env reference" },
+            "client_id": { "type": "string", "description": "Client ID or env reference" },
+            "client_secret": { "type": "string", "description": "Client secret or env reference" }
+          },
+          "additionalProperties": false
+        },
+        "kubernetes": {
+          "type": "object",
+          "properties": {
+            "namespace": { "type": "string" },
+            "label_selector": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["enabled"],
       "additionalProperties": false
     },
     "large_payload_optimization": {
