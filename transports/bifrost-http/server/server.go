@@ -28,6 +28,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/logging"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
 	"github.com/maximhq/bifrost/plugins/telemetry"
+	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
 	"github.com/maximhq/bifrost/transports/bifrost-http/integrations"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
@@ -114,6 +115,11 @@ type BifrostHTTPServer struct {
 
 	Client *bifrost.Bifrost
 	Config *lib.Config
+
+	ClusterService   *enterprisecfg.ClusterService
+	AuditService     *enterprisecfg.AuditService
+	LogExportService *enterprisecfg.LogExportService
+	AlertManager     *enterprisecfg.AlertManager
 
 	Server *fasthttp.Server
 	Router *router.Router
@@ -981,6 +987,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	if loggerPlugin != nil {
 		loggingHandler = handlers.NewLoggingHandler(loggerPlugin.GetPluginLogManager(), s, s.Config)
 	}
+	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager)
 	var governanceHandler *handlers.GovernanceHandler
 	governancePluginName := governance.PluginName
 	if name, ok := ctx.Value(schemas.BifrostContextKeyGovernancePluginName).(string); ok && name != "" {
@@ -1048,6 +1055,9 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	}
 	if loggingHandler != nil {
 		loggingHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if enterpriseHandler != nil {
+		enterpriseHandler.RegisterRoutes(s.Router, middlewares...)
 	}
 	if s.WebSocketHandler != nil {
 		s.WebSocketHandler.RegisterRoutes(s.Router, middlewares...)
@@ -1130,6 +1140,9 @@ func (s *BifrostHTTPServer) PrepareCommonMiddlewares() []schemas.BifrostHTTPMidd
 	} else {
 		logger.Warn("prometheus plugin not found, skipping telemetry middleware")
 	}
+	if s.AuditService != nil {
+		commonMiddlewares = append(commonMiddlewares, s.AuditService.Middleware())
+	}
 	return commonMiddlewares
 }
 
@@ -1159,8 +1172,20 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config %v", err)
 	}
+	if s.Config.AuditLogsConfig != nil && !s.Config.AuditLogsConfig.Disabled {
+		s.AuditService, err = enterprisecfg.NewAuditService(configDir, s.Config.AuditLogsConfig, logger)
+		if err != nil {
+			return fmt.Errorf("failed to initialize audit service: %v", err)
+		}
+	}
 	if s.Config.KVStore != nil {
 		integrations.RegisterKVDecoders(s.Config.KVStore)
+	}
+	if s.Config.ClusterConfig != nil && s.Config.ClusterConfig.Enabled {
+		s.ClusterService, err = enterprisecfg.NewClusterService(s.Config.ClusterConfig, s.Config.KVStore, net.JoinHostPort(s.Host, s.Port), logger)
+		if err != nil {
+			return fmt.Errorf("failed to initialize cluster service: %v", err)
+		}
 	}
 	// Initialize WebSocket handler early so plugins can wire event broadcasters during Init.
 	// Log callbacks are registered later in RegisterAPIRoutes when logging plugin is available.
@@ -1216,6 +1241,23 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		if govErr == nil {
 			s.Config.AsyncJobExecutor = logstore.NewAsyncJobExecutor(s.Config.LogsStore, governancePlugin.GetGovernanceStore(), logger)
 			logger.Info("async job executor initialized")
+		}
+	}
+	loggerPlugin, _ := lib.FindPluginAs[*logging.LoggerPlugin](s.Config, logging.PluginName)
+	if loggerPlugin != nil && s.Config.LogExportsConfig != nil && s.Config.LogExportsConfig.Enabled {
+		s.LogExportService, err = enterprisecfg.NewLogExportService(configDir, s.Config.LogExportsConfig, loggerPlugin.GetPluginLogManager(), s.AuditService, logger)
+		if err != nil {
+			return fmt.Errorf("failed to initialize log export service: %v", err)
+		}
+	}
+	if s.Config.AlertsConfig != nil && s.Config.AlertsConfig.Enabled {
+		var statsProvider enterprisecfg.LogStatsProvider
+		if loggerPlugin != nil {
+			statsProvider = loggerPlugin.GetPluginLogManager()
+		}
+		s.AlertManager = enterprisecfg.NewAlertManager(s.Config.AlertsConfig, statsProvider, s, s.AuditService, logger)
+		if s.AlertManager != nil {
+			s.AlertManager.Start()
 		}
 	}
 
@@ -1439,6 +1481,14 @@ func (s *BifrostHTTPServer) Start() error {
 				logger.Info("closing websocket connection pool...")
 				s.wsPool.Close()
 			}
+			if s.AlertManager != nil {
+				logger.Info("stopping alert manager...")
+				s.AlertManager.Stop()
+			}
+			if s.ClusterService != nil {
+				logger.Info("stopping cluster service...")
+				s.ClusterService.Close()
+			}
 			// Cleanup Config and all its background components
 			if s.Config != nil {
 				s.Config.Close(shutdownCtx)
@@ -1453,6 +1503,12 @@ func (s *BifrostHTTPServer) Start() error {
 		}
 
 	case err := <-errChan:
+		if s.AlertManager != nil {
+			s.AlertManager.Stop()
+		}
+		if s.ClusterService != nil {
+			s.ClusterService.Close()
+		}
 		if s.wsPool != nil {
 			s.wsPool.Close()
 		}

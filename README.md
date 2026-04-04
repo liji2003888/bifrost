@@ -283,3 +283,39 @@ For development requirements and build instructions, see our [Development Setup 
 This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
 
 Built with ❤️ by [Maxim](https://github.com/maximhq)
+
+---
+
+## Fork Enterprise Customization Notes
+
+### 2026-04-05 07:43:04 CST | Base Commit 44afab82 | Round 1
+
+- Added enterprise transport config models and schema wiring for `cluster_config`, `load_balancer_config`, `audit_logs`, `alerts`, `log_exports`, and `vault`.
+- Implemented adaptive key-level load balancing using real-time route metrics with EWMA-based latency/error scoring and dynamic key weight adjustment.
+- Registered the adaptive load balancer as a built-in runtime component and wired its `KeySelector` into Bifrost initialization.
+- Added validation coverage for enterprise config parsing and adaptive load-balancer behavior.
+- Added Vault-related configuration scaffolding for future secret synchronization work. Runtime vault sync was not implemented in this round.
+
+### 2026-04-05 07:43:04 CST | Base Commit 44afab82 | Round 2
+
+- Implemented a static-peer cluster synchronization service on top of `KVStore.SyncDelegate`, including internal KV mutation replication and peer health checks.
+- Added enterprise APIs for cluster state and internal replication endpoints:
+  - `GET /api/cluster/status`
+  - `GET /_cluster/status`
+  - `POST /_cluster/kv/set`
+  - `POST /_cluster/kv/delete`
+- Added append-only audit logging with chained integrity hashes and optional HMAC signing, exposed through `GET /api/audit-logs`.
+- Added enterprise log export jobs for both LLM logs and MCP logs with `jsonl`/`csv` output and optional `gzip` compression:
+  - `POST /api/logs/exports`
+  - `POST /api/mcp-logs/exports`
+  - `GET /api/log-exports`
+  - `GET /api/log-exports/{id}`
+- Added an alert manager for budget threshold, error-rate, and average-latency alerts with Email, Feishu, and generic Webhook delivery, exposed through `GET /api/alerts`.
+- Added enterprise unit tests covering audit logging, export job generation, and cluster mutation application.
+
+Current implementation status:
+
+- Adaptive load balancing is functional.
+- Cluster mode currently supports static peers plus health polling and KV replication.
+- Audit logs, log exports, and alerts are functional.
+- Vault runtime synchronization and automatic discovery backends for cluster mode are still pending.

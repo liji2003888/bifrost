@@ -3621,6 +3621,27 @@
           "minimum": 1,
           "description": "How often alert conditions are evaluated"
         },
+        "lookback_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Recent traffic window used when evaluating performance and failure alerts"
+        },
+        "minimum_requests": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Minimum number of requests required before health alerts can trigger"
+        },
+        "error_rate_threshold_percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Error rate percentage that triggers a critical alert"
+        },
+        "average_latency_threshold_ms": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Average latency threshold in milliseconds that triggers a warning alert"
+        },
         "budget_thresholds_percent": {
           "type": "array",
           "description": "Budget usage thresholds that should trigger alerts",

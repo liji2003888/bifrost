@@ -88,6 +88,10 @@ type AuditLogsConfig struct {
 type AlertsConfig struct {
 	Enabled                   bool                 `json:"enabled"`
 	EvaluationIntervalSeconds int                  `json:"evaluation_interval_seconds,omitempty"`
+	LookbackMinutes           int                  `json:"lookback_minutes,omitempty"`
+	MinimumRequests           int                  `json:"minimum_requests,omitempty"`
+	ErrorRateThresholdPercent float64              `json:"error_rate_threshold_percent,omitempty"`
+	AverageLatencyThresholdMs float64              `json:"average_latency_threshold_ms,omitempty"`
 	BudgetThresholdsPercent   []float64            `json:"budget_thresholds_percent,omitempty"`
 	Channels                  *AlertChannelsConfig `json:"channels,omitempty"`
 }
