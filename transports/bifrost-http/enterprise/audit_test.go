@@ -1,6 +1,8 @@
 package enterprise
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,5 +63,107 @@ func TestResolveAuditActorIDPrefersUserID(t *testing.T) {
 
 	if actorID := resolveAuditActorID(ctx); actorID != "admin" {
 		t.Fatalf("expected actor id to prefer explicit user id, got %q", actorID)
+	}
+}
+
+func TestAuditServicePrunesExpiredEntriesOnStartup(t *testing.T) {
+	dir := t.TempDir()
+
+	writer, err := NewAuditService(dir, &AuditLogsConfig{}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewAuditService(writer) error = %v", err)
+	}
+
+	expired := &AuditEvent{
+		ID:         "expired",
+		Timestamp:  time.Now().UTC().Add(-72 * time.Hour),
+		Category:   AuditCategorySystem,
+		Action:     "expired",
+		Message:    "too old",
+		ResourceID: "old",
+	}
+	retained := &AuditEvent{
+		ID:         "retained",
+		Timestamp:  time.Now().UTC().Add(-2 * time.Hour),
+		Category:   AuditCategorySystem,
+		Action:     "retained",
+		Message:    "keep me",
+		ResourceID: "new",
+	}
+
+	if err := writer.Append(expired); err != nil {
+		t.Fatalf("Append(expired) error = %v", err)
+	}
+	if err := writer.Append(retained); err != nil {
+		t.Fatalf("Append(retained) error = %v", err)
+	}
+
+	service, err := NewAuditService(dir, &AuditLogsConfig{RetentionDays: 1}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewAuditService(retention) error = %v", err)
+	}
+
+	result, err := service.Search(AuditSearchFilters{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if result.Total != 1 {
+		t.Fatalf("expected 1 retained event after prune, got %d", result.Total)
+	}
+	if len(result.Events) != 1 || result.Events[0].ID != retained.ID {
+		t.Fatalf("unexpected retained events after prune: %+v", result.Events)
+	}
+
+	payload, err := os.ReadFile(service.Path())
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(payload), expired.ID) {
+		t.Fatalf("expected expired audit entry to be removed, file contents: %s", string(payload))
+	}
+	if !strings.Contains(string(payload), retained.ID) {
+		t.Fatalf("expected retained audit entry to remain, file contents: %s", string(payload))
+	}
+}
+
+func TestAuditServicePrunesExpiredEntriesDuringAppend(t *testing.T) {
+	service, err := NewAuditService(t.TempDir(), &AuditLogsConfig{RetentionDays: 1}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewAuditService() error = %v", err)
+	}
+
+	expired := &AuditEvent{
+		ID:        "expired-on-append",
+		Timestamp: time.Now().UTC().Add(-48 * time.Hour),
+		Category:  AuditCategorySystem,
+		Action:    "expired",
+	}
+	if err := service.Append(expired); err != nil {
+		t.Fatalf("Append(expired) error = %v", err)
+	}
+
+	service.mu.Lock()
+	service.lastPruneAt = time.Now().UTC().Add(-2 * auditRetentionPruneWindow)
+	service.mu.Unlock()
+
+	current := &AuditEvent{
+		ID:        "current",
+		Timestamp: time.Now().UTC(),
+		Category:  AuditCategorySystem,
+		Action:    "current",
+	}
+	if err := service.Append(current); err != nil {
+		t.Fatalf("Append(current) error = %v", err)
+	}
+
+	result, err := service.Search(AuditSearchFilters{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if result.Total != 1 {
+		t.Fatalf("expected only current event after append-triggered prune, got %d", result.Total)
+	}
+	if len(result.Events) != 1 || result.Events[0].ID != current.ID {
+		t.Fatalf("unexpected events after append-triggered prune: %+v", result.Events)
 	}
 }

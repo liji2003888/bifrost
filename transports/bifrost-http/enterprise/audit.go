@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	DefaultAuditFileName = "audit-logs.jsonl"
+	DefaultAuditFileName       = "audit-logs.jsonl"
+	auditRetentionPruneWindow = time.Hour
 )
 
 type AuditCategory string
@@ -70,11 +71,13 @@ type AuditSearchResult struct {
 }
 
 type AuditService struct {
-	path     string
-	hmacKey  []byte
-	logger   schemas.Logger
-	mu       sync.Mutex
-	lastHash string
+	path          string
+	hmacKey       []byte
+	logger        schemas.Logger
+	retentionDays int
+	mu            sync.Mutex
+	lastHash      string
+	lastPruneAt   time.Time
 }
 
 func NewAuditService(baseDir string, cfg *AuditLogsConfig, logger schemas.Logger) (*AuditService, error) {
@@ -87,11 +90,15 @@ func NewAuditService(baseDir string, cfg *AuditLogsConfig, logger schemas.Logger
 	}
 
 	service := &AuditService{
-		path:   filepath.Join(baseDir, DefaultAuditFileName),
-		logger: logger,
+		path:          filepath.Join(baseDir, DefaultAuditFileName),
+		logger:        logger,
+		retentionDays: max(cfg.RetentionDays, 0),
 	}
 	if cfg.HMACKey != nil {
 		service.hmacKey = []byte(cfg.HMACKey.GetValue())
+	}
+	if err := service.pruneExpired(time.Now().UTC(), true); err != nil {
+		return nil, err
 	}
 	if err := service.loadLastHash(); err != nil {
 		return nil, err
@@ -144,6 +151,9 @@ func (s *AuditService) Append(event *AuditEvent) error {
 	}
 
 	s.lastHash = event.IntegrityHash
+	if err := s.pruneExpiredLocked(time.Now().UTC(), false); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -275,6 +285,100 @@ func (s *AuditService) loadLastHash() error {
 		return nil
 	}
 	s.lastHash = event.IntegrityHash
+	return nil
+}
+
+func (s *AuditService) pruneExpired(now time.Time, force bool) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pruneExpiredLocked(now, force)
+}
+
+func (s *AuditService) pruneExpiredLocked(now time.Time, force bool) error {
+	if s == nil || s.retentionDays <= 0 {
+		return nil
+	}
+
+	pruneAt := now.UTC()
+	if !force && !s.lastPruneAt.IsZero() && pruneAt.Sub(s.lastPruneAt) < auditRetentionPruneWindow {
+		return nil
+	}
+
+	file, err := os.Open(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.lastPruneAt = pruneAt
+			return nil
+		}
+		return err
+	}
+	defer file.Close()
+
+	cutoff := pruneAt.AddDate(0, 0, -s.retentionDays)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	retainedLines := make([]string, 0)
+	lastRetainedLine := ""
+	removedCount := 0
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		var event AuditEvent
+		if err := sonic.Unmarshal([]byte(line), &event); err != nil {
+			retainedLines = append(retainedLines, line)
+			lastRetainedLine = line
+			continue
+		}
+		if event.Timestamp.Before(cutoff) {
+			removedCount++
+			continue
+		}
+		retainedLines = append(retainedLines, line)
+		lastRetainedLine = line
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	s.lastPruneAt = pruneAt
+	if removedCount == 0 {
+		return nil
+	}
+
+	tmpPath := s.path + ".tmp"
+	var contents []byte
+	if len(retainedLines) > 0 {
+		contents = []byte(strings.Join(retainedLines, "\n") + "\n")
+	}
+	if err := os.WriteFile(tmpPath, contents, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+
+	if lastRetainedLine == "" {
+		s.lastHash = ""
+	} else {
+		var event AuditEvent
+		if err := sonic.Unmarshal([]byte(lastRetainedLine), &event); err != nil {
+			s.lastHash = ""
+		} else {
+			s.lastHash = event.IntegrityHash
+		}
+	}
+	if s.logger != nil {
+		s.logger.Info("pruned %d expired audit log entries", removedCount)
+	}
 	return nil
 }
 
