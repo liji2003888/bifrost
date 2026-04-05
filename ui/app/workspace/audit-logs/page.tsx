@@ -77,6 +77,7 @@ export default function AuditLogsPage() {
 		refetch: refetchAudit,
 	} = useGetAuditLogsQuery(
 		{
+			cluster: true,
 			category: category === "all" ? "" : category,
 			action: debouncedAction.trim() || undefined,
 			actor_id: debouncedActor.trim() || undefined,
@@ -96,10 +97,15 @@ export default function AuditLogsPage() {
 		isLoading: exportsLoading,
 		isFetching: exportsFetching,
 		refetch: refetchExports,
-	} = useGetLogExportsQuery(undefined, {
-		pollingInterval: 5000,
-		skipPollingIfUnfocused: true,
-	});
+	} = useGetLogExportsQuery(
+		{
+			cluster: true,
+		},
+		{
+			pollingInterval: 5000,
+			skipPollingIfUnfocused: true,
+		},
+	);
 
 	const [createLogExport, { isLoading: creatingLogExport }] = useCreateLogExportMutation();
 	const [createMCPLogExport, { isLoading: creatingMCPLogExport }] = useCreateMCPLogExportMutation();
@@ -109,6 +115,8 @@ export default function AuditLogsPage() {
 
 	const events = auditData?.events ?? [];
 	const jobs = exportsData?.jobs ?? [];
+	const auditWarnings = auditData?.warnings ?? [];
+	const exportWarnings = exportsData?.warnings ?? [];
 	const completedJobs = jobs.filter((job) => job.status === "completed").length;
 	const canPrevious = offset > 0;
 	const canNext = offset + pageSize < (auditData?.total ?? 0);
@@ -269,9 +277,19 @@ export default function AuditLogsPage() {
 								</Alert>
 							) : (
 								<>
+									{auditWarnings.length > 0 && (
+										<Alert variant="info">
+											<AlertCircle />
+											<AlertDescription>
+												{auditWarnings.length} peer{auditWarnings.length === 1 ? "" : "s"} did not return audit data during aggregation.
+											</AlertDescription>
+										</Alert>
+									)}
+
 									<Table containerClassName="max-h-[34rem]" data-testid="audit-events-table">
 										<TableHeader>
 											<TableRow>
+												<TableHead>Node</TableHead>
 												<TableHead>Time</TableHead>
 												<TableHead>Category</TableHead>
 												<TableHead>Action</TableHead>
@@ -283,13 +301,16 @@ export default function AuditLogsPage() {
 										<TableBody>
 											{events.length === 0 ? (
 												<TableRow>
-													<TableCell colSpan={6} className="h-24 text-center">
+													<TableCell colSpan={7} className="h-24 text-center">
 														<span className="text-muted-foreground text-sm">No audit events match the current filters.</span>
 													</TableCell>
 												</TableRow>
 											) : (
 												events.map((event) => (
-													<TableRow key={event.id}>
+													<TableRow key={`${event.node_id || event.address || "local"}:${event.id}`}>
+														<TableCell className="font-mono text-xs">
+															{event.node_id || event.address || auditData?.node_id || "local"}
+														</TableCell>
 														<TableCell>
 															<div className="flex flex-col gap-0.5">
 																<span>{formatTimestamp(event.timestamp)}</span>
@@ -354,6 +375,16 @@ export default function AuditLogsPage() {
 									</Alert>
 								) : (
 									<>
+										{exportWarnings.length > 0 && (
+											<Alert variant="info">
+												<AlertCircle />
+												<AlertDescription>
+													{exportWarnings.length} peer{exportWarnings.length === 1 ? "" : "s"} did not return export job data during
+													aggregation.
+												</AlertDescription>
+											</Alert>
+										)}
+
 										<div className="space-y-2">
 											<p className="text-sm font-medium">Scope</p>
 											<Select value={exportScope} onValueChange={(value) => setExportScope(value as "logs" | "mcp_logs")}>
@@ -430,6 +461,7 @@ export default function AuditLogsPage() {
 								<Table containerClassName="max-h-[34rem]" data-testid="log-exports-table">
 									<TableHeader>
 										<TableRow>
+											<TableHead>Node</TableHead>
 											<TableHead>ID</TableHead>
 											<TableHead>Scope</TableHead>
 											<TableHead>Status</TableHead>
@@ -443,13 +475,16 @@ export default function AuditLogsPage() {
 									<TableBody>
 										{jobs.length === 0 ? (
 											<TableRow>
-												<TableCell colSpan={8} className="h-24 text-center">
+												<TableCell colSpan={9} className="h-24 text-center">
 													<span className="text-muted-foreground text-sm">No export jobs have been created yet.</span>
 												</TableCell>
 											</TableRow>
 										) : (
 											jobs.map((job) => (
-												<TableRow key={job.id}>
+												<TableRow key={`${job.node_id || job.address || "local"}:${job.id}`}>
+													<TableCell className="font-mono text-xs">
+														{job.node_id || job.address || exportsData?.node_id || "local"}
+													</TableCell>
 													<TableCell className="font-mono text-xs">{job.id}</TableCell>
 													<TableCell>{job.scope}</TableCell>
 													<TableCell>
@@ -460,7 +495,7 @@ export default function AuditLogsPage() {
 													<TableCell className="text-xs">{formatTimestamp(job.created_at)}</TableCell>
 													<TableCell className="text-xs">{job.completed_at ? formatTimestamp(job.completed_at) : "-"}</TableCell>
 													<TableCell className="text-right">
-														{job.status === "completed" ? (
+														{job.status === "completed" && job.source !== "peer" ? (
 															<Button asChild variant="outline" size="sm" dataTestId={`download-export-${job.id}`}>
 																<a href={`${getApiBaseUrl()}/log-exports/${job.id}/download`}>
 																	<Download />
@@ -468,7 +503,9 @@ export default function AuditLogsPage() {
 																</a>
 															</Button>
 														) : (
-															<span className="text-muted-foreground text-xs">{job.error || "-"}</span>
+															<span className="text-muted-foreground text-xs">
+																{job.status === "completed" && job.source === "peer" ? "Download on source node" : job.error || "-"}
+															</span>
 														)}
 													</TableCell>
 												</TableRow>

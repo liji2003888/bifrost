@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/kvstore"
+	"github.com/maximhq/bifrost/framework/logstore"
 	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 	"github.com/maximhq/bifrost/transports/bifrost-http/loadbalancer"
 )
@@ -227,4 +230,201 @@ func TestCollectAlertsAggregatesPeerResponses(t *testing.T) {
 	if response.Alerts[0].Source != peerClusterSource {
 		t.Fatalf("expected remote alert source to be %q, got %+v", peerClusterSource, response.Alerts[0])
 	}
+}
+
+func TestCollectAuditLogsAggregatesPeerResponses(t *testing.T) {
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	auditDir := t.TempDir()
+	audit, err := enterprisecfg.NewAuditService(auditDir, &enterprisecfg.AuditLogsConfig{}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewAuditService() error = %v", err)
+	}
+	localTime := time.Now().UTC()
+	if err := audit.Append(&enterprisecfg.AuditEvent{
+		ID:        "local-audit",
+		Timestamp: localTime,
+		Category:  enterprisecfg.AuditCategorySystem,
+		Action:    "local",
+		Message:   "local audit event",
+	}); err != nil {
+		t.Fatalf("audit.Append() error = %v", err)
+	}
+
+	remoteTime := localTime.Add(30 * time.Second)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != clusterAuditLogsEndpoint {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get(enterprisecfg.ClusterAuthHeader); got != "cluster-secret" {
+			t.Fatalf("expected cluster auth header, got %q", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "10" {
+			t.Fatalf("expected merged limit to be forwarded, got %q", got)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(auditLogsResponse{
+			NodeID: "remote-node",
+			Total:  1,
+			Events: []clusterAuditEvent{
+				{
+					AuditEvent: enterprisecfg.AuditEvent{
+						ID:        "remote-audit",
+						Timestamp: remoteTime,
+						Category:  enterprisecfg.AuditCategorySecurityEvent,
+						Action:    "remote",
+						Message:   "remote audit event",
+					},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("Encode() error = %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		Peers:     []string{server.URL},
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, store, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService() error = %v", err)
+	}
+	defer cluster.Close()
+
+	handler := NewEnterpriseHandler(cluster, audit, nil, nil, nil, nil)
+	response := handler.collectAuditLogs(context.Background(), enterprisecfg.AuditSearchFilters{Limit: 10}, true)
+
+	if !response.Cluster {
+		t.Fatal("expected audit response to be cluster-aware")
+	}
+	if response.Total != 2 {
+		t.Fatalf("expected aggregate total of 2, got %+v", response)
+	}
+	if len(response.Events) != 2 {
+		t.Fatalf("expected local and remote audit events, got %+v", response.Events)
+	}
+	if response.Events[0].ID != "remote-audit" {
+		t.Fatalf("expected newest remote event first, got %+v", response.Events)
+	}
+	if response.Events[0].NodeID != "remote-node" || response.Events[0].Address != server.URL || response.Events[0].Source != peerClusterSource {
+		t.Fatalf("expected remote metadata to be propagated, got %+v", response.Events[0])
+	}
+	if response.Events[1].Source != localClusterSource {
+		t.Fatalf("expected local audit source to be propagated, got %+v", response.Events[1])
+	}
+}
+
+func TestCollectExportJobsAggregatesPeerResponses(t *testing.T) {
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	remoteCreated := time.Now().UTC().Add(1 * time.Minute)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != clusterLogExportsEndpoint {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get(enterprisecfg.ClusterAuthHeader); got != "cluster-secret" {
+			t.Fatalf("expected cluster auth header, got %q", got)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(logExportsResponse{
+			NodeID: "remote-node",
+			Jobs: []clusterExportJob{
+				{
+					ExportJob: enterprisecfg.ExportJob{
+						ID:        "remote-export",
+						Status:    enterprisecfg.ExportJobCompleted,
+						Scope:     enterprisecfg.ExportScopeLogs,
+						Format:    "jsonl",
+						CreatedAt: remoteCreated,
+					},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("Encode() error = %v", err)
+		}
+	}))
+	defer server.Close()
+
+	cluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		Peers:     []string{server.URL},
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, store, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService() error = %v", err)
+	}
+	defer cluster.Close()
+
+	baseDir := t.TempDir()
+	exportDir := filepath.Join(baseDir, "exports")
+	if err := os.MkdirAll(exportDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	metadata := enterprisecfg.ExportJob{
+		ID:        "local-export",
+		Status:    enterprisecfg.ExportJobCompleted,
+		Scope:     enterprisecfg.ExportScopeLogs,
+		Format:    "csv",
+		CreatedAt: remoteCreated.Add(-1 * time.Minute),
+	}
+	payload, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(exportDir, metadata.ID+".job.json"), payload, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	exportService := mustNewMinimalExportServiceForTest(t, exportDir)
+	handler := NewEnterpriseHandler(cluster, nil, exportService, nil, nil, nil)
+
+	response := handler.collectExportJobs(context.Background(), true)
+	if !response.Cluster {
+		t.Fatal("expected export jobs response to be cluster-aware")
+	}
+	if len(response.Jobs) != 2 {
+		t.Fatalf("expected local and remote export jobs, got %+v", response.Jobs)
+	}
+	if response.Jobs[0].ID != "remote-export" {
+		t.Fatalf("expected newest remote export first, got %+v", response.Jobs)
+	}
+	if response.Jobs[0].NodeID != "remote-node" || response.Jobs[0].Address != server.URL || response.Jobs[0].Source != peerClusterSource {
+		t.Fatalf("expected remote export metadata to be propagated, got %+v", response.Jobs[0])
+	}
+}
+
+func mustNewMinimalExportServiceForTest(t *testing.T, exportDir string) *enterprisecfg.LogExportService {
+	t.Helper()
+
+	baseDir := filepath.Dir(exportDir)
+	service, err := enterprisecfg.NewLogExportService(baseDir, &enterprisecfg.LogExportsConfig{
+		Enabled:     true,
+		StoragePath: exportDir,
+	}, fakeLogSearchProvider{}, nil, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewLogExportService() error = %v", err)
+	}
+	return service
+}
+
+type fakeLogSearchProvider struct{}
+
+func (fakeLogSearchProvider) Search(_ context.Context, _ *logstore.SearchFilters, _ *logstore.PaginationOptions) (*logstore.SearchResult, error) {
+	return nil, nil
+}
+
+func (fakeLogSearchProvider) SearchMCPToolLogs(_ context.Context, _ *logstore.MCPToolLogSearchFilters, _ *logstore.PaginationOptions) (*logstore.MCPToolLogSearchResult, error) {
+	return nil, nil
 }

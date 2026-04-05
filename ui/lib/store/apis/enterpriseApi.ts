@@ -21,7 +21,12 @@ export interface GetAlertsArgs {
 	cluster?: boolean;
 }
 
+export interface GetLogExportsArgs {
+	cluster?: boolean;
+}
+
 export interface GetAuditLogsArgs {
+	cluster?: boolean;
 	category?: AuditCategory | "";
 	action?: string;
 	resource_type?: string;
@@ -63,6 +68,7 @@ export const enterpriseApi = baseApi.injectEndpoints({
 				url: "/audit-logs",
 				params: compactParams({
 					category: args?.category,
+					cluster: args?.cluster ? "true" : undefined,
 					action: args?.action,
 					resource_type: args?.resource_type,
 					actor_id: args?.actor_id,
@@ -89,9 +95,12 @@ export const enterpriseApi = baseApi.injectEndpoints({
 			}),
 			providesTags: ["VaultStatus"],
 		}),
-		getLogExports: builder.query<LogExportsResponse, void>({
-			query: () => ({
+		getLogExports: builder.query<LogExportsResponse, GetLogExportsArgs | void>({
+			query: (args) => ({
 				url: "/log-exports",
+				params: compactParams({
+					cluster: args?.cluster ? "true" : undefined,
+				}),
 			}),
 			providesTags: ["LogExports"],
 		}),

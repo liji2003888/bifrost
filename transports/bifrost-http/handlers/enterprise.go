@@ -27,6 +27,8 @@ type loadBalancerStatusProvider interface {
 const (
 	clusterAlertsEndpoint          = "/_cluster/alerts"
 	clusterAdaptiveRoutingEndpoint = "/_cluster/adaptive-routing/status"
+	clusterAuditLogsEndpoint       = "/_cluster/audit-logs"
+	clusterLogExportsEndpoint      = "/_cluster/log-exports"
 )
 
 type clusterAggregationWarning struct {
@@ -36,6 +38,20 @@ type clusterAggregationWarning struct {
 
 type clusterAlertRecord struct {
 	enterprisecfg.AlertRecord
+	NodeID  string `json:"node_id,omitempty"`
+	Address string `json:"address,omitempty"`
+	Source  string `json:"source,omitempty"`
+}
+
+type clusterAuditEvent struct {
+	enterprisecfg.AuditEvent
+	NodeID  string `json:"node_id,omitempty"`
+	Address string `json:"address,omitempty"`
+	Source  string `json:"source,omitempty"`
+}
+
+type clusterExportJob struct {
+	enterprisecfg.ExportJob
 	NodeID  string `json:"node_id,omitempty"`
 	Address string `json:"address,omitempty"`
 	Source  string `json:"source,omitempty"`
@@ -67,6 +83,21 @@ type alertsResponse struct {
 	Cluster  bool                        `json:"cluster"`
 	NodeID   string                      `json:"node_id,omitempty"`
 	Alerts   []clusterAlertRecord        `json:"alerts"`
+	Warnings []clusterAggregationWarning `json:"warnings,omitempty"`
+}
+
+type auditLogsResponse struct {
+	Cluster  bool                        `json:"cluster"`
+	NodeID   string                      `json:"node_id,omitempty"`
+	Events   []clusterAuditEvent         `json:"events"`
+	Total    int                         `json:"total"`
+	Warnings []clusterAggregationWarning `json:"warnings,omitempty"`
+}
+
+type logExportsResponse struct {
+	Cluster  bool                        `json:"cluster"`
+	NodeID   string                      `json:"node_id,omitempty"`
+	Jobs     []clusterExportJob          `json:"jobs"`
 	Warnings []clusterAggregationWarning `json:"warnings,omitempty"`
 }
 
@@ -103,6 +134,12 @@ func (h *EnterpriseHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 		r.GET("/_cluster/status", h.getInternalClusterStatus)
 		r.POST("/_cluster/kv/set", h.applyClusterSet)
 		r.POST("/_cluster/kv/delete", h.applyClusterDelete)
+		if h.audit != nil {
+			r.GET(clusterAuditLogsEndpoint, h.getInternalAuditLogs)
+		}
+		if h.exports != nil {
+			r.GET(clusterLogExportsEndpoint, h.getInternalExportJobs)
+		}
 		if h.alerts != nil {
 			r.GET(clusterAlertsEndpoint, h.getInternalAlerts)
 		}
@@ -197,42 +234,28 @@ func (h *EnterpriseHandler) getAuditLogs(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "audit service is not enabled")
 		return
 	}
-
-	filters := enterprisecfg.AuditSearchFilters{
-		Category:     enterprisecfg.AuditCategory(string(ctx.QueryArgs().Peek("category"))),
-		Action:       string(ctx.QueryArgs().Peek("action")),
-		ResourceType: string(ctx.QueryArgs().Peek("resource_type")),
-		ActorID:      string(ctx.QueryArgs().Peek("actor_id")),
-		Limit:        100,
-	}
-
-	if limitStr := string(ctx.QueryArgs().Peek("limit")); limitStr != "" {
-		if limit, err := strconv.Atoi(limitStr); err == nil {
-			filters.Limit = limit
-		}
-	}
-	if offsetStr := string(ctx.QueryArgs().Peek("offset")); offsetStr != "" {
-		if offset, err := strconv.Atoi(offsetStr); err == nil {
-			filters.Offset = offset
-		}
-	}
-	if startStr := string(ctx.QueryArgs().Peek("start_time")); startStr != "" {
-		if start, err := time.Parse(time.RFC3339, startStr); err == nil {
-			filters.StartTime = &start
-		}
-	}
-	if endStr := string(ctx.QueryArgs().Peek("end_time")); endStr != "" {
-		if end, err := time.Parse(time.RFC3339, endStr); err == nil {
-			filters.EndTime = &end
-		}
-	}
-
-	result, err := h.audit.Search(filters)
+	filters, err := parseAuditFilters(ctx)
 	if err != nil {
-		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to search audit logs: %v", err))
+		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
-	SendJSON(ctx, result)
+	SendJSON(ctx, h.collectAuditLogs(clusterRequestContext(), filters, wantsClusterAggregation(ctx)))
+}
+
+func (h *EnterpriseHandler) getInternalAuditLogs(ctx *fasthttp.RequestCtx) {
+	if h.audit == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "audit service is not enabled")
+		return
+	}
+	if !h.requireClusterAuth(ctx) {
+		return
+	}
+	filters, err := parseAuditFilters(ctx)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+	SendJSON(ctx, h.collectAuditLogs(clusterRequestContext(), filters, false))
 }
 
 func (h *EnterpriseHandler) createLogsExport(ctx *fasthttp.RequestCtx) {
@@ -272,7 +295,18 @@ func (h *EnterpriseHandler) listExportJobs(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "log export service is not enabled")
 		return
 	}
-	SendJSON(ctx, map[string]any{"jobs": h.exports.ListJobs()})
+	SendJSON(ctx, h.collectExportJobs(clusterRequestContext(), wantsClusterAggregation(ctx)))
+}
+
+func (h *EnterpriseHandler) getInternalExportJobs(ctx *fasthttp.RequestCtx) {
+	if h.exports == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "log export service is not enabled")
+		return
+	}
+	if !h.requireClusterAuth(ctx) {
+		return
+	}
+	SendJSON(ctx, h.collectExportJobs(clusterRequestContext(), false))
 }
 
 func (h *EnterpriseHandler) getExportJob(ctx *fasthttp.RequestCtx) {
@@ -448,6 +482,138 @@ func (h *EnterpriseHandler) collectAlerts(ctx context.Context, includeCluster bo
 	return response
 }
 
+func (h *EnterpriseHandler) collectAuditLogs(ctx context.Context, filters enterprisecfg.AuditSearchFilters, includeCluster bool) auditLogsResponse {
+	response := auditLogsResponse{
+		Cluster: includeCluster && h.cluster != nil,
+		NodeID:  h.clusterNodeID(),
+		Events:  make([]clusterAuditEvent, 0),
+	}
+
+	if h.audit != nil {
+		localResult, err := h.audit.Search(filters)
+		if err == nil && localResult != nil {
+			response.Total += localResult.Total
+			for _, event := range localResult.Events {
+				response.Events = append(response.Events, clusterAuditEvent{
+					AuditEvent: event,
+					NodeID:     response.NodeID,
+					Source:     localClusterSource,
+				})
+			}
+		} else if err != nil {
+			response.Warnings = append(response.Warnings, clusterAggregationWarning{
+				Address: localClusterSource,
+				Error:   err.Error(),
+			})
+		}
+	}
+
+	if !includeCluster || h.cluster == nil {
+		sortClusterAuditEvents(response.Events)
+		return applyAuditPagination(response, filters)
+	}
+
+	remoteFilters := filters
+	remoteFilters.Offset = 0
+	if remoteFilters.Limit <= 0 {
+		remoteFilters.Limit = 100
+	}
+	remoteFilters.Limit += max(filters.Offset, 0)
+
+	path, err := clusterAuditLogsPath(remoteFilters)
+	if err != nil {
+		response.Warnings = append(response.Warnings, clusterAggregationWarning{
+			Address: localClusterSource,
+			Error:   err.Error(),
+		})
+		sortClusterAuditEvents(response.Events)
+		sortClusterWarnings(response.Warnings)
+		return applyAuditPagination(response, filters)
+	}
+
+	for _, peer := range h.cluster.PeerStatuses() {
+		if peer.Address == "" {
+			continue
+		}
+
+		var remote auditLogsResponse
+		if err := h.cluster.GetJSON(ctx, peer.Address, path, &remote); err != nil {
+			response.Warnings = append(response.Warnings, clusterAggregationWarning{
+				Address: peer.Address,
+				Error:   err.Error(),
+			})
+			continue
+		}
+
+		response.Total += remote.Total
+		remoteNodeID := firstNonEmptyString(remote.NodeID, peer.NodeID)
+		for _, event := range remote.Events {
+			event.NodeID = firstNonEmptyString(event.NodeID, remoteNodeID)
+			event.Address = firstNonEmptyString(event.Address, peer.Address)
+			if event.Source == "" {
+				event.Source = peerClusterSource
+			}
+			response.Events = append(response.Events, event)
+		}
+	}
+
+	sortClusterAuditEvents(response.Events)
+	sortClusterWarnings(response.Warnings)
+	return applyAuditPagination(response, filters)
+}
+
+func (h *EnterpriseHandler) collectExportJobs(ctx context.Context, includeCluster bool) logExportsResponse {
+	response := logExportsResponse{
+		Cluster: includeCluster && h.cluster != nil,
+		NodeID:  h.clusterNodeID(),
+		Jobs:    make([]clusterExportJob, 0),
+	}
+
+	if h.exports != nil {
+		for _, job := range h.exports.ListJobs() {
+			response.Jobs = append(response.Jobs, clusterExportJob{
+				ExportJob: job,
+				NodeID:    response.NodeID,
+				Source:    localClusterSource,
+			})
+		}
+	}
+
+	if !includeCluster || h.cluster == nil {
+		sortClusterExportJobs(response.Jobs)
+		return response
+	}
+
+	for _, peer := range h.cluster.PeerStatuses() {
+		if peer.Address == "" {
+			continue
+		}
+
+		var remote logExportsResponse
+		if err := h.cluster.GetJSON(ctx, peer.Address, clusterLogExportsEndpoint, &remote); err != nil {
+			response.Warnings = append(response.Warnings, clusterAggregationWarning{
+				Address: peer.Address,
+				Error:   err.Error(),
+			})
+			continue
+		}
+
+		remoteNodeID := firstNonEmptyString(remote.NodeID, peer.NodeID)
+		for _, job := range remote.Jobs {
+			job.NodeID = firstNonEmptyString(job.NodeID, remoteNodeID)
+			job.Address = firstNonEmptyString(job.Address, peer.Address)
+			if job.Source == "" {
+				job.Source = peerClusterSource
+			}
+			response.Jobs = append(response.Jobs, job)
+		}
+	}
+
+	sortClusterExportJobs(response.Jobs)
+	sortClusterWarnings(response.Warnings)
+	return response
+}
+
 func (h *EnterpriseHandler) collectAdaptiveRoutingStatus(ctx context.Context, provider schemas.ModelProvider, model string, includeCluster bool) adaptiveRoutingStatusResponse {
 	response := adaptiveRoutingStatusResponse{
 		Cluster:    includeCluster && h.cluster != nil,
@@ -547,6 +713,46 @@ func wantsClusterAggregation(ctx *fasthttp.RequestCtx) bool {
 	}
 }
 
+func parseAuditFilters(ctx *fasthttp.RequestCtx) (enterprisecfg.AuditSearchFilters, error) {
+	filters := enterprisecfg.AuditSearchFilters{
+		Category:     enterprisecfg.AuditCategory(string(ctx.QueryArgs().Peek("category"))),
+		Action:       string(ctx.QueryArgs().Peek("action")),
+		ResourceType: string(ctx.QueryArgs().Peek("resource_type")),
+		ActorID:      string(ctx.QueryArgs().Peek("actor_id")),
+		Limit:        100,
+	}
+
+	if limitStr := string(ctx.QueryArgs().Peek("limit")); limitStr != "" {
+		limit, err := strconv.Atoi(limitStr)
+		if err != nil {
+			return enterprisecfg.AuditSearchFilters{}, fmt.Errorf("invalid limit: %w", err)
+		}
+		filters.Limit = limit
+	}
+	if offsetStr := string(ctx.QueryArgs().Peek("offset")); offsetStr != "" {
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil {
+			return enterprisecfg.AuditSearchFilters{}, fmt.Errorf("invalid offset: %w", err)
+		}
+		filters.Offset = offset
+	}
+	if startStr := string(ctx.QueryArgs().Peek("start_time")); startStr != "" {
+		start, err := time.Parse(time.RFC3339, startStr)
+		if err != nil {
+			return enterprisecfg.AuditSearchFilters{}, fmt.Errorf("invalid start_time: %w", err)
+		}
+		filters.StartTime = &start
+	}
+	if endStr := string(ctx.QueryArgs().Peek("end_time")); endStr != "" {
+		end, err := time.Parse(time.RFC3339, endStr)
+		if err != nil {
+			return enterprisecfg.AuditSearchFilters{}, fmt.Errorf("invalid end_time: %w", err)
+		}
+		filters.EndTime = &end
+	}
+	return filters, nil
+}
+
 func clusterAdaptiveRoutingPath(provider schemas.ModelProvider, model string) string {
 	values := url.Values{}
 	if provider != "" {
@@ -560,6 +766,31 @@ func clusterAdaptiveRoutingPath(provider schemas.ModelProvider, model string) st
 		return clusterAdaptiveRoutingEndpoint
 	}
 	return clusterAdaptiveRoutingEndpoint + "?" + encoded
+}
+
+func clusterAuditLogsPath(filters enterprisecfg.AuditSearchFilters) (string, error) {
+	values := url.Values{}
+	if filters.Category != "" {
+		values.Set("category", string(filters.Category))
+	}
+	if strings.TrimSpace(filters.Action) != "" {
+		values.Set("action", filters.Action)
+	}
+	if strings.TrimSpace(filters.ResourceType) != "" {
+		values.Set("resource_type", filters.ResourceType)
+	}
+	if strings.TrimSpace(filters.ActorID) != "" {
+		values.Set("actor_id", filters.ActorID)
+	}
+	if filters.StartTime != nil {
+		values.Set("start_time", filters.StartTime.UTC().Format(time.RFC3339))
+	}
+	if filters.EndTime != nil {
+		values.Set("end_time", filters.EndTime.UTC().Format(time.RFC3339))
+	}
+	values.Set("limit", strconv.Itoa(max(filters.Limit, 1)))
+	values.Set("offset", "0")
+	return clusterAuditLogsEndpoint + "?" + values.Encode(), nil
 }
 
 func (h *EnterpriseHandler) clusterNodeID() string {
@@ -617,6 +848,36 @@ func sortClusterAlerts(alerts []clusterAlertRecord) {
 	})
 }
 
+func sortClusterAuditEvents(events []clusterAuditEvent) {
+	slices.SortFunc(events, func(a, b clusterAuditEvent) int {
+		if cmp := b.Timestamp.Compare(a.Timestamp); cmp != 0 {
+			return cmp
+		}
+		if cmp := strings.Compare(a.NodeID, b.NodeID); cmp != 0 {
+			return cmp
+		}
+		if cmp := strings.Compare(a.Address, b.Address); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+}
+
+func sortClusterExportJobs(jobs []clusterExportJob) {
+	slices.SortFunc(jobs, func(a, b clusterExportJob) int {
+		if cmp := b.CreatedAt.Compare(a.CreatedAt); cmp != 0 {
+			return cmp
+		}
+		if cmp := strings.Compare(a.NodeID, b.NodeID); cmp != 0 {
+			return cmp
+		}
+		if cmp := strings.Compare(a.Address, b.Address); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+}
+
 func sortClusterWarnings(warnings []clusterAggregationWarning) {
 	slices.SortFunc(warnings, func(a, b clusterAggregationWarning) int {
 		if cmp := strings.Compare(a.Address, b.Address); cmp != 0 {
@@ -624,6 +885,21 @@ func sortClusterWarnings(warnings []clusterAggregationWarning) {
 		}
 		return strings.Compare(a.Error, b.Error)
 	})
+}
+
+func applyAuditPagination(response auditLogsResponse, filters enterprisecfg.AuditSearchFilters) auditLogsResponse {
+	offset := max(filters.Offset, 0)
+	if offset >= len(response.Events) {
+		response.Events = []clusterAuditEvent{}
+		return response
+	}
+	limit := filters.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	end := min(offset+limit, len(response.Events))
+	response.Events = response.Events[offset:end]
+	return response
 }
 
 func firstNonEmptyString(values ...string) string {

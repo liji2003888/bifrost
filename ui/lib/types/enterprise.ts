@@ -76,6 +76,9 @@ export interface AuditEvent {
 	timestamp: string;
 	category: AuditCategory;
 	action: string;
+	node_id?: string;
+	address?: string;
+	source?: string;
 	resource_type?: string;
 	resource_id?: string;
 	actor_id?: string;
@@ -91,8 +94,11 @@ export interface AuditEvent {
 }
 
 export interface AuditSearchResult {
+	cluster: boolean;
+	node_id?: string;
 	events: AuditEvent[];
 	total: number;
+	warnings?: ClusterAggregationWarning[];
 }
 
 export type AlertSeverity = "info" | "warning" | "critical";
@@ -130,6 +136,9 @@ export interface ExportJob {
 	id: string;
 	status: ExportJobStatus;
 	scope: ExportScope;
+	node_id?: string;
+	address?: string;
+	source?: string;
 	format: string;
 	compression?: string;
 	file_path?: string;
@@ -140,7 +149,10 @@ export interface ExportJob {
 }
 
 export interface LogExportsResponse {
+	cluster: boolean;
+	node_id?: string;
 	jobs: ExportJob[];
+	warnings?: ClusterAggregationWarning[];
 }
 
 export interface CreateLogExportRequest {
