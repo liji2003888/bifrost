@@ -635,6 +635,70 @@ func (s *ClusterService) IsInternalTokenValid(token string) bool {
 	return strings.TrimSpace(token) == expected
 }
 
+func (s *ClusterService) NodeID() string {
+	if s == nil {
+		return ""
+	}
+	return s.nodeID
+}
+
+func (s *ClusterService) PeerStatuses() []ClusterPeerStatus {
+	if s == nil {
+		return nil
+	}
+	return s.Status().Peers
+}
+
+func (s *ClusterService) GetJSON(ctx context.Context, address, path string, out any) error {
+	if s == nil {
+		return fmt.Errorf("cluster service is not enabled")
+	}
+
+	address = normalizeClusterAddress(address)
+	if address == "" {
+		return fmt.Errorf("cluster peer address is required")
+	}
+
+	requestPath := strings.TrimSpace(path)
+	if requestPath == "" {
+		return fmt.Errorf("cluster request path is required")
+	}
+	if !strings.HasPrefix(requestPath, "/") {
+		requestPath = "/" + requestPath
+	}
+
+	requestCtx := ctx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, address+requestPath, nil)
+	if err != nil {
+		return err
+	}
+	s.addAuthHeader(req)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		message := strings.TrimSpace(string(body))
+		if message == "" {
+			message = fmt.Sprintf("peer returned status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("%s", message)
+	}
+
+	if out == nil {
+		return nil
+	}
+	return sonic.ConfigDefault.NewDecoder(resp.Body).Decode(out)
+}
+
 func normalizeClusterAddress(value string) string {
 	address := strings.TrimSpace(value)
 	if address == "" {

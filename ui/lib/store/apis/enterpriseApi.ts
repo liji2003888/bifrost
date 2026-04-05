@@ -14,6 +14,11 @@ import { baseApi } from "./baseApi";
 export interface GetAdaptiveRoutingStatusArgs {
 	provider?: string;
 	model?: string;
+	cluster?: boolean;
+}
+
+export interface GetAlertsArgs {
+	cluster?: boolean;
 }
 
 export interface GetAuditLogsArgs {
@@ -48,6 +53,7 @@ export const enterpriseApi = baseApi.injectEndpoints({
 				params: compactParams({
 					provider: args?.provider,
 					model: args?.model,
+					cluster: args?.cluster ? "true" : undefined,
 				}),
 			}),
 			providesTags: ["AdaptiveRouting"],
@@ -68,9 +74,12 @@ export const enterpriseApi = baseApi.injectEndpoints({
 			}),
 			providesTags: ["AuditLogs"],
 		}),
-		getAlerts: builder.query<AlertsResponse, void>({
-			query: () => ({
+		getAlerts: builder.query<AlertsResponse, GetAlertsArgs | void>({
+			query: (args) => ({
 				url: "/alerts",
+				params: compactParams({
+					cluster: args?.cluster ? "true" : undefined,
+				}),
 			}),
 			providesTags: ["Alerts"],
 		}),

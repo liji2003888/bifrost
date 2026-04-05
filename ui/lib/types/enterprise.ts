@@ -30,6 +30,9 @@ export interface ClusterStatus {
 }
 
 export interface AdaptiveRouteStatus {
+	node_id?: string;
+	address?: string;
+	source?: string;
 	provider: string;
 	model: string;
 	key_id: string;
@@ -43,6 +46,9 @@ export interface AdaptiveRouteStatus {
 }
 
 export interface AdaptiveDirectionStatus {
+	node_id?: string;
+	address?: string;
+	source?: string;
 	provider: string;
 	model: string;
 	score: number;
@@ -56,8 +62,11 @@ export interface AdaptiveDirectionStatus {
 }
 
 export interface AdaptiveRoutingStatusResponse {
+	cluster: boolean;
+	node_id?: string;
 	routes: AdaptiveRouteStatus[];
 	directions: AdaptiveDirectionStatus[];
+	warnings?: ClusterAggregationWarning[];
 }
 
 export type AuditCategory = "authentication" | "configuration_change" | "data_access" | "export" | "cluster" | "security_event" | "system";
@@ -92,6 +101,9 @@ export interface AlertRecord {
 	id: string;
 	key: string;
 	type: string;
+	node_id?: string;
+	address?: string;
+	source?: string;
 	severity: AlertSeverity;
 	title: string;
 	message: string;
@@ -100,7 +112,15 @@ export interface AlertRecord {
 }
 
 export interface AlertsResponse {
+	cluster: boolean;
+	node_id?: string;
 	alerts: AlertRecord[];
+	warnings?: ClusterAggregationWarning[];
+}
+
+export interface ClusterAggregationWarning {
+	address: string;
+	error: string;
 }
 
 export type ExportScope = "logs" | "mcp_logs";

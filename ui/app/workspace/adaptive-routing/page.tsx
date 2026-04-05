@@ -39,6 +39,7 @@ export default function AdaptiveRoutingPage() {
 		refetch: refetchRouting,
 	} = useGetAdaptiveRoutingStatusQuery(
 		{
+			cluster: true,
 			provider: providerFilter === "all" ? undefined : providerFilter,
 			model: debouncedModelFilter.trim() || undefined,
 		},
@@ -52,10 +53,15 @@ export default function AdaptiveRoutingPage() {
 		error: alertsError,
 		isFetching: alertsFetching,
 		refetch: refetchAlerts,
-	} = useGetAlertsQuery(undefined, {
-		pollingInterval: 15000,
-		skipPollingIfUnfocused: true,
-	});
+	} = useGetAlertsQuery(
+		{
+			cluster: true,
+		},
+		{
+			pollingInterval: 15000,
+			skipPollingIfUnfocused: true,
+		},
+	);
 
 	const routingDisabled = isServiceDisabledError(routingError);
 	const alertsDisabled = isServiceDisabledError(alertsError);
@@ -81,8 +87,24 @@ export default function AdaptiveRoutingPage() {
 		[routingStatus?.routes],
 	);
 	const activeAlerts = alertsResponse?.alerts ?? [];
+	const routingWarnings = routingStatus?.warnings ?? [];
+	const alertWarnings = alertsResponse?.warnings ?? [];
 	const degradedRoutes = routeRows.filter((route) => route.consecutive_failures > 0 || route.error_ewma >= 0.4).length;
 	const lowScoreDirections = directionRows.filter((direction) => direction.score < 0.6).length;
+	const reportingNodes = useMemo(() => {
+		const values = new Set<string>();
+		for (const route of routeRows) {
+			if (route.node_id) {
+				values.add(route.node_id);
+			}
+		}
+		for (const direction of directionRows) {
+			if (direction.node_id) {
+				values.add(direction.node_id);
+			}
+		}
+		return values.size;
+	}, [directionRows, routeRows]);
 
 	const providerOptions = useMemo(() => {
 		const values = new Set<string>();
@@ -168,8 +190,22 @@ export default function AdaptiveRoutingPage() {
 						<SummaryCard label="Tracked Routes" value={routeRows.length.toLocaleString()} icon={Route} />
 						<SummaryCard label="Direction Scores" value={directionRows.length.toLocaleString()} icon={ArrowUpDown} />
 						<SummaryCard label="Degraded Routes" value={degradedRoutes.toLocaleString()} icon={ShieldAlert} />
-						<SummaryCard label="Low-Score Directions" value={lowScoreDirections.toLocaleString()} icon={Gauge} />
+						<SummaryCard
+							label={routingStatus?.cluster ? "Nodes Reporting" : "Low-Score Directions"}
+							value={routingStatus?.cluster ? reportingNodes.toLocaleString() : lowScoreDirections.toLocaleString()}
+							icon={routingStatus?.cluster ? Gauge : Gauge}
+						/>
 					</div>
+
+					{routingWarnings.length > 0 && (
+						<Alert variant="info">
+							<AlertCircle />
+							<AlertTitle>Partial cluster aggregation</AlertTitle>
+							<AlertDescription>
+								{routingWarnings.length} peer{routingWarnings.length === 1 ? "" : "s"} could not be queried for adaptive routing status.
+							</AlertDescription>
+						</Alert>
+					)}
 
 					<Card className="shadow-none">
 						<CardHeader className="pb-3">
@@ -189,7 +225,7 @@ export default function AdaptiveRoutingPage() {
 							) : (
 								<div className="grid gap-3 lg:grid-cols-2">
 									{activeAlerts.map((alert) => (
-										<div key={alert.id} className="rounded-sm border p-4">
+										<div key={`${alert.node_id || alert.address || "local"}:${alert.id}`} className="rounded-sm border p-4">
 											<div className="flex items-start justify-between gap-3">
 												<div>
 													<p className="font-medium">{alert.title}</p>
@@ -202,12 +238,18 @@ export default function AdaptiveRoutingPage() {
 												</Badge>
 											</div>
 											<div className="text-muted-foreground mt-3 flex flex-wrap gap-4 text-xs">
+												<span>{alert.node_id || alertsResponse?.node_id || "local"}</span>
 												<span>{alert.type}</span>
 												<span>{formatRelativeTimestamp(alert.triggered_at)}</span>
 											</div>
 										</div>
 									))}
 								</div>
+							)}
+							{alertWarnings.length > 0 && (
+								<p className="text-muted-foreground mt-4 text-xs">
+									{alertWarnings.length} peer{alertWarnings.length === 1 ? "" : "s"} did not return alert data during aggregation.
+								</p>
 							)}
 						</CardContent>
 					</Card>
@@ -221,6 +263,7 @@ export default function AdaptiveRoutingPage() {
 								<Table containerClassName="max-h-[32rem]" data-testid="adaptive-directions-table">
 									<TableHeader>
 										<TableRow>
+											<TableHead>Node</TableHead>
 											<TableHead>Provider</TableHead>
 											<TableHead>Model</TableHead>
 											<TableHead>Score</TableHead>
@@ -233,13 +276,14 @@ export default function AdaptiveRoutingPage() {
 									<TableBody>
 										{directionRows.length === 0 ? (
 											<TableRow>
-												<TableCell colSpan={7} className="h-24 text-center">
+												<TableCell colSpan={8} className="h-24 text-center">
 													<span className="text-muted-foreground text-sm">No direction metrics have been collected yet.</span>
 												</TableCell>
 											</TableRow>
 										) : (
 											directionRows.map((direction) => (
-												<TableRow key={`${direction.provider}/${direction.model}`}>
+												<TableRow key={`${direction.node_id || direction.address || "local"}/${direction.provider}/${direction.model}`}>
+													<TableCell className="font-mono text-xs">{direction.node_id || direction.address || "local"}</TableCell>
 													<TableCell>{ProviderLabels[direction.provider as keyof typeof ProviderLabels] || direction.provider}</TableCell>
 													<TableCell className="font-mono text-xs">{direction.model || "*"}</TableCell>
 													<TableCell>
@@ -265,6 +309,7 @@ export default function AdaptiveRoutingPage() {
 								<Table containerClassName="max-h-[32rem]" data-testid="adaptive-routes-table">
 									<TableHeader>
 										<TableRow>
+											<TableHead>Node</TableHead>
 											<TableHead>Provider</TableHead>
 											<TableHead>Model</TableHead>
 											<TableHead>Key</TableHead>
@@ -278,7 +323,7 @@ export default function AdaptiveRoutingPage() {
 									<TableBody>
 										{routeRows.length === 0 ? (
 											<TableRow>
-												<TableCell colSpan={8} className="h-24 text-center">
+												<TableCell colSpan={9} className="h-24 text-center">
 													<span className="text-muted-foreground text-sm">No route metrics have been collected yet.</span>
 												</TableCell>
 											</TableRow>
@@ -286,7 +331,8 @@ export default function AdaptiveRoutingPage() {
 											routeRows.map((route) => {
 												const successRate = route.samples > 0 ? (route.successes / route.samples) * 100 : 0;
 												return (
-													<TableRow key={`${route.provider}/${route.model}/${route.key_id}`}>
+													<TableRow key={`${route.node_id || route.address || "local"}/${route.provider}/${route.model}/${route.key_id}`}>
+														<TableCell className="font-mono text-xs">{route.node_id || route.address || "local"}</TableCell>
 														<TableCell>{ProviderLabels[route.provider as keyof typeof ProviderLabels] || route.provider}</TableCell>
 														<TableCell className="font-mono text-xs">{route.model || "*"}</TableCell>
 														<TableCell className="font-mono text-xs">{route.key_id}</TableCell>
