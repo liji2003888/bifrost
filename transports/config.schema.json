@@ -3068,6 +3068,10 @@
             "description": "Peer address in host:port format"
           }
         },
+        "auth_token": {
+          "type": "string",
+          "description": "Optional shared token required for internal cluster replication requests. Can use env. prefix for environment variables."
+        },
         "gossip": {
           "type": "object",
           "description": "Gossip protocol configuration",

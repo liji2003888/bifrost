@@ -29,7 +29,8 @@ func TestConfigDataUnmarshalEnterpriseFields(t *testing.T) {
 		"providers": {},
 		"cluster_config": {
 			"enabled": true,
-			"region": "us-east-1"
+			"region": "us-east-1",
+			"auth_token": "env.CLUSTER_AUTH_TOKEN"
 		},
 		"load_balancer_config": {
 			"enabled": true,
@@ -65,6 +66,9 @@ func TestConfigDataUnmarshalEnterpriseFields(t *testing.T) {
 
 	if cfg.ClusterConfig == nil || !cfg.ClusterConfig.Enabled {
 		t.Fatal("expected cluster config to be parsed")
+	}
+	if cfg.ClusterConfig.AuthToken == nil {
+		t.Fatal("expected cluster auth token to be parsed")
 	}
 	if cfg.LoadBalancerConfig == nil || !cfg.LoadBalancerConfig.Enabled {
 		t.Fatal("expected load balancer config to be parsed")

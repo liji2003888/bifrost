@@ -5,6 +5,8 @@ import (
 	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
+	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/valyala/fasthttp"
 )
 
 func TestAuditServiceAppendAndSearch(t *testing.T) {
@@ -49,5 +51,15 @@ func TestAuditServiceAppendAndSearch(t *testing.T) {
 	}
 	if len(result.Events) != 1 || result.Events[0].Category != AuditCategoryExport {
 		t.Fatalf("unexpected search result: %+v", result.Events)
+	}
+}
+
+func TestResolveAuditActorIDPrefersUserID(t *testing.T) {
+	ctx := &fasthttp.RequestCtx{}
+	ctx.SetUserValue(schemas.BifrostContextKeyUserID, "admin")
+	ctx.SetUserValue(schemas.BifrostContextKeySessionToken, "secret-session")
+
+	if actorID := resolveAuditActorID(ctx); actorID != "admin" {
+		t.Fatalf("expected actor id to prefer explicit user id, got %q", actorID)
 	}
 }

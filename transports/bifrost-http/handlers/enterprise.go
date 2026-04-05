@@ -3,7 +3,9 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -11,18 +13,24 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	"github.com/maximhq/bifrost/transports/bifrost-http/loadbalancer"
 	"github.com/valyala/fasthttp"
 )
+
+type loadBalancerStatusProvider interface {
+	ListSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.RouteStatus
+}
 
 type EnterpriseHandler struct {
 	cluster *enterprisecfg.ClusterService
 	audit   *enterprisecfg.AuditService
 	exports *enterprisecfg.LogExportService
 	alerts  *enterprisecfg.AlertManager
+	lb      loadBalancerStatusProvider
 }
 
-func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager) *EnterpriseHandler {
-	if cluster == nil && audit == nil && exports == nil && alerts == nil {
+func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager, lb loadBalancerStatusProvider) *EnterpriseHandler {
+	if cluster == nil && audit == nil && exports == nil && alerts == nil && lb == nil {
 		return nil
 	}
 	return &EnterpriseHandler{
@@ -30,6 +38,7 @@ func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterpri
 		audit:   audit,
 		exports: exports,
 		alerts:  alerts,
+		lb:      lb,
 	}
 }
 
@@ -52,9 +61,13 @@ func (h *EnterpriseHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 		r.POST("/api/mcp-logs/exports", lib.ChainMiddlewares(h.createMCPLogsExport, middlewares...))
 		r.GET("/api/log-exports", lib.ChainMiddlewares(h.listExportJobs, middlewares...))
 		r.GET("/api/log-exports/{id}", lib.ChainMiddlewares(h.getExportJob, middlewares...))
+		r.GET("/api/log-exports/{id}/download", lib.ChainMiddlewares(h.downloadExportJob, middlewares...))
 	}
 	if h.alerts != nil {
 		r.GET("/api/alerts", lib.ChainMiddlewares(h.getAlerts, middlewares...))
+	}
+	if h.lb != nil {
+		r.GET("/api/adaptive-routing/status", lib.ChainMiddlewares(h.getAdaptiveRoutingStatus, middlewares...))
 	}
 }
 
@@ -71,12 +84,18 @@ func (h *EnterpriseHandler) getInternalClusterStatus(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "cluster service is not enabled")
 		return
 	}
+	if !h.requireClusterAuth(ctx) {
+		return
+	}
 	SendJSON(ctx, h.cluster.Status())
 }
 
 func (h *EnterpriseHandler) applyClusterSet(ctx *fasthttp.RequestCtx) {
 	if h.cluster == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "cluster service is not enabled")
+		return
+	}
+	if !h.requireClusterAuth(ctx) {
 		return
 	}
 
@@ -95,6 +114,9 @@ func (h *EnterpriseHandler) applyClusterSet(ctx *fasthttp.RequestCtx) {
 func (h *EnterpriseHandler) applyClusterDelete(ctx *fasthttp.RequestCtx) {
 	if h.cluster == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "cluster service is not enabled")
+		return
+	}
+	if !h.requireClusterAuth(ctx) {
 		return
 	}
 
@@ -176,7 +198,7 @@ func (h *EnterpriseHandler) createExport(ctx *fasthttp.RequestCtx, scope enterpr
 	}
 	request.Scope = scope
 
-	actorID, _ := ctx.UserValue(schemas.BifrostContextKeySessionToken).(string)
+	actorID, _ := ctx.UserValue(schemas.BifrostContextKeyUserID).(string)
 	job, err := h.exports.Submit(context.Background(), request, actorID)
 	if err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
@@ -211,10 +233,83 @@ func (h *EnterpriseHandler) getExportJob(ctx *fasthttp.RequestCtx) {
 	SendJSON(ctx, job)
 }
 
+func (h *EnterpriseHandler) downloadExportJob(ctx *fasthttp.RequestCtx) {
+	if h.exports == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "log export service is not enabled")
+		return
+	}
+	id, ok := ctx.UserValue("id").(string)
+	if !ok || id == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "missing export id")
+		return
+	}
+
+	job, file, err := h.exports.OpenJobFile(id)
+	if err != nil {
+		errMessage := err.Error()
+		switch {
+		case strings.Contains(errMessage, "not found"):
+			SendError(ctx, fasthttp.StatusNotFound, errMessage)
+		case strings.Contains(errMessage, "not completed"):
+			SendError(ctx, fasthttp.StatusConflict, errMessage)
+		default:
+			SendError(ctx, fasthttp.StatusBadRequest, errMessage)
+		}
+		return
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to stat export file: %v", err))
+		return
+	}
+
+	ctx.Response.Header.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeAttachmentName(h.exports.DownloadFileName(job))))
+	ctx.SetContentType(h.exports.DownloadContentType(job))
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	ctx.Response.Header.Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	ctx.Response.SetBodyStream(file, int(info.Size()))
+}
+
 func (h *EnterpriseHandler) getAlerts(ctx *fasthttp.RequestCtx) {
 	if h.alerts == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "alert service is not enabled")
 		return
 	}
 	SendJSON(ctx, map[string]any{"alerts": h.alerts.ListActive()})
+}
+
+func (h *EnterpriseHandler) getAdaptiveRoutingStatus(ctx *fasthttp.RequestCtx) {
+	if h.lb == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "adaptive routing is not enabled")
+		return
+	}
+
+	provider := schemas.ModelProvider(strings.TrimSpace(string(ctx.QueryArgs().Peek("provider"))))
+	model := strings.TrimSpace(string(ctx.QueryArgs().Peek("model")))
+	SendJSON(ctx, map[string]any{"routes": h.lb.ListSnapshots(provider, model)})
+}
+
+func (h *EnterpriseHandler) requireClusterAuth(ctx *fasthttp.RequestCtx) bool {
+	if h.cluster == nil {
+		return false
+	}
+	token := string(ctx.Request.Header.Peek(enterprisecfg.ClusterAuthHeader))
+	if h.cluster.IsInternalTokenValid(token) {
+		return true
+	}
+	SendError(ctx, fasthttp.StatusUnauthorized, "unauthorized cluster request")
+	return false
+}
+
+func sanitizeAttachmentName(name string) string {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "." || name == "/" || name == "" {
+		return "export.bin"
+	}
+	name = strings.ReplaceAll(name, "\"", "_")
+	name = strings.ReplaceAll(name, "\n", "_")
+	name = strings.ReplaceAll(name, "\r", "_")
+	return name
 }

@@ -32,6 +32,7 @@ import (
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
 	"github.com/maximhq/bifrost/transports/bifrost-http/integrations"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	"github.com/maximhq/bifrost/transports/bifrost-http/loadbalancer"
 	bfws "github.com/maximhq/bifrost/transports/bifrost-http/websocket"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/valyala/fasthttp"
@@ -987,7 +988,8 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	if loggerPlugin != nil {
 		loggingHandler = handlers.NewLoggingHandler(loggerPlugin.GetPluginLogManager(), s, s.Config)
 	}
-	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager)
+	loadBalancerPlugin, _ := lib.FindPluginAs[*loadbalancer.Plugin](s.Config, loadbalancer.PluginName)
+	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager, loadBalancerPlugin)
 	var governanceHandler *handlers.GovernanceHandler
 	governancePluginName := governance.PluginName
 	if name, ok := ctx.Value(schemas.BifrostContextKeyGovernancePluginName).(string); ok && name != "" {

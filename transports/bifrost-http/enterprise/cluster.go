@@ -17,6 +17,7 @@ const (
 	clusterStatusEndpoint = "/_cluster/status"
 	clusterSetEndpoint    = "/_cluster/kv/set"
 	clusterDeleteEndpoint = "/_cluster/kv/delete"
+	ClusterAuthHeader     = "X-Bifrost-Cluster-Token"
 )
 
 type ClusterMutation struct {
@@ -65,6 +66,7 @@ type ClusterService struct {
 	nodeID  string
 	kvStore *kvstore.Store
 	client  *http.Client
+	auth    string
 
 	startedAt time.Time
 	queue     chan clusterEvent
@@ -87,6 +89,7 @@ func NewClusterService(cfg *ClusterConfig, store *kvstore.Store, nodeID string, 
 		nodeID:    nodeID,
 		kvStore:   store,
 		client:    &http.Client{Timeout: clusterTimeout(cfg)},
+		auth:      clusterAuthToken(cfg),
 		startedAt: time.Now().UTC(),
 		queue:     make(chan clusterEvent, 512),
 		stopCh:    make(chan struct{}),
@@ -212,10 +215,19 @@ func (s *ClusterService) Status() ClusterStatus {
 	}
 	s.mu.RUnlock()
 
+	healthy := true
+	failureThreshold := clusterFailureThreshold(s.cfg)
+	for _, peer := range peers {
+		if peer.ConsecutiveFailures >= failureThreshold {
+			healthy = false
+			break
+		}
+	}
+
 	return ClusterStatus{
 		NodeID:    s.nodeID,
 		StartedAt: s.startedAt,
-		Healthy:   true,
+		Healthy:   healthy,
 		KVKeys:    s.kvStore.Len(),
 		Peers:     peers,
 	}
@@ -255,6 +267,7 @@ func (s *ClusterService) broadcast(event clusterEvent) {
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
+		s.addAuthHeader(req)
 
 		resp, err := s.client.Do(req)
 		if err != nil {
@@ -298,6 +311,7 @@ func (s *ClusterService) checkPeers() {
 			s.markPeerFailure(peer, err)
 			continue
 		}
+		s.addAuthHeader(req)
 		resp, err := s.client.Do(req)
 		if err != nil {
 			s.markPeerFailure(peer, err)
@@ -352,6 +366,24 @@ func (s *ClusterService) markPeerFailure(address string, err error) {
 	}
 }
 
+func (s *ClusterService) addAuthHeader(req *http.Request) {
+	if s == nil || req == nil || strings.TrimSpace(s.auth) == "" {
+		return
+	}
+	req.Header.Set(ClusterAuthHeader, s.auth)
+}
+
+func (s *ClusterService) IsInternalTokenValid(token string) bool {
+	if s == nil {
+		return false
+	}
+	expected := strings.TrimSpace(s.auth)
+	if expected == "" {
+		return true
+	}
+	return strings.TrimSpace(token) == expected
+}
+
 func normalizeClusterAddress(value string) string {
 	address := strings.TrimSpace(value)
 	if address == "" {
@@ -361,6 +393,13 @@ func normalizeClusterAddress(value string) string {
 		return strings.TrimRight(address, "/")
 	}
 	return "http://" + strings.TrimRight(address, "/")
+}
+
+func clusterAuthToken(cfg *ClusterConfig) string {
+	if cfg == nil || cfg.AuthToken == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.AuthToken.GetValue())
 }
 
 func clusterTimeout(cfg *ClusterConfig) time.Duration {

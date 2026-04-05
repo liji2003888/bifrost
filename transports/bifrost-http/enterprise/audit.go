@@ -220,7 +220,7 @@ func (s *AuditService) Middleware() schemas.BifrostHTTPMiddleware {
 			if requestID == "" {
 				requestID = string(ctx.Request.Header.Peek("X-Request-Id"))
 			}
-			actorID, _ := ctx.UserValue(schemas.BifrostContextKeySessionToken).(string)
+			actorID := resolveAuditActorID(ctx)
 
 			event := &AuditEvent{
 				Timestamp:  time.Now().UTC(),
@@ -318,6 +318,22 @@ func matchesAuditFilters(event AuditEvent, filters AuditSearchFilters) bool {
 		return false
 	}
 	return true
+}
+
+func resolveAuditActorID(ctx *fasthttp.RequestCtx) string {
+	if ctx == nil {
+		return ""
+	}
+	if actorID, _ := ctx.UserValue(schemas.BifrostContextKeyUserID).(string); strings.TrimSpace(actorID) != "" {
+		return strings.TrimSpace(actorID)
+	}
+	sessionToken, _ := ctx.UserValue(schemas.BifrostContextKeySessionToken).(string)
+	sessionToken = strings.TrimSpace(sessionToken)
+	if sessionToken == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sessionToken))
+	return "session:" + hex.EncodeToString(sum[:8])
 }
 
 func shouldAuditRequest(path, method string, statusCode int) bool {

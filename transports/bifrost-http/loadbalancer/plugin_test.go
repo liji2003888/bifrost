@@ -129,3 +129,26 @@ func TestPostLLMHookRecordsRouteMetrics(t *testing.T) {
 		t.Fatalf("expected latency EWMA to be recorded, got %v", snapshot.LatencyEWMA)
 	}
 }
+
+func TestListSnapshotsFiltersByProviderAndModel(t *testing.T) {
+	plugin, err := Init(&enterprisecfg.LoadBalancerConfig{Enabled: true}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	plugin.tracker.Observe(schemas.OpenAI, "gpt-4o", "key-a", 100, true)
+	plugin.tracker.Observe(schemas.Anthropic, "claude-sonnet", "key-b", 200, true)
+
+	openAISnapshots := plugin.ListSnapshots(schemas.OpenAI, "")
+	if len(openAISnapshots) != 1 {
+		t.Fatalf("expected one filtered snapshot, got %d", len(openAISnapshots))
+	}
+	if openAISnapshots[0].Provider != schemas.OpenAI || openAISnapshots[0].KeyID != "key-a" {
+		t.Fatalf("unexpected snapshot: %+v", openAISnapshots[0])
+	}
+
+	modelSnapshots := plugin.ListSnapshots("", "claude-sonnet")
+	if len(modelSnapshots) != 1 || modelSnapshots[0].Provider != schemas.Anthropic {
+		t.Fatalf("unexpected model filtered snapshots: %+v", modelSnapshots)
+	}
+}

@@ -6,6 +6,7 @@ type ClusterConfig struct {
 	Enabled   bool                    `json:"enabled"`
 	Region    string                  `json:"region,omitempty"`
 	Peers     []string                `json:"peers,omitempty"`
+	AuthToken *schemas.EnvVar         `json:"auth_token,omitempty"`
 	Gossip    *ClusterGossipConfig    `json:"gossip,omitempty"`
 	Discovery *ClusterDiscoveryConfig `json:"discovery,omitempty"`
 }

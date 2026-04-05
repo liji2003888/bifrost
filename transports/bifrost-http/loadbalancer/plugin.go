@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,13 @@ type RouteSnapshot struct {
 	ErrorEWMA           float64
 	LatencyEWMA         float64
 	LastUpdated         time.Time
+}
+
+type RouteStatus struct {
+	Provider schemas.ModelProvider `json:"provider"`
+	Model    string                `json:"model"`
+	KeyID    string                `json:"key_id"`
+	RouteSnapshot
 }
 
 type routeKey struct {
@@ -131,6 +139,13 @@ func (p *Plugin) Snapshot(provider schemas.ModelProvider, model, keyID string) (
 	return p.tracker.Snapshot(provider, model, keyID)
 }
 
+func (p *Plugin) ListSnapshots(provider schemas.ModelProvider, model string) []RouteStatus {
+	if p == nil || p.tracker == nil {
+		return nil
+	}
+	return p.tracker.ListSnapshots(provider, model)
+}
+
 func (t *Tracker) Observe(provider schemas.ModelProvider, model, keyID string, latencyMs float64, success bool) {
 	if provider == "" || strings.TrimSpace(keyID) == "" {
 		return
@@ -185,6 +200,60 @@ func (t *Tracker) Snapshot(provider schemas.ModelProvider, model, keyID string) 
 		LatencyEWMA:         stats.latencyEWMA,
 		LastUpdated:         stats.lastUpdated,
 	}, true
+}
+
+func (t *Tracker) ListSnapshots(provider schemas.ModelProvider, model string) []RouteStatus {
+	if t == nil {
+		return nil
+	}
+
+	snapshots := make([]RouteStatus, 0)
+	t.routes.Range(func(key, value any) bool {
+		route, ok := key.(routeKey)
+		if !ok {
+			return true
+		}
+		if provider != "" && route.provider != provider {
+			return true
+		}
+		if model != "" && route.model != model {
+			return true
+		}
+
+		stats, ok := value.(*routeStats)
+		if !ok {
+			return true
+		}
+		stats.mu.RLock()
+		snapshots = append(snapshots, RouteStatus{
+			Provider: route.provider,
+			Model:    route.model,
+			KeyID:    route.keyID,
+			RouteSnapshot: RouteSnapshot{
+				Samples:             stats.samples,
+				Successes:           stats.successes,
+				Failures:            stats.failures,
+				ConsecutiveFailures: stats.consecutiveFailures,
+				ErrorEWMA:           stats.errorEWMA,
+				LatencyEWMA:         stats.latencyEWMA,
+				LastUpdated:         stats.lastUpdated,
+			},
+		})
+		stats.mu.RUnlock()
+		return true
+	})
+
+	slices.SortFunc(snapshots, func(a, b RouteStatus) int {
+		if cmp := strings.Compare(string(a.Provider), string(b.Provider)); cmp != 0 {
+			return cmp
+		}
+		if cmp := strings.Compare(a.Model, b.Model); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.KeyID, b.KeyID)
+	})
+
+	return snapshots
 }
 
 func (t *Tracker) SelectKey(ctx *schemas.BifrostContext, keys []schemas.Key, providerKey schemas.ModelProvider, model string) (schemas.Key, error) {

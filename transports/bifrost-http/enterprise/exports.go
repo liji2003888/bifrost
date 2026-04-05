@@ -26,6 +26,8 @@ const (
 	ExportScopeMCPLogs ExportScope = "mcp_logs"
 )
 
+const exportJobMetadataExt = ".job.json"
+
 type ExportJobStatus string
 
 const (
@@ -87,7 +89,7 @@ func NewLogExportService(baseDir string, cfg *LogExportsConfig, provider LogSear
 		return nil, fmt.Errorf("failed to create export directory: %w", err)
 	}
 
-	return &LogExportService{
+	service := &LogExportService{
 		cfg:      cfg,
 		provider: provider,
 		audit:    audit,
@@ -95,7 +97,11 @@ func NewLogExportService(baseDir string, cfg *LogExportsConfig, provider LogSear
 		basePath: basePath,
 		jobs:     make(map[string]*ExportJob),
 		order:    make([]string, 0),
-	}, nil
+	}
+	if err := service.loadJobs(); err != nil {
+		return nil, err
+	}
+	return service, nil
 }
 
 func (s *LogExportService) Submit(ctx context.Context, req LogExportRequest, actorID string) (*ExportJob, error) {
@@ -126,6 +132,9 @@ func (s *LogExportService) Submit(ctx context.Context, req LogExportRequest, act
 	if compression == "" {
 		compression = strings.ToLower(strings.TrimSpace(s.cfg.Compression))
 	}
+	if compression == "none" {
+		compression = ""
+	}
 	if compression != "" && compression != "gzip" {
 		return nil, fmt.Errorf("unsupported compression: %s", compression)
 	}
@@ -143,6 +152,15 @@ func (s *LogExportService) Submit(ctx context.Context, req LogExportRequest, act
 	s.jobs[job.ID] = job
 	s.order = append(s.order, job.ID)
 	s.mu.Unlock()
+	if err := s.persistJob(job); err != nil {
+		s.mu.Lock()
+		delete(s.jobs, job.ID)
+		s.order = slices.DeleteFunc(s.order, func(id string) bool {
+			return id == job.ID
+		})
+		s.mu.Unlock()
+		return nil, fmt.Errorf("failed to persist export job metadata: %w", err)
+	}
 
 	if s.audit != nil {
 		_ = s.audit.Append(&AuditEvent{
@@ -162,6 +180,63 @@ func (s *LogExportService) Submit(ctx context.Context, req LogExportRequest, act
 
 	go s.execute(context.WithoutCancel(ctx), job.ID, req)
 	return s.cloneJob(job), nil
+}
+
+func (s *LogExportService) OpenJobFile(id string) (*ExportJob, *os.File, error) {
+	if s == nil {
+		return nil, nil, fmt.Errorf("log export service is not enabled")
+	}
+
+	job, ok := s.GetJob(id)
+	if !ok {
+		return nil, nil, fmt.Errorf("export job not found")
+	}
+	if job.Status != ExportJobCompleted {
+		return nil, nil, fmt.Errorf("export job is not completed")
+	}
+	if strings.TrimSpace(job.FilePath) == "" {
+		return nil, nil, fmt.Errorf("export file is not available")
+	}
+
+	cleanBase := filepath.Clean(s.basePath)
+	cleanPath := filepath.Clean(job.FilePath)
+	relPath, err := filepath.Rel(cleanBase, cleanPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to validate export path: %w", err)
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
+		return nil, nil, fmt.Errorf("export file path is outside the configured export directory")
+	}
+
+	file, err := os.Open(cleanPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	return job, file, nil
+}
+
+func (s *LogExportService) DownloadFileName(job *ExportJob) string {
+	if job == nil {
+		return "export.bin"
+	}
+	return filepath.Base(job.FilePath)
+}
+
+func (s *LogExportService) DownloadContentType(job *ExportJob) string {
+	if job == nil {
+		return "application/octet-stream"
+	}
+	if strings.EqualFold(strings.TrimSpace(job.Compression), "gzip") {
+		return "application/gzip"
+	}
+	switch strings.ToLower(strings.TrimSpace(job.Format)) {
+	case "csv":
+		return "text/csv; charset=utf-8"
+	case "jsonl":
+		return "application/x-ndjson"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (s *LogExportService) GetJob(id string) (*ExportJob, bool) {
@@ -496,13 +571,21 @@ func (s *LogExportService) failJob(jobID string, err error) {
 }
 
 func (s *LogExportService) updateJob(jobID string, mutate func(*ExportJob)) {
+	var snapshot *ExportJob
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	job, ok := s.jobs[jobID]
 	if !ok || job == nil {
+		s.mu.Unlock()
 		return
 	}
 	mutate(job)
+	snapshot = s.cloneJob(job)
+	s.mu.Unlock()
+
+	if err := s.persistJob(snapshot); err != nil && s.logger != nil {
+		s.logger.Warn("failed to persist export job %s metadata: %v", jobID, err)
+	}
 }
 
 func (s *LogExportService) cloneJob(job *ExportJob) *ExportJob {
@@ -511,6 +594,79 @@ func (s *LogExportService) cloneJob(job *ExportJob) *ExportJob {
 	}
 	copyJob := *job
 	return &copyJob
+}
+
+func (s *LogExportService) loadJobs() error {
+	if s == nil {
+		return nil
+	}
+
+	entries, err := os.ReadDir(s.basePath)
+	if err != nil {
+		return fmt.Errorf("failed to read export directory: %w", err)
+	}
+
+	jobs := make([]*ExportJob, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), exportJobMetadataExt) {
+			continue
+		}
+
+		payload, err := os.ReadFile(filepath.Join(s.basePath, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("failed to read export job metadata %s: %w", entry.Name(), err)
+		}
+
+		var job ExportJob
+		if err := sonic.Unmarshal(payload, &job); err != nil {
+			return fmt.Errorf("failed to parse export job metadata %s: %w", entry.Name(), err)
+		}
+		if strings.TrimSpace(job.ID) == "" {
+			continue
+		}
+		jobs = append(jobs, &job)
+	}
+
+	slices.SortFunc(jobs, func(a, b *ExportJob) int {
+		if cmp := a.CreatedAt.Compare(b.CreatedAt); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, job := range jobs {
+		s.jobs[job.ID] = s.cloneJob(job)
+		s.order = append(s.order, job.ID)
+	}
+	return nil
+}
+
+func (s *LogExportService) persistJob(job *ExportJob) error {
+	if s == nil || job == nil {
+		return nil
+	}
+
+	payload, err := sonic.Marshal(job)
+	if err != nil {
+		return err
+	}
+
+	targetPath := s.jobMetadataPath(job.ID)
+	tempPath := targetPath + ".tmp"
+	if err := os.WriteFile(tempPath, payload, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	return nil
+}
+
+func (s *LogExportService) jobMetadataPath(jobID string) string {
+	return filepath.Join(s.basePath, jobID+exportJobMetadataExt)
 }
 
 func formatFloatPtr(value *float64) string {

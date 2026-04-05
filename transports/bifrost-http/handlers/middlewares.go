@@ -498,6 +498,23 @@ func validateSession(_ *fasthttp.RequestCtx, store configstore.ConfigStore, toke
 	return true
 }
 
+func setAuthenticatedDashboardUser(ctx *fasthttp.RequestCtx, authConfig *configstore.AuthConfig, sessionToken string) {
+	if ctx == nil {
+		return
+	}
+	ctx.SetUserValue(schemas.BifrostContextKeySessionToken, sessionToken)
+	if authConfig != nil && authConfig.AdminUserName != nil {
+		ctx.SetUserValue(schemas.BifrostContextKeyUserID, authConfig.AdminUserName.GetValue())
+	}
+}
+
+func setAuthenticatedBasicUser(ctx *fasthttp.RequestCtx, username string) {
+	if ctx == nil || username == "" {
+		return
+	}
+	ctx.SetUserValue(schemas.BifrostContextKeyUserID, username)
+}
+
 // isInferenceWSEndpoint returns true for WebSocket endpoints that should use
 // standard inference auth (Bearer/Basic/VK) rather than dashboard session tokens.
 func isInferenceWSEndpoint(path string) bool {
@@ -605,6 +622,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 			if authConfig == nil || !authConfig.IsEnabled {
 				logger.Debug("auth middleware is disabled because auth config is not present or not enabled")
 				ctx.SetUserValue(schemas.BifrostContextKeySessionToken, "")
+				ctx.SetUserValue(schemas.BifrostContextKeyUserID, "")
 				next(ctx)
 				return
 			}
@@ -631,7 +649,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						if ticket != "" && m.wsTicketStore != nil {
 							sessionToken := m.wsTicketStore.Consume(ticket)
 							if sessionToken != "" && validateSession(ctx, m.store, sessionToken) {
-								ctx.SetUserValue(schemas.BifrostContextKeySessionToken, sessionToken)
+								setAuthenticatedDashboardUser(ctx, authConfig, sessionToken)
 								next(ctx)
 								return
 							}
@@ -642,7 +660,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						token := string(ctx.Request.URI().QueryArgs().Peek("token"))
 						if token != "" {
 							if validateSession(ctx, m.store, token) {
-								ctx.SetUserValue(schemas.BifrostContextKeySessionToken, token)
+								setAuthenticatedDashboardUser(ctx, authConfig, token)
 								next(ctx)
 								return
 							}
@@ -652,7 +670,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						// Fallback: cookie-based WS auth
 						cookieToken := string(ctx.Request.Header.Cookie("token"))
 						if cookieToken != "" && validateSession(ctx, m.store, cookieToken) {
-							ctx.SetUserValue(schemas.BifrostContextKeySessionToken, cookieToken)
+							setAuthenticatedDashboardUser(ctx, authConfig, cookieToken)
 							next(ctx)
 							return
 						}
@@ -664,7 +682,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 				// This supports the dashboard which relies on cookies instead of localStorage tokens.
 				cookieToken := string(ctx.Request.Header.Cookie("token"))
 				if cookieToken != "" && validateSession(ctx, m.store, cookieToken) {
-					ctx.SetUserValue(schemas.BifrostContextKeySessionToken, cookieToken)
+					setAuthenticatedDashboardUser(ctx, authConfig, cookieToken)
 					next(ctx)
 					return
 				}
@@ -709,6 +727,7 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 					SendError(ctx, fasthttp.StatusUnauthorized, "Unauthorized")
 					return
 				}
+				setAuthenticatedBasicUser(ctx, username)
 				// Continue with the next handler
 				next(ctx)
 				return
@@ -747,12 +766,13 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 						SendError(ctx, fasthttp.StatusUnauthorized, "Unauthorized")
 						return
 					}
+					setAuthenticatedBasicUser(ctx, username)
 					// Continue with the next handler
 					next(ctx)
 					return
 				}
 				// setting up session in the request
-				ctx.SetUserValue(schemas.BifrostContextKeySessionToken, token)
+				setAuthenticatedDashboardUser(ctx, authConfig, token)
 				// Continue with the next handler
 				next(ctx)
 				return
