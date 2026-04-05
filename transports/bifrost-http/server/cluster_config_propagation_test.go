@@ -827,3 +827,101 @@ func TestPropagateClusterConfigChangeAppliesPromptRepositoryStateOnRemotePeer(t 
 		t.Fatalf("expected propagated prompt session delete to remove remote session, got err=%v", err)
 	}
 }
+
+func TestPropagateClusterConfigChangeAppliesSessionStateOnRemotePeer(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+	handlers.SetLogger(bifrost.NewNoOpLogger())
+
+	remoteStore := newClusterPluginApplyStore(t)
+
+	remoteKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(remote) error = %v", err)
+	}
+	defer remoteKV.Close()
+
+	remoteCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, remoteKV, "remote-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(remote) error = %v", err)
+	}
+	defer remoteCluster.Close()
+
+	remoteServer := &BifrostHTTPServer{
+		Ctx:            schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+		Config:         &lib.Config{ConfigStore: remoteStore},
+		ClusterService: remoteCluster,
+	}
+
+	remoteRouter := router.New()
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+	defer remoteHTTPServer.Shutdown()
+
+	go func() {
+		_ = remoteHTTPServer.Serve(listener)
+	}()
+
+	localKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(local) error = %v", err)
+	}
+	defer localKV.Close()
+
+	localCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		Peers:     []string{"http://" + listener.Addr().String()},
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, localKV, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(local) error = %v", err)
+	}
+	defer localCluster.Close()
+
+	localServer := &BifrostHTTPServer{
+		ClusterService: localCluster,
+	}
+
+	session := &configstoreTables.SessionsTable{
+		Token:     "session-propagated",
+		ExpiresAt: time.Unix(1700011111, 0).UTC(),
+		CreatedAt: time.Unix(1700001111, 0).UTC(),
+		UpdatedAt: time.Unix(1700002222, 0).UTC(),
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:         handlers.ClusterConfigScopeSession,
+		SessionToken:  session.Token,
+		SessionConfig: session,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(session create) error = %v", err)
+	}
+
+	remoteSession, err := remoteStore.GetSession(context.Background(), session.Token)
+	if err != nil {
+		t.Fatalf("GetSession(remote) error = %v", err)
+	}
+	if remoteSession == nil || !remoteSession.ExpiresAt.Equal(session.ExpiresAt) {
+		t.Fatalf("unexpected remote session: %+v", remoteSession)
+	}
+
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:        handlers.ClusterConfigScopeSession,
+		SessionToken: session.Token,
+		Delete:       true,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(session delete) error = %v", err)
+	}
+
+	if remoteSession, err := remoteStore.GetSession(context.Background(), session.Token); err != nil {
+		t.Fatalf("GetSession(after delete) error = %v", err)
+	} else if remoteSession != nil {
+		t.Fatalf("expected propagated session delete to remove remote session, got %+v", remoteSession)
+	}
+}

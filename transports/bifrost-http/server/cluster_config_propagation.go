@@ -110,6 +110,8 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		return s.ApplyClusterPromptVersionConfig(ctx, change.PromptVersionID, change.PromptVersion, change.Delete)
 	case handlers.ClusterConfigScopeRoutingRule:
 		return s.ApplyClusterRoutingRuleConfig(ctx, change.RoutingRuleID, change.RoutingRule, change.Delete)
+	case handlers.ClusterConfigScopeSession:
+		return s.ApplyClusterSessionConfig(ctx, change.SessionToken, change.SessionConfig, change.Delete)
 	case handlers.ClusterConfigScopeTeam:
 		return s.ApplyClusterTeamConfig(ctx, change.TeamID, change.TeamConfig, change.Delete)
 	case handlers.ClusterConfigScopeVirtualKey:

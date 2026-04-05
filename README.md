@@ -347,3 +347,35 @@ Still intentionally not completed:
 - Cluster auto-sync for broader governance objects such as routing rules, model configs, and provider-governance metadata.
 - AWS Secrets Manager, GCP Secret Manager, and Azure Key Vault backends.
 - RBAC backend APIs, MCP with federated auth, and other enterprise-only governance surfaces that are still placeholder/fallback oriented.
+
+### 2026-04-05 21:32:51 CST | Base Commit d8b5f6fa2 | Cluster Consistency Follow-up
+
+- Added cluster propagation and peer-side apply logic for OAuth state so MCP OAuth flows remain consistent across nodes:
+  - OAuth config changes now sync after initiation, pending MCP client persistence, callback success/failure, refresh, and revoke.
+  - OAuth token create/update/delete now propagates to peers through the existing authenticated `/_cluster/config/reload` path.
+- Added prompt-repository cluster synchronization for `folders`, `prompts`, `prompt versions`, and `prompt sessions`.
+  - Prompt repository writes now fan out from the originating node.
+  - Peer nodes apply prompt repo state with preserved identifiers, timestamps, model params, and message ordering so dashboards stay consistent across nodes.
+- Added dashboard session replication for cluster deployments.
+  - Successful `/api/session/login` now propagates created sessions to peers.
+  - `/api/session/logout` now propagates session invalidation to peers.
+  - This removes the previous requirement that dashboard traffic remain sticky to the node that created the session when nodes use separate local config stores.
+- Hardened WebSocket dashboard auth behavior for clustered deployments.
+  - If a short-lived `ws-ticket` is issued on one node but the WebSocket upgrade lands on another node, auth now falls back to the synchronized session cookie instead of failing immediately.
+  - This keeps dashboard log-stream and live-update flows working correctly behind load balancers without requiring ticket-store replication.
+- Extended Cluster Mode observability to include prompt repository resource counts in the cluster status UI so the visible “Tracked Resources” summary matches the expanded sync scope.
+
+Validation completed for this follow-up:
+
+- `go test ./framework/oauth2 ./transports/bifrost-http/lib -run TestDoesNotExist`
+- `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/server ./transports/bifrost-http/enterprise ./transports/bifrost-http/integrations ./transports/bifrost-http/loadbalancer ./transports/bifrost-http/websocket`
+- `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+- `npm exec next build -- --no-lint`
+- `npm exec tsc -- --noEmit`
+
+Current cluster auto-sync scope now includes:
+
+- `client`, `auth`, `framework`, `proxy`, `provider`, and `provider governance`
+- `mcp client`, OAuth state, dashboard sessions, and built-in plugins
+- `customer`, `team`, `virtual key`, `model config`, and `routing rule`
+- prompt repository `folder`, `prompt`, `prompt version`, and `prompt session`

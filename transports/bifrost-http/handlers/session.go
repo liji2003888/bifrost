@@ -21,13 +21,15 @@ import (
 type SessionHandler struct {
 	configStore   configstore.ConfigStore
 	wsTicketStore *WSTicketStore
+	propagator    ClusterConfigPropagator
 }
 
 // NewSessionHandler creates a new session handler instance
-func NewSessionHandler(configStore configstore.ConfigStore, wsTicketStore *WSTicketStore) *SessionHandler {
+func NewSessionHandler(configStore configstore.ConfigStore, wsTicketStore *WSTicketStore, propagator ClusterConfigPropagator) *SessionHandler {
 	return &SessionHandler{
 		configStore:   configStore,
 		wsTicketStore: wsTicketStore,
+		propagator:    propagator,
 	}
 }
 
@@ -135,6 +137,16 @@ func (h *SessionHandler) login(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to create session: %v", err))
 		return
 	}
+	h.propagateClusterSessionChange(ctx, &ClusterConfigChange{
+		Scope:        ClusterConfigScopeSession,
+		SessionToken: token,
+		SessionConfig: &tables.SessionsTable{
+			Token:     session.Token,
+			ExpiresAt: session.ExpiresAt,
+			CreatedAt: session.CreatedAt,
+			UpdatedAt: session.UpdatedAt,
+		},
+	})
 
 	// Setting cookies
 	cookie := fasthttp.AcquireCookie()
@@ -194,11 +206,25 @@ func (h *SessionHandler) logout(ctx *fasthttp.RequestCtx) {
 			SendError(ctx, fasthttp.StatusInternalServerError, "Failed to invalidate session. Please try again.")
 			return
 		}
+		h.propagateClusterSessionChange(ctx, &ClusterConfigChange{
+			Scope:        ClusterConfigScopeSession,
+			SessionToken: token,
+			Delete:       true,
+		})
 	}
 
 	SendJSON(ctx, map[string]any{
 		"message": "Logout successful",
 	})
+}
+
+func (h *SessionHandler) propagateClusterSessionChange(ctx *fasthttp.RequestCtx, change *ClusterConfigChange) {
+	if h == nil || h.propagator == nil || change == nil {
+		return
+	}
+	if err := h.propagator.PropagateClusterConfigChange(ctx, change); err != nil && logger != nil {
+		logger.Warn("failed to propagate session cluster change: %v", err)
+	}
 }
 
 // issueWSTicket handles POST /api/session/ws-ticket - Issue a short-lived ticket for WebSocket auth.
@@ -209,7 +235,7 @@ func (h *SessionHandler) issueWSTicket(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "WebSocket tickets are not available")
 		return
 	}
-	sessionToken,ok := ctx.UserValue(schemas.BifrostContextKeySessionToken).(string)
+	sessionToken, ok := ctx.UserValue(schemas.BifrostContextKeySessionToken).(string)
 	if !ok {
 		SendError(ctx, fasthttp.StatusUnauthorized, "Unauthorized")
 		return

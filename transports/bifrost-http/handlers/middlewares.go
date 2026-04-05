@@ -676,8 +676,6 @@ func (m *AuthMiddleware) middleware(shouldSkip func(*configstore.AuthConfig, str
 								next(ctx)
 								return
 							}
-							SendError(ctx, fasthttp.StatusUnauthorized, "Unauthorized")
-							return
 						}
 						// Fallback: legacy ?token= param (for backward compatibility)
 						token := string(ctx.Request.URI().QueryArgs().Peek("token"))

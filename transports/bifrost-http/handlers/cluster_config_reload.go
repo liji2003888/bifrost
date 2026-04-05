@@ -31,6 +31,7 @@ const (
 	ClusterConfigScopePromptSession      ClusterConfigScope = "prompt_session"
 	ClusterConfigScopePromptVersion      ClusterConfigScope = "prompt_version"
 	ClusterConfigScopeRoutingRule        ClusterConfigScope = "routing_rule"
+	ClusterConfigScopeSession            ClusterConfigScope = "session"
 	ClusterConfigScopeTeam               ClusterConfigScope = "team"
 	ClusterConfigScopeVirtualKey         ClusterConfigScope = "virtual_key"
 )
@@ -60,6 +61,8 @@ type ClusterConfigChange struct {
 	PromptVersion      *configstoreTables.TablePromptVersion   `json:"prompt_version,omitempty"`
 	RoutingRuleID      string                                  `json:"routing_rule_id,omitempty"`
 	RoutingRule        *configstoreTables.TableRoutingRule     `json:"routing_rule,omitempty"`
+	SessionToken       string                                  `json:"session_token,omitempty"`
+	SessionConfig      *configstoreTables.SessionsTable        `json:"session_config,omitempty"`
 	TeamID             string                                  `json:"team_id,omitempty"`
 	VirtualKeyID       string                                  `json:"virtual_key_id,omitempty"`
 	Delete             bool                                    `json:"delete,omitempty"`
