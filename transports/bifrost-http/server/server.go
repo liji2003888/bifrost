@@ -990,7 +990,9 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 		loggingHandler = handlers.NewLoggingHandler(loggerPlugin.GetPluginLogManager(), s, s.Config)
 	}
 	loadBalancerPlugin, _ := lib.FindPluginAs[*loadbalancer.Plugin](s.Config, loadbalancer.PluginName)
-	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager, s.VaultService, loadBalancerPlugin)
+	clusterPropagator, _ := callbacks.(handlers.ClusterConfigPropagator)
+	clusterConfigApplier, _ := callbacks.(handlers.ClusterConfigApplier)
+	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager, s.VaultService, loadBalancerPlugin, clusterConfigApplier)
 	var governanceHandler *handlers.GovernanceHandler
 	governancePluginName := governance.PluginName
 	if name, ok := ctx.Value(schemas.BifrostContextKeyGovernancePluginName).(string); ok && name != "" {
@@ -1028,10 +1030,10 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	// Chaining all middlewares
 	// lib.ChainMiddlewares chains multiple middlewares together
 	healthHandler := handlers.NewHealthHandler(s.Config)
-	providerHandler := handlers.NewProviderHandler(callbacks, s.Config, s.Client)
+	providerHandler := handlers.NewProviderHandler(callbacks, s.Config, s.Client, clusterPropagator)
 	oauthHandler := handlers.NewOAuthHandler(s.Config.OAuthProvider, s.Client, s.Config)
 	mcpHandler := handlers.NewMCPHandler(callbacks, s.Client, s.Config, oauthHandler)
-	configHandler := handlers.NewConfigHandler(callbacks, s.Config)
+	configHandler := handlers.NewConfigHandler(callbacks, s.Config, clusterPropagator)
 	pluginsHandler := handlers.NewPluginsHandler(callbacks, s.Config.ConfigStore)
 	sessionHandler := handlers.NewSessionHandler(s.Config.ConfigStore, s.WSTicketStore)
 	promptsHandler := handlers.NewPromptsHandler(s.Config.ConfigStore)

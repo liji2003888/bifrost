@@ -39,15 +39,17 @@ type ProviderHandler struct {
 	inMemoryStore *lib.Config
 	client        *bifrost.Bifrost
 	modelsManager ModelsManager
+	propagator    ClusterConfigPropagator
 }
 
 // NewProviderHandler creates a new provider handler instance
-func NewProviderHandler(modelsManager ModelsManager, inMemoryStore *lib.Config, client *bifrost.Bifrost) *ProviderHandler {
+func NewProviderHandler(modelsManager ModelsManager, inMemoryStore *lib.Config, client *bifrost.Bifrost, propagator ClusterConfigPropagator) *ProviderHandler {
 	return &ProviderHandler{
 		dbStore:       inMemoryStore.ConfigStore,
 		inMemoryStore: inMemoryStore,
 		client:        client,
 		modelsManager: modelsManager,
+		propagator:    propagator,
 	}
 }
 
@@ -357,16 +359,16 @@ func (h *ProviderHandler) updateProvider(ctx *fasthttp.RequestCtx) {
 	}
 
 	var payload = struct {
-		Keys                     []schemas.Key                     `json:"keys"`                             // API keys for the provider
-		NetworkConfig            schemas.NetworkConfig             `json:"network_config"`                   // Network-related settings
-		ConcurrencyAndBufferSize schemas.ConcurrencyAndBufferSize  `json:"concurrency_and_buffer_size"`      // Concurrency settings
-		ProxyConfig              *schemas.ProxyConfig              `json:"proxy_config,omitempty"`           // Proxy configuration
-		SendBackRawRequest       *bool                             `json:"send_back_raw_request,omitempty"`  // Include raw request in BifrostResponse
-		SendBackRawResponse      *bool                             `json:"send_back_raw_response,omitempty"` // Include raw response in BifrostResponse
+		Keys                     []schemas.Key                     `json:"keys"`                                 // API keys for the provider
+		NetworkConfig            schemas.NetworkConfig             `json:"network_config"`                       // Network-related settings
+		ConcurrencyAndBufferSize schemas.ConcurrencyAndBufferSize  `json:"concurrency_and_buffer_size"`          // Concurrency settings
+		ProxyConfig              *schemas.ProxyConfig              `json:"proxy_config,omitempty"`               // Proxy configuration
+		SendBackRawRequest       *bool                             `json:"send_back_raw_request,omitempty"`      // Include raw request in BifrostResponse
+		SendBackRawResponse      *bool                             `json:"send_back_raw_response,omitempty"`     // Include raw response in BifrostResponse
 		StoreRawRequestResponse  *bool                             `json:"store_raw_request_response,omitempty"` // Capture raw request/response for internal logging only
-		CustomProviderConfig     *schemas.CustomProviderConfig     `json:"custom_provider_config,omitempty"` // Custom provider configuration
-		OpenAIConfig             *schemas.OpenAIConfig             `json:"openai_config,omitempty"`          // OpenAI-specific configuration
-		PricingOverrides         []schemas.ProviderPricingOverride `json:"pricing_overrides,omitempty"`      // Provider-level pricing overrides
+		CustomProviderConfig     *schemas.CustomProviderConfig     `json:"custom_provider_config,omitempty"`     // Custom provider configuration
+		OpenAIConfig             *schemas.OpenAIConfig             `json:"openai_config,omitempty"`              // OpenAI-specific configuration
+		PricingOverrides         []schemas.ProviderPricingOverride `json:"pricing_overrides,omitempty"`          // Provider-level pricing overrides
 	}{}
 
 	if err := sonic.Unmarshal(ctx.PostBody(), &payload); err != nil {
@@ -574,6 +576,12 @@ func (h *ProviderHandler) updateProvider(ctx *fasthttp.RequestCtx) {
 
 	response := h.getProviderResponseFromConfig(provider, *redactedConfig, ProviderStatusActive)
 
+	h.propagateClusterConfigChange(ctx, &ClusterConfigChange{
+		Scope:          ClusterConfigScopeProvider,
+		Provider:       provider,
+		ProviderConfig: &config,
+	})
+
 	SendJSON(ctx, response)
 }
 
@@ -598,6 +606,12 @@ func (h *ProviderHandler) deleteProvider(ctx *fasthttp.RequestCtx) {
 	response := ProviderResponse{
 		Name: provider,
 	}
+
+	h.propagateClusterConfigChange(ctx, &ClusterConfigChange{
+		Scope:    ClusterConfigScopeProvider,
+		Provider: provider,
+		Delete:   true,
+	})
 
 	SendJSON(ctx, response)
 }
@@ -1377,6 +1391,15 @@ func (h *ProviderHandler) getProviderResponseFromConfig(provider schemas.ModelPr
 		Status:                   config.Status,
 		Description:              config.Description,
 		ConfigHash:               config.ConfigHash,
+	}
+}
+
+func (h *ProviderHandler) propagateClusterConfigChange(ctx context.Context, change *ClusterConfigChange) {
+	if h == nil || h.propagator == nil || change == nil {
+		return
+	}
+	if err := h.propagator.PropagateClusterConfigChange(ctx, change); err != nil {
+		logger.Warn("failed to propagate provider cluster config change for scope %s: %v", change.Scope, err)
 	}
 }
 

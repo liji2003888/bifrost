@@ -59,14 +59,16 @@ type ConfigManager interface {
 type ConfigHandler struct {
 	store         *lib.Config
 	configManager ConfigManager
+	propagator    ClusterConfigPropagator
 }
 
 // NewConfigHandler creates a new handler for configuration management.
 // It requires the Bifrost client, a logger, and the config store.
-func NewConfigHandler(configManager ConfigManager, store *lib.Config) *ConfigHandler {
+func NewConfigHandler(configManager ConfigManager, store *lib.Config, propagator ClusterConfigPropagator) *ConfigHandler {
 	return &ConfigHandler{
 		configManager: configManager,
 		store:         store,
+		propagator:    propagator,
 	}
 }
 
@@ -620,6 +622,17 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
+	h.propagateClusterConfigChange(ctx, &ClusterConfigChange{
+		Scope:        ClusterConfigScopeClient,
+		ClientConfig: updatedConfig,
+	})
+	if shouldReloadFrameworkConfig {
+		h.propagateClusterConfigChange(ctx, &ClusterConfigChange{
+			Scope:           ClusterConfigScopeFramework,
+			FrameworkConfig: frameworkConfig,
+		})
+	}
+
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	SendJSON(ctx, map[string]any{
 		"status":  "success",
@@ -779,11 +792,25 @@ func (h *ConfigHandler) updateProxyConfig(ctx *fasthttp.RequestCtx) {
 		logger.Warn("failed to set restart required config: %v", err)
 	}
 
+	h.propagateClusterConfigChange(ctx, &ClusterConfigChange{
+		Scope:       ClusterConfigScopeProxy,
+		ProxyConfig: newProxyConfig,
+	})
+
 	ctx.SetStatusCode(fasthttp.StatusOK)
 	SendJSON(ctx, map[string]any{
 		"status":  "success",
 		"message": "proxy configuration updated successfully",
 	})
+}
+
+func (h *ConfigHandler) propagateClusterConfigChange(ctx context.Context, change *ClusterConfigChange) {
+	if h == nil || h.propagator == nil || change == nil {
+		return
+	}
+	if err := h.propagator.PropagateClusterConfigChange(ctx, change); err != nil {
+		logger.Warn("failed to propagate cluster config change for scope %s: %v", change.Scope, err)
+	}
 }
 
 // headerFilterConfigEqual compares two GlobalHeaderFilterConfig for equality

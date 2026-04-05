@@ -734,6 +734,62 @@ func (s *ClusterService) GetJSON(ctx context.Context, address, path string, out 
 	return sonic.ConfigDefault.NewDecoder(resp.Body).Decode(out)
 }
 
+func (s *ClusterService) PostJSON(ctx context.Context, address, path string, payload any, out any) error {
+	if s == nil {
+		return fmt.Errorf("cluster service is not enabled")
+	}
+
+	address = normalizeClusterAddress(address)
+	if address == "" {
+		return fmt.Errorf("cluster peer address is required")
+	}
+
+	requestPath := strings.TrimSpace(path)
+	if requestPath == "" {
+		return fmt.Errorf("cluster request path is required")
+	}
+	if !strings.HasPrefix(requestPath, "/") {
+		requestPath = "/" + requestPath
+	}
+
+	body, err := sonic.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	requestCtx := ctx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, address+requestPath, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	s.addAuthHeader(req)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		message := strings.TrimSpace(string(body))
+		if message == "" {
+			message = fmt.Sprintf("peer returned status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("%s", message)
+	}
+
+	if out == nil {
+		return nil
+	}
+	return sonic.ConfigDefault.NewDecoder(resp.Body).Decode(out)
+}
+
 func normalizeClusterAddress(value string) string {
 	address := strings.TrimSpace(value)
 	if address == "" {

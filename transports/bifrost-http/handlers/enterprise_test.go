@@ -16,11 +16,28 @@ import (
 	"github.com/maximhq/bifrost/framework/logstore"
 	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 	"github.com/maximhq/bifrost/transports/bifrost-http/loadbalancer"
+	"github.com/valyala/fasthttp"
 )
 
 type fakeLoadBalancerStatusProvider struct {
 	routes     []loadbalancer.RouteStatus
 	directions []loadbalancer.DirectionStatus
+}
+
+type fakeClusterConfigApplier struct {
+	lastChange *ClusterConfigChange
+	err        error
+}
+
+func (f *fakeClusterConfigApplier) ApplyClusterConfigChange(_ context.Context, change *ClusterConfigChange) error {
+	if f == nil {
+		return nil
+	}
+	if change != nil {
+		copyChange := *change
+		f.lastChange = &copyChange
+	}
+	return f.err
 }
 
 func (f *fakeLoadBalancerStatusProvider) ListSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.RouteStatus {
@@ -124,7 +141,7 @@ func TestCollectAdaptiveRoutingStatusAggregatesPeerResponses(t *testing.T) {
 				Score:    0.82,
 			},
 		},
-	})
+	}, nil)
 
 	response := handler.collectAdaptiveRoutingStatus(context.Background(), schemas.ModelProvider("openai"), "gpt-4", true)
 	if !response.Cluster {
@@ -158,6 +175,86 @@ func TestCollectAdaptiveRoutingStatusAggregatesPeerResponses(t *testing.T) {
 	}
 	if !foundRemote {
 		t.Fatalf("expected remote route to be present, got %+v", response.Routes)
+	}
+}
+
+func TestApplyClusterConfigReloadDelegatesToApplier(t *testing.T) {
+	SetLogger(&mockLogger{})
+
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	cluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, store, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService() error = %v", err)
+	}
+	defer cluster.Close()
+
+	applier := &fakeClusterConfigApplier{}
+	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil, applier)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+	ctx.Request.Header.Set(enterprisecfg.ClusterAuthHeader, "cluster-secret")
+	ctx.Request.SetRequestURI(ClusterConfigReloadEndpoint)
+	ctx.Request.SetBodyString(`{"scope":"provider","provider":"openai","provider_config":{"send_back_raw_response":true}}`)
+
+	handler.applyClusterConfigReload(ctx)
+
+	if ctx.Response.StatusCode() != fasthttp.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	}
+	if applier.lastChange == nil {
+		t.Fatal("expected cluster config change to be delegated")
+	}
+	if applier.lastChange.Scope != ClusterConfigScopeProvider || applier.lastChange.Provider != schemas.OpenAI {
+		t.Fatalf("unexpected delegated config change: %+v", applier.lastChange)
+	}
+	if applier.lastChange.ProviderConfig == nil || !applier.lastChange.ProviderConfig.SendBackRawResponse {
+		t.Fatalf("expected provider config payload to be preserved, got %+v", applier.lastChange.ProviderConfig)
+	}
+}
+
+func TestApplyClusterConfigReloadRejectsInvalidClusterToken(t *testing.T) {
+	SetLogger(&mockLogger{})
+
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	cluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, store, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService() error = %v", err)
+	}
+	defer cluster.Close()
+
+	applier := &fakeClusterConfigApplier{}
+	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil, applier)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+	ctx.Request.Header.Set(enterprisecfg.ClusterAuthHeader, "wrong-token")
+	ctx.Request.SetRequestURI(ClusterConfigReloadEndpoint)
+	ctx.Request.SetBodyString(`{"scope":"client","client_config":{"enable_swagger":true}}`)
+
+	handler.applyClusterConfigReload(ctx)
+
+	if ctx.Response.StatusCode() != fasthttp.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	}
+	if applier.lastChange != nil {
+		t.Fatalf("expected config change not to be delegated on auth failure, got %+v", applier.lastChange)
 	}
 }
 
@@ -209,7 +306,7 @@ func TestCollectAlertsAggregatesPeerResponses(t *testing.T) {
 	}
 	defer cluster.Close()
 
-	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil)
+	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil, nil)
 	response := handler.collectAlerts(context.Background(), true)
 
 	if !response.Cluster {
@@ -298,7 +395,7 @@ func TestCollectAuditLogsAggregatesPeerResponses(t *testing.T) {
 	}
 	defer cluster.Close()
 
-	handler := NewEnterpriseHandler(cluster, audit, nil, nil, nil, nil)
+	handler := NewEnterpriseHandler(cluster, audit, nil, nil, nil, nil, nil)
 	response := handler.collectAuditLogs(context.Background(), enterprisecfg.AuditSearchFilters{Limit: 10}, true)
 
 	if !response.Cluster {
@@ -388,7 +485,7 @@ func TestCollectExportJobsAggregatesPeerResponses(t *testing.T) {
 	}
 
 	exportService := mustNewMinimalExportServiceForTest(t, exportDir)
-	handler := NewEnterpriseHandler(cluster, nil, exportService, nil, nil, nil)
+	handler := NewEnterpriseHandler(cluster, nil, exportService, nil, nil, nil, nil)
 
 	response := handler.collectExportJobs(context.Background(), true)
 	if !response.Cluster {

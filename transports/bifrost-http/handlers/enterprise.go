@@ -108,10 +108,11 @@ type EnterpriseHandler struct {
 	alerts  *enterprisecfg.AlertManager
 	vault   *enterprisecfg.VaultService
 	lb      loadBalancerStatusProvider
+	config  ClusterConfigApplier
 }
 
-func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager, vault *enterprisecfg.VaultService, lb loadBalancerStatusProvider) *EnterpriseHandler {
-	if cluster == nil && audit == nil && exports == nil && alerts == nil && vault == nil && lb == nil {
+func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager, vault *enterprisecfg.VaultService, lb loadBalancerStatusProvider, config ClusterConfigApplier) *EnterpriseHandler {
+	if cluster == nil && audit == nil && exports == nil && alerts == nil && vault == nil && lb == nil && config == nil {
 		return nil
 	}
 	return &EnterpriseHandler{
@@ -121,6 +122,7 @@ func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterpri
 		alerts:  alerts,
 		vault:   vault,
 		lb:      lb,
+		config:  config,
 	}
 }
 
@@ -134,6 +136,9 @@ func (h *EnterpriseHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 		r.GET("/_cluster/status", h.getInternalClusterStatus)
 		r.POST("/_cluster/kv/set", h.applyClusterSet)
 		r.POST("/_cluster/kv/delete", h.applyClusterDelete)
+		if h.config != nil {
+			r.POST(ClusterConfigReloadEndpoint, h.applyClusterConfigReload)
+		}
 		if h.audit != nil {
 			r.GET(clusterAuditLogsEndpoint, h.getInternalAuditLogs)
 		}
@@ -224,6 +229,31 @@ func (h *EnterpriseHandler) applyClusterDelete(ctx *fasthttp.RequestCtx) {
 	}
 	if err := h.cluster.ApplyDelete(mutation); err != nil {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to apply cluster delete: %v", err))
+		return
+	}
+	SendJSON(ctx, map[string]any{"ok": true})
+}
+
+func (h *EnterpriseHandler) applyClusterConfigReload(ctx *fasthttp.RequestCtx) {
+	if h.cluster == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "cluster service is not enabled")
+		return
+	}
+	if h.config == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "cluster config reload is not enabled")
+		return
+	}
+	if !h.requireClusterAuth(ctx) {
+		return
+	}
+
+	var change ClusterConfigChange
+	if err := sonic.Unmarshal(ctx.PostBody(), &change); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("invalid cluster config reload payload: %v", err))
+		return
+	}
+	if err := h.config.ApplyClusterConfigChange(clusterRequestContext(), &change); err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to apply cluster config reload: %v", err))
 		return
 	}
 	SendJSON(ctx, map[string]any{"ok": true})
