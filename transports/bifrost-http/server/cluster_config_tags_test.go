@@ -59,3 +59,40 @@ func TestDedupeStoreUpdateTagsRemovesBlanksAndDuplicates(t *testing.T) {
 		t.Fatalf("expected %v, got %v", expected, tags)
 	}
 }
+
+func TestClusterConfigChangeTagsCoverEverySupportedScope(t *testing.T) {
+	scopes := []handlers.ClusterConfigScope{
+		handlers.ClusterConfigScopeClient,
+		handlers.ClusterConfigScopeAuth,
+		handlers.ClusterConfigScopeCustomer,
+		handlers.ClusterConfigScopeFolder,
+		handlers.ClusterConfigScopeFramework,
+		handlers.ClusterConfigScopeMCPClient,
+		handlers.ClusterConfigScopeModelConfig,
+		handlers.ClusterConfigScopeOAuthConfig,
+		handlers.ClusterConfigScopeOAuthToken,
+		handlers.ClusterConfigScopePlugin,
+		handlers.ClusterConfigScopeProviderGovernance,
+		handlers.ClusterConfigScopeProxy,
+		handlers.ClusterConfigScopeProvider,
+		handlers.ClusterConfigScopePrompt,
+		handlers.ClusterConfigScopePromptSession,
+		handlers.ClusterConfigScopePromptVersion,
+		handlers.ClusterConfigScopeRoutingRule,
+		handlers.ClusterConfigScopeSession,
+		handlers.ClusterConfigScopeTeam,
+		handlers.ClusterConfigScopeVirtualKey,
+	}
+
+	for _, scope := range scopes {
+		t.Run(string(scope), func(t *testing.T) {
+			tags := clusterConfigChangeTags(&handlers.ClusterConfigChange{Scope: scope})
+			if len(tags) == 0 {
+				t.Fatalf("expected non-empty tags for scope %q", scope)
+			}
+			if !slices.Contains(tags, "ClusterNodes") {
+				t.Fatalf("expected ClusterNodes tag for scope %q, got %v", scope, tags)
+			}
+		})
+	}
+}

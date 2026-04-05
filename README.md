@@ -344,7 +344,7 @@ Current supported enterprise scope after today’s work:
 Still intentionally not completed:
 
 - Consul/etcd discovery backends and a fuller gossip-based shared state plane.
-- Cluster auto-sync for broader governance objects such as routing rules, model configs, and provider-governance metadata.
+- Frontend still carries a few historical placeholder hooks for standalone `budget` / `rate-limit` mutations, but effective budget and rate-limit writes already flow through the synchronized governance resources (`virtual key / team / customer / model config / provider governance`) instead of a separate backend mutation surface.
 - AWS Secrets Manager, GCP Secret Manager, and Azure Key Vault backends.
 - RBAC backend APIs, MCP with federated auth, and other enterprise-only governance surfaces that are still placeholder/fallback oriented.
 
@@ -407,6 +407,30 @@ Current cluster auto-sync scope now includes:
 
 - `go test ./framework/oauth2 ./transports/bifrost-http/lib -run TestDoesNotExist`
 - `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/server ./transports/bifrost-http/enterprise ./transports/bifrost-http/integrations ./transports/bifrost-http/loadbalancer ./transports/bifrost-http/websocket`
+- `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+- `npm exec next build -- --no-lint`
+- `npm exec tsc -- --noEmit`
+
+### 2026-04-05 21:59:03 CST | Base Commit 6a015f91d | 剩余治理同步核查与 WebSocket 回归补强
+
+- 重新核查了治理面剩余的写入口，确认当前后端并不存在独立的 `budget` / `rate-limit` 写接口。
+  - 这两类能力的实际写路径都挂在已经完成集群同步的对象之下：`virtual key / team / customer / model config / provider governance`。
+  - 这也意味着多节点环境下，预算和限流配置的生效链路已经跟随这些治理对象自动同步，而不是额外依赖另一套未实现的后台接口。
+
+- 补强了配置变更后的 WebSocket `store_update` 回归测试，锁住两类高可用场景：
+  - 源节点在向 peer fanout 失败时，仍然会先向本节点前端页面广播缓存失效 tags，避免运维页面因为某个 peer 故障而卡在旧数据。
+  - peer 节点在成功应用 `/_cluster/config/reload` 之后，会向本节点已连接页面广播对应 tags，保证跨节点生效后 UI 立即刷新。
+
+- 新增了更完整的 cluster scope -> RTK tag 覆盖性测试。
+  - 现在所有已支持的集群同步 scope 都会被校验必须产生非空的 UI 失效标签，并统一包含 `ClusterNodes`，防止后续新增 scope 时漏掉前端刷新联动。
+
+- 文档层同步纠正了较早一轮里已经过时的“未完成项”描述，避免把已经落地的 `routing rule / model config / provider governance` 同步能力继续误记为未完成。
+
+本轮验证通过：
+
+- `go test ./transports/bifrost-http/server`
+- `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/enterprise ./transports/bifrost-http/integrations ./transports/bifrost-http/loadbalancer ./transports/bifrost-http/websocket`
+- `go test ./framework/oauth2 ./transports/bifrost-http/lib -run TestDoesNotExist`
 - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
 - `npm exec next build -- --no-lint`
 - `npm exec tsc -- --noEmit`
