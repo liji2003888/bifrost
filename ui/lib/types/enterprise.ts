@@ -6,8 +6,12 @@ export interface ClusterConfigSyncStatus {
 	in_sync?: boolean;
 	drift_domains?: string[];
 	customer_count?: number;
+	folder_count?: number;
 	model_config_count?: number;
 	provider_count?: number;
+	prompt_count?: number;
+	prompt_session_count?: number;
+	prompt_version_count?: number;
 	routing_rule_count?: number;
 	team_count?: number;
 	virtual_key_count?: number;

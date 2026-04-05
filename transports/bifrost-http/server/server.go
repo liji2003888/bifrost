@@ -1043,12 +1043,15 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	// lib.ChainMiddlewares chains multiple middlewares together
 	healthHandler := handlers.NewHealthHandler(s.Config)
 	providerHandler := handlers.NewProviderHandler(callbacks, s.Config, s.Client, clusterPropagator)
-	oauthHandler := handlers.NewOAuthHandler(s.Config.OAuthProvider, s.Client, s.Config)
+	if s.Config.OAuthProvider != nil {
+		s.Config.OAuthProvider.SetSyncHook(s)
+	}
+	oauthHandler := handlers.NewOAuthHandler(s.Config.OAuthProvider, s.Client, s.Config, clusterPropagator)
 	mcpHandler := handlers.NewMCPHandler(callbacks, s.Client, s.Config, oauthHandler, clusterPropagator)
 	configHandler := handlers.NewConfigHandler(callbacks, s.Config, clusterPropagator)
 	pluginsHandler := handlers.NewPluginsHandler(callbacks, s.Config.ConfigStore, clusterPropagator)
 	sessionHandler := handlers.NewSessionHandler(s.Config.ConfigStore, s.WSTicketStore)
-	promptsHandler := handlers.NewPromptsHandler(s.Config.ConfigStore)
+	promptsHandler := handlers.NewPromptsHandler(s.Config.ConfigStore, clusterPropagator)
 	// Going ahead with API handlers
 	healthHandler.RegisterRoutes(s.Router, middlewares...)
 	providerHandler.RegisterRoutes(s.Router, middlewares...)

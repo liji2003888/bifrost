@@ -16,13 +16,15 @@ import (
 
 // PromptsHandler handles prompt repository endpoints
 type PromptsHandler struct {
-	store configstore.ConfigStore
+	store      configstore.ConfigStore
+	propagator ClusterConfigPropagator
 }
 
 // NewPromptsHandler creates a new PromptsHandler
-func NewPromptsHandler(store configstore.ConfigStore) *PromptsHandler {
+func NewPromptsHandler(store configstore.ConfigStore, propagator ClusterConfigPropagator) *PromptsHandler {
 	return &PromptsHandler{
-		store: store,
+		store:      store,
+		propagator: propagator,
 	}
 }
 
@@ -217,6 +219,11 @@ func (h *PromptsHandler) createFolder(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:        ClusterConfigScopeFolder,
+		FolderID:     folder.ID,
+		FolderConfig: clonePromptFolder(folder),
+	})
 
 	SendJSON(ctx, map[string]any{
 		"folder": folder,
@@ -265,6 +272,11 @@ func (h *PromptsHandler) updateFolder(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:        ClusterConfigScopeFolder,
+		FolderID:     folder.ID,
+		FolderConfig: clonePromptFolder(folder),
+	})
 
 	SendJSON(ctx, map[string]any{
 		"folder": folder,
@@ -293,6 +305,11 @@ func (h *PromptsHandler) deleteFolder(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:    ClusterConfigScopeFolder,
+		FolderID: id,
+		Delete:   true,
+	})
 
 	SendJSON(ctx, map[string]any{
 		"message": "folder deleted successfully",
@@ -391,6 +408,11 @@ func (h *PromptsHandler) createPrompt(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:        ClusterConfigScopePrompt,
+		PromptID:     prompt.ID,
+		PromptConfig: clonePromptEntity(prompt),
+	})
 
 	SendJSON(ctx, map[string]any{
 		"prompt": prompt,
@@ -464,6 +486,11 @@ func (h *PromptsHandler) updatePrompt(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:        ClusterConfigScopePrompt,
+		PromptID:     prompt.ID,
+		PromptConfig: clonePromptEntity(prompt),
+	})
 
 	SendJSON(ctx, map[string]any{
 		"prompt": prompt,
@@ -492,6 +519,11 @@ func (h *PromptsHandler) deletePrompt(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:    ClusterConfigScopePrompt,
+		PromptID: id,
+		Delete:   true,
+	})
 
 	SendJSON(ctx, map[string]any{
 		"message": "prompt deleted successfully",
@@ -618,6 +650,11 @@ func (h *PromptsHandler) createVersion(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopePromptVersion,
+		PromptVersionID: version.ID,
+		PromptVersion:   clonePromptVersionEntity(version),
+	})
 
 	SendJSON(ctx, map[string]any{
 		"version": version,
@@ -651,6 +688,11 @@ func (h *PromptsHandler) deleteVersion(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopePromptVersion,
+		PromptVersionID: uint(id),
+		Delete:          true,
+	})
 
 	SendJSON(ctx, map[string]any{
 		"message": "version deleted successfully",
@@ -814,6 +856,11 @@ func (h *PromptsHandler) createSession(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopePromptSession,
+		PromptSessionID: session.ID,
+		PromptSession:   clonePromptSessionEntity(session),
+	})
 
 	SendJSON(ctx, map[string]any{
 		"session": session,
@@ -877,6 +924,11 @@ func (h *PromptsHandler) updateSession(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopePromptSession,
+		PromptSessionID: session.ID,
+		PromptSession:   clonePromptSessionEntity(session),
+	})
 
 	SendJSON(ctx, map[string]any{
 		"session": session,
@@ -910,6 +962,11 @@ func (h *PromptsHandler) deleteSession(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopePromptSession,
+		PromptSessionID: uint(id),
+		Delete:          true,
+	})
 
 	SendJSON(ctx, map[string]any{
 		"message": "session deleted successfully",
@@ -958,6 +1015,11 @@ func (h *PromptsHandler) renameSession(ctx *fasthttp.RequestCtx) {
 	}
 
 	session.Name = req.Name
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopePromptSession,
+		PromptSessionID: session.ID,
+		PromptSession:   clonePromptSessionEntity(session),
+	})
 	SendJSON(ctx, map[string]any{
 		"session": session,
 	})
@@ -1026,6 +1088,11 @@ func (h *PromptsHandler) commitSession(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, err.Error())
 		return
 	}
+	h.propagateClusterChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopePromptVersion,
+		PromptVersionID: version.ID,
+		PromptVersion:   clonePromptVersionEntity(version),
+	})
 
 	SendJSON(ctx, map[string]any{
 		"version": version,

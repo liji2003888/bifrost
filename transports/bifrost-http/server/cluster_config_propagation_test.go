@@ -519,3 +519,311 @@ func TestPropagateClusterConfigChangeAppliesBuiltinPluginConfigOnRemotePeer(t *t
 		t.Fatalf("expected propagated plugin delete to remove remote config, got err=%v", err)
 	}
 }
+
+func TestPropagateClusterConfigChangeAppliesOAuthStateOnRemotePeer(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+	handlers.SetLogger(bifrost.NewNoOpLogger())
+
+	remoteStore := newClusterPluginApplyStore(t)
+
+	remoteKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(remote) error = %v", err)
+	}
+	defer remoteKV.Close()
+
+	remoteCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, remoteKV, "remote-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(remote) error = %v", err)
+	}
+	defer remoteCluster.Close()
+
+	remoteServer := &BifrostHTTPServer{
+		Ctx:            schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+		Config:         &lib.Config{ConfigStore: remoteStore},
+		ClusterService: remoteCluster,
+	}
+
+	remoteRouter := router.New()
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+	defer remoteHTTPServer.Shutdown()
+
+	go func() {
+		_ = remoteHTTPServer.Serve(listener)
+	}()
+
+	localKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(local) error = %v", err)
+	}
+	defer localKV.Close()
+
+	localCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		Peers:     []string{"http://" + listener.Addr().String()},
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, localKV, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(local) error = %v", err)
+	}
+	defer localCluster.Close()
+
+	localServer := &BifrostHTTPServer{
+		ClusterService: localCluster,
+	}
+
+	token := &handlers.ClusterOAuthToken{
+		ID:           "oauth-token-propagated",
+		AccessToken:  "remote-access-token",
+		RefreshToken: "remote-refresh-token",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Unix(1700003600, 0).UTC(),
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:        handlers.ClusterConfigScopeOAuthToken,
+		OAuthTokenID: token.ID,
+		OAuthToken:   token,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(oauth token create) error = %v", err)
+	}
+
+	oauthConfig := &handlers.ClusterOAuthConfig{
+		ID:                  "oauth-config-propagated",
+		ClientID:            "client-id",
+		ClientSecret:        "client-secret",
+		AuthorizeURL:        "https://auth.example.com/authorize",
+		TokenURL:            "https://auth.example.com/token",
+		RedirectURI:         "https://gateway.example.com/api/oauth/callback",
+		Scopes:              `["read","write"]`,
+		State:               "state-token",
+		CodeVerifier:        "code-verifier",
+		CodeChallenge:       "code-challenge",
+		Status:              "authorized",
+		TokenID:             bifrost.Ptr(token.ID),
+		MCPClientConfigJSON: bifrost.Ptr(`{"id":"mcp-client-1","name":"docs-client"}`),
+		ExpiresAt:           time.Unix(1700001800, 0).UTC(),
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:         handlers.ClusterConfigScopeOAuthConfig,
+		OAuthConfigID: oauthConfig.ID,
+		OAuthConfig:   oauthConfig,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(oauth config create/update) error = %v", err)
+	}
+
+	remoteToken, err := remoteStore.GetOauthTokenByID(context.Background(), token.ID)
+	if err != nil {
+		t.Fatalf("GetOauthTokenByID(remote) error = %v", err)
+	}
+	if remoteToken == nil || remoteToken.AccessToken != "remote-access-token" {
+		t.Fatalf("unexpected remote oauth token: %+v", remoteToken)
+	}
+
+	remoteConfig, err := remoteStore.GetOauthConfigByID(context.Background(), oauthConfig.ID)
+	if err != nil {
+		t.Fatalf("GetOauthConfigByID(remote) error = %v", err)
+	}
+	if remoteConfig == nil || remoteConfig.TokenID == nil || *remoteConfig.TokenID != token.ID || remoteConfig.Status != "authorized" {
+		t.Fatalf("unexpected remote oauth config: %+v", remoteConfig)
+	}
+
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:        handlers.ClusterConfigScopeOAuthToken,
+		OAuthTokenID: token.ID,
+		Delete:       true,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(oauth token delete) error = %v", err)
+	}
+
+	if token, err := remoteStore.GetOauthTokenByID(context.Background(), token.ID); err != nil {
+		t.Fatalf("GetOauthTokenByID(after delete) error = %v", err)
+	} else if token != nil {
+		t.Fatalf("expected propagated oauth token delete to remove remote token, got %+v", token)
+	}
+}
+
+func TestPropagateClusterConfigChangeAppliesPromptRepositoryStateOnRemotePeer(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+	handlers.SetLogger(bifrost.NewNoOpLogger())
+
+	remoteStore := newClusterPluginApplyStore(t)
+
+	remoteKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(remote) error = %v", err)
+	}
+	defer remoteKV.Close()
+
+	remoteCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, remoteKV, "remote-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(remote) error = %v", err)
+	}
+	defer remoteCluster.Close()
+
+	remoteServer := &BifrostHTTPServer{
+		Ctx:            schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+		Config:         &lib.Config{ConfigStore: remoteStore},
+		ClusterService: remoteCluster,
+	}
+
+	remoteRouter := router.New()
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+	defer remoteHTTPServer.Shutdown()
+
+	go func() {
+		_ = remoteHTTPServer.Serve(listener)
+	}()
+
+	localKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(local) error = %v", err)
+	}
+	defer localKV.Close()
+
+	localCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		Peers:     []string{"http://" + listener.Addr().String()},
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, localKV, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(local) error = %v", err)
+	}
+	defer localCluster.Close()
+
+	localServer := &BifrostHTTPServer{
+		ClusterService: localCluster,
+	}
+
+	description := "Shared prompt repository"
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:    handlers.ClusterConfigScopeFolder,
+		FolderID: "folder-propagated",
+		FolderConfig: &configstoreTables.TableFolder{
+			ID:          "folder-propagated",
+			Name:        "Shared",
+			Description: &description,
+			CreatedAt:   time.Unix(1700000100, 0).UTC(),
+			UpdatedAt:   time.Unix(1700000100, 0).UTC(),
+		},
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(folder) error = %v", err)
+	}
+
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:    handlers.ClusterConfigScopePrompt,
+		PromptID: "prompt-propagated",
+		PromptConfig: &configstoreTables.TablePrompt{
+			ID:        "prompt-propagated",
+			Name:      "Support Reply",
+			FolderID:  bifrost.Ptr("folder-propagated"),
+			CreatedAt: time.Unix(1700000101, 0).UTC(),
+			UpdatedAt: time.Unix(1700000101, 0).UTC(),
+		},
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(prompt) error = %v", err)
+	}
+
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:           handlers.ClusterConfigScopePromptVersion,
+		PromptVersionID: 91,
+		PromptVersion: &configstoreTables.TablePromptVersion{
+			ID:            91,
+			PromptID:      "prompt-propagated",
+			VersionNumber: 2,
+			CommitMessage: "Cluster sync",
+			ModelParams:   configstoreTables.ModelParams{"temperature": 0.1},
+			Provider:      "openai",
+			Model:         "gpt-4.1",
+			IsLatest:      true,
+			CreatedAt:     time.Unix(1700000102, 0).UTC(),
+			Messages: []configstoreTables.TablePromptVersionMessage{
+				{ID: 701, PromptID: "prompt-propagated", VersionID: 91, OrderIndex: 0, Message: configstoreTables.PromptMessage(`{"role":"system","content":"Be helpful."}`)},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(prompt version) error = %v", err)
+	}
+
+	versionID := uint(91)
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:           handlers.ClusterConfigScopePromptSession,
+		PromptSessionID: 92,
+		PromptSession: &configstoreTables.TablePromptSession{
+			ID:          92,
+			PromptID:    "prompt-propagated",
+			VersionID:   &versionID,
+			Name:        "Draft",
+			ModelParams: configstoreTables.ModelParams{"temperature": 0.2},
+			Provider:    "openai",
+			Model:       "gpt-4.1",
+			CreatedAt:   time.Unix(1700000103, 0).UTC(),
+			UpdatedAt:   time.Unix(1700000104, 0).UTC(),
+			Messages: []configstoreTables.TablePromptSessionMessage{
+				{ID: 801, PromptID: "prompt-propagated", SessionID: 92, OrderIndex: 0, Message: configstoreTables.PromptMessage(`{"role":"assistant","content":"Draft response"}`)},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(prompt session) error = %v", err)
+	}
+
+	remoteFolder, err := remoteStore.GetFolderByID(context.Background(), "folder-propagated")
+	if err != nil {
+		t.Fatalf("GetFolderByID(remote) error = %v", err)
+	}
+	if remoteFolder.Name != "Shared" {
+		t.Fatalf("unexpected remote folder: %+v", remoteFolder)
+	}
+
+	remotePrompt, err := remoteStore.GetPromptByID(context.Background(), "prompt-propagated")
+	if err != nil {
+		t.Fatalf("GetPromptByID(remote) error = %v", err)
+	}
+	if remotePrompt.FolderID == nil || *remotePrompt.FolderID != "folder-propagated" {
+		t.Fatalf("unexpected remote prompt: %+v", remotePrompt)
+	}
+
+	remoteVersion, err := remoteStore.GetPromptVersionByID(context.Background(), 91)
+	if err != nil {
+		t.Fatalf("GetPromptVersionByID(remote) error = %v", err)
+	}
+	if remoteVersion.VersionNumber != 2 || len(remoteVersion.Messages) != 1 {
+		t.Fatalf("unexpected remote prompt version: %+v", remoteVersion)
+	}
+
+	remoteSession, err := remoteStore.GetPromptSessionByID(context.Background(), 92)
+	if err != nil {
+		t.Fatalf("GetPromptSessionByID(remote) error = %v", err)
+	}
+	if remoteSession.Name != "Draft" || remoteSession.VersionID == nil || *remoteSession.VersionID != 91 {
+		t.Fatalf("unexpected remote prompt session: %+v", remoteSession)
+	}
+
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:           handlers.ClusterConfigScopePromptSession,
+		PromptSessionID: 92,
+		Delete:          true,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(prompt session delete) error = %v", err)
+	}
+	if _, err := remoteStore.GetPromptSessionByID(context.Background(), 92); !errors.Is(err, configstore.ErrNotFound) {
+		t.Fatalf("expected propagated prompt session delete to remove remote session, got err=%v", err)
+	}
+}

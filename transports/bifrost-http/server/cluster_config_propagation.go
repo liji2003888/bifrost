@@ -76,12 +76,18 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		return s.ApplyClusterAuthConfig(ctx, change.AuthConfig, change.FlushSessions)
 	case handlers.ClusterConfigScopeCustomer:
 		return s.ApplyClusterCustomerConfig(ctx, change.CustomerID, change.CustomerConfig, change.Delete)
+	case handlers.ClusterConfigScopeFolder:
+		return s.ApplyClusterFolderConfig(ctx, change.FolderID, change.FolderConfig, change.Delete)
 	case handlers.ClusterConfigScopeFramework:
 		return s.ApplyClusterFrameworkConfig(ctx, change.FrameworkConfig)
 	case handlers.ClusterConfigScopeMCPClient:
 		return s.ApplyClusterMCPClientConfig(ctx, change.MCPClientID, change.MCPClientConfig, change.Delete)
 	case handlers.ClusterConfigScopeModelConfig:
 		return s.ApplyClusterModelConfig(ctx, change.ModelConfigID, change.ModelConfig, change.Delete)
+	case handlers.ClusterConfigScopeOAuthConfig:
+		return s.ApplyClusterOAuthConfig(ctx, change.OAuthConfigID, change.OAuthConfig)
+	case handlers.ClusterConfigScopeOAuthToken:
+		return s.ApplyClusterOAuthToken(ctx, change.OAuthTokenID, change.OAuthToken, change.Delete)
 	case handlers.ClusterConfigScopePlugin:
 		return s.ApplyClusterPluginConfig(ctx, change.PluginName, change.PluginConfig, change.Delete)
 	case handlers.ClusterConfigScopeProviderGovernance:
@@ -96,6 +102,12 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 			return s.RemoveProvider(ctx, change.Provider)
 		}
 		return s.ApplyClusterProviderConfig(ctx, change.Provider, change.ProviderConfig)
+	case handlers.ClusterConfigScopePrompt:
+		return s.ApplyClusterPromptConfig(ctx, change.PromptID, change.PromptConfig, change.Delete)
+	case handlers.ClusterConfigScopePromptSession:
+		return s.ApplyClusterPromptSessionConfig(ctx, change.PromptSessionID, change.PromptSession, change.Delete)
+	case handlers.ClusterConfigScopePromptVersion:
+		return s.ApplyClusterPromptVersionConfig(ctx, change.PromptVersionID, change.PromptVersion, change.Delete)
 	case handlers.ClusterConfigScopeRoutingRule:
 		return s.ApplyClusterRoutingRuleConfig(ctx, change.RoutingRuleID, change.RoutingRule, change.Delete)
 	case handlers.ClusterConfigScopeTeam:

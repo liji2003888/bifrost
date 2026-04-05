@@ -25,6 +25,13 @@ import (
 type OAuth2Provider struct {
 	configStore configstore.ConfigStore
 	mu          sync.RWMutex
+	syncHookMu  sync.RWMutex
+	syncHook    SyncHook
+}
+
+type SyncHook interface {
+	OAuthConfigChanged(ctx context.Context, config *tables.TableOauthConfig) error
+	OAuthTokenChanged(ctx context.Context, token *tables.TableOauthToken, deleted bool) error
 }
 
 // NewOAuth2Provider creates a new OAuth provider instance
@@ -36,6 +43,15 @@ func NewOAuth2Provider(configStore configstore.ConfigStore, logger schemas.Logge
 	return &OAuth2Provider{
 		configStore: configStore,
 	}
+}
+
+func (p *OAuth2Provider) SetSyncHook(syncHook SyncHook) {
+	if p == nil {
+		return
+	}
+	p.syncHookMu.Lock()
+	defer p.syncHookMu.Unlock()
+	p.syncHook = syncHook
 }
 
 // GetAccessToken retrieves the access token for a given oauth_config_id
@@ -133,6 +149,7 @@ func (p *OAuth2Provider) RefreshAccessToken(ctx context.Context, oauthConfigID s
 	if err := p.configStore.UpdateOauthToken(ctx, token); err != nil {
 		return fmt.Errorf("failed to update token: %w", err)
 	}
+	p.notifyOAuthTokenChanged(ctx, token, false)
 
 	logger.Debug("OAuth token refreshed successfully oauth_config_id : %s", oauthConfigID)
 
@@ -185,6 +202,7 @@ func (p *OAuth2Provider) RevokeToken(ctx context.Context, oauthConfigID string) 
 	if err := p.configStore.DeleteOauthToken(ctx, token.ID); err != nil {
 		return fmt.Errorf("failed to delete token: %w", err)
 	}
+	p.notifyOAuthTokenChanged(ctx, token, true)
 
 	// Update oauth_config to remove token reference and mark as revoked
 	oauthConfig.TokenID = nil
@@ -192,6 +210,7 @@ func (p *OAuth2Provider) RevokeToken(ctx context.Context, oauthConfigID string) 
 	if err := p.configStore.UpdateOauthConfig(ctx, oauthConfig); err != nil {
 		return fmt.Errorf("failed to update oauth config: %w", err)
 	}
+	p.notifyOAuthConfigChanged(ctx, oauthConfig)
 
 	logger.Info("OAuth token revoked", "oauth_config_id", oauthConfigID)
 
@@ -222,6 +241,7 @@ func (p *OAuth2Provider) StorePendingMCPClient(oauthConfigID string, mcpClientCo
 	if err := p.configStore.UpdateOauthConfig(ctx, oauthConfig); err != nil {
 		return fmt.Errorf("failed to update oauth config with MCP client config: %w", err)
 	}
+	p.notifyOAuthConfigChanged(ctx, oauthConfig)
 
 	logger.Debug("Stored pending MCP client config", "oauth_config_id", oauthConfigID)
 	return nil
@@ -305,6 +325,7 @@ func (p *OAuth2Provider) RemovePendingMCPClient(oauthConfigID string) error {
 	if err := p.configStore.UpdateOauthConfig(ctx, oauthConfig); err != nil {
 		return fmt.Errorf("failed to clear pending MCP client config: %w", err)
 	}
+	p.notifyOAuthConfigChanged(ctx, oauthConfig)
 
 	logger.Debug("Removed pending MCP client config", "oauth_config_id", oauthConfigID)
 	return nil
@@ -458,6 +479,7 @@ func (p *OAuth2Provider) InitiateOAuthFlow(ctx context.Context, config *schemas.
 	if err := p.configStore.CreateOauthConfig(ctx, oauthConfigRecord); err != nil {
 		return nil, fmt.Errorf("failed to create oauth config: %w", err)
 	}
+	p.notifyOAuthConfigChanged(ctx, oauthConfigRecord)
 
 	// Build authorize URL with PKCE (using dynamically registered or user-provided client_id)
 	authURL := p.buildAuthorizeURLWithPKCE(
@@ -517,6 +539,7 @@ func (p *OAuth2Provider) CompleteOAuthFlow(ctx context.Context, state, code stri
 	if err != nil {
 		oauthConfig.Status = "failed"
 		p.configStore.UpdateOauthConfig(ctx, oauthConfig)
+		p.notifyOAuthConfigChanged(ctx, oauthConfig)
 		logger.Error("Token exchange failed",
 			"error", err.Error(),
 			"client_id", oauthConfig.ClientID,
@@ -545,6 +568,7 @@ func (p *OAuth2Provider) CompleteOAuthFlow(ctx context.Context, state, code stri
 	if err := p.configStore.CreateOauthToken(ctx, tokenRecord); err != nil {
 		return fmt.Errorf("failed to create oauth token: %w", err)
 	}
+	p.notifyOAuthTokenChanged(ctx, tokenRecord, false)
 
 	// Update oauth_config: link token and set status="authorized"
 	oauthConfig.TokenID = &tokenID
@@ -552,10 +576,73 @@ func (p *OAuth2Provider) CompleteOAuthFlow(ctx context.Context, state, code stri
 	if err := p.configStore.UpdateOauthConfig(ctx, oauthConfig); err != nil {
 		return fmt.Errorf("failed to update oauth config: %w", err)
 	}
+	p.notifyOAuthConfigChanged(ctx, oauthConfig)
 
 	logger.Debug("OAuth flow completed successfully", "oauth_config_id", oauthConfig.ID)
 
 	return nil
+}
+
+func (p *OAuth2Provider) notifyOAuthConfigChanged(ctx context.Context, config *tables.TableOauthConfig) {
+	if p == nil || config == nil {
+		return
+	}
+	p.syncHookMu.RLock()
+	syncHook := p.syncHook
+	p.syncHookMu.RUnlock()
+	if syncHook == nil {
+		return
+	}
+	if err := syncHook.OAuthConfigChanged(ctx, cloneOAuthConfig(config)); err != nil {
+		logger.Warn("failed to sync oauth config %s: %v", config.ID, err)
+	}
+}
+
+func (p *OAuth2Provider) notifyOAuthTokenChanged(ctx context.Context, token *tables.TableOauthToken, deleted bool) {
+	if p == nil || token == nil {
+		return
+	}
+	p.syncHookMu.RLock()
+	syncHook := p.syncHook
+	p.syncHookMu.RUnlock()
+	if syncHook == nil {
+		return
+	}
+	if err := syncHook.OAuthTokenChanged(ctx, cloneOAuthToken(token), deleted); err != nil {
+		logger.Warn("failed to sync oauth token %s: %v", token.ID, err)
+	}
+}
+
+func cloneOAuthConfig(config *tables.TableOauthConfig) *tables.TableOauthConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	if config.RegistrationURL != nil {
+		registrationURL := *config.RegistrationURL
+		cloned.RegistrationURL = &registrationURL
+	}
+	if config.TokenID != nil {
+		tokenID := *config.TokenID
+		cloned.TokenID = &tokenID
+	}
+	if config.MCPClientConfigJSON != nil {
+		mcpClientConfigJSON := *config.MCPClientConfigJSON
+		cloned.MCPClientConfigJSON = &mcpClientConfigJSON
+	}
+	return &cloned
+}
+
+func cloneOAuthToken(token *tables.TableOauthToken) *tables.TableOauthToken {
+	if token == nil {
+		return nil
+	}
+	cloned := *token
+	if token.LastRefreshedAt != nil {
+		lastRefreshedAt := *token.LastRefreshedAt
+		cloned.LastRefreshedAt = &lastRefreshedAt
+	}
+	return &cloned
 }
 
 // buildAuthorizeURLWithPKCE constructs the OAuth authorization URL with PKCE parameters

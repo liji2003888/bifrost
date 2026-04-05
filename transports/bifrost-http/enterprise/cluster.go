@@ -68,21 +68,25 @@ type ClusterStatus struct {
 }
 
 type ClusterConfigSyncStatus struct {
-	StoreConnected   bool     `json:"store_connected"`
-	StoreKind        string   `json:"store_kind,omitempty"`
-	RuntimeHash      string   `json:"runtime_hash,omitempty"`
-	StoreHash        string   `json:"store_hash,omitempty"`
-	InSync           *bool    `json:"in_sync,omitempty"`
-	DriftDomains     []string `json:"drift_domains,omitempty"`
-	CustomerCount    int      `json:"customer_count,omitempty"`
-	ModelConfigCount int      `json:"model_config_count,omitempty"`
-	ProviderCount    int      `json:"provider_count,omitempty"`
-	RoutingRuleCount int      `json:"routing_rule_count,omitempty"`
-	TeamCount        int      `json:"team_count,omitempty"`
-	VirtualKeyCount  int      `json:"virtual_key_count,omitempty"`
-	MCPClientCount   int      `json:"mcp_client_count,omitempty"`
-	PluginCount      int      `json:"plugin_count,omitempty"`
-	LastError        string   `json:"last_error,omitempty"`
+	StoreConnected     bool     `json:"store_connected"`
+	StoreKind          string   `json:"store_kind,omitempty"`
+	RuntimeHash        string   `json:"runtime_hash,omitempty"`
+	StoreHash          string   `json:"store_hash,omitempty"`
+	InSync             *bool    `json:"in_sync,omitempty"`
+	DriftDomains       []string `json:"drift_domains,omitempty"`
+	CustomerCount      int      `json:"customer_count,omitempty"`
+	FolderCount        int      `json:"folder_count,omitempty"`
+	ModelConfigCount   int      `json:"model_config_count,omitempty"`
+	ProviderCount      int      `json:"provider_count,omitempty"`
+	PromptCount        int      `json:"prompt_count,omitempty"`
+	PromptSessionCount int      `json:"prompt_session_count,omitempty"`
+	PromptVersionCount int      `json:"prompt_version_count,omitempty"`
+	RoutingRuleCount   int      `json:"routing_rule_count,omitempty"`
+	TeamCount          int      `json:"team_count,omitempty"`
+	VirtualKeyCount    int      `json:"virtual_key_count,omitempty"`
+	MCPClientCount     int      `json:"mcp_client_count,omitempty"`
+	PluginCount        int      `json:"plugin_count,omitempty"`
+	LastError          string   `json:"last_error,omitempty"`
 }
 
 type ClusterDiscoveryStatus struct {

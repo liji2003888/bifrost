@@ -11,6 +11,7 @@ import (
 	"github.com/fasthttp/router"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/oauth2"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
@@ -21,14 +22,16 @@ type OAuthHandler struct {
 	client        *bifrost.Bifrost
 	store         *lib.Config
 	oauthProvider *oauth2.OAuth2Provider
+	propagator    ClusterConfigPropagator
 }
 
 // NewOAuthHandler creates a new OAuth handler instance
-func NewOAuthHandler(oauthProvider *oauth2.OAuth2Provider, client *bifrost.Bifrost, store *lib.Config) *OAuthHandler {
+func NewOAuthHandler(oauthProvider *oauth2.OAuth2Provider, client *bifrost.Bifrost, store *lib.Config, propagator ClusterConfigPropagator) *OAuthHandler {
 	return &OAuthHandler{
 		client:        client,
 		store:         store,
 		oauthProvider: oauthProvider,
+		propagator:    propagator,
 	}
 }
 
@@ -102,7 +105,9 @@ func (h *OAuthHandler) handleCallbackError(ctx *fasthttp.RequestCtx, state, erro
 		oauthConfig, err := h.store.ConfigStore.GetOauthConfigByState(context.Background(), state)
 		if err == nil && oauthConfig != nil {
 			oauthConfig.Status = "failed"
-			h.store.ConfigStore.UpdateOauthConfig(context.Background(), oauthConfig)
+			if updateErr := h.store.ConfigStore.UpdateOauthConfig(context.Background(), oauthConfig); updateErr == nil {
+				h.propagateClusterOAuthConfig(context.Background(), oauthConfig)
+			}
 		}
 	}
 
@@ -248,4 +253,18 @@ func (h *OAuthHandler) GetPendingMCPClientByState(state string) (*schemas.MCPCli
 // RemovePendingMCPClient removes a pending MCP client after OAuth completion
 func (h *OAuthHandler) RemovePendingMCPClient(oauthConfigID string) error {
 	return h.oauthProvider.RemovePendingMCPClient(oauthConfigID)
+}
+
+func (h *OAuthHandler) propagateClusterOAuthConfig(ctx context.Context, oauthConfig *tables.TableOauthConfig) {
+	if h == nil || h.propagator == nil || oauthConfig == nil {
+		return
+	}
+	change := &ClusterConfigChange{
+		Scope:         ClusterConfigScopeOAuthConfig,
+		OAuthConfigID: oauthConfig.ID,
+		OAuthConfig:   CloneClusterOAuthConfig(oauthConfig),
+	}
+	if err := h.propagator.PropagateClusterConfigChange(ctx, change); err != nil {
+		logger.Warn("failed to propagate oauth config cluster change for %s: %v", oauthConfig.ID, err)
+	}
 }

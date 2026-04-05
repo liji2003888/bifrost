@@ -43,14 +43,18 @@ type clusterConfigFingerprint struct {
 }
 
 type clusterConfigResourceCounts struct {
-	CustomerCount    int
-	ModelConfigCount int
-	ProviderCount    int
-	RoutingRuleCount int
-	TeamCount        int
-	VirtualKeyCount  int
-	MCPClientCount   int
-	PluginCount      int
+	CustomerCount      int
+	FolderCount        int
+	ModelConfigCount   int
+	ProviderCount      int
+	PromptCount        int
+	PromptSessionCount int
+	PromptVersionCount int
+	RoutingRuleCount   int
+	TeamCount          int
+	VirtualKeyCount    int
+	MCPClientCount     int
+	PluginCount        int
 }
 
 type clusterProviderFingerprint struct {
@@ -158,8 +162,12 @@ func (r *clusterConfigSyncReporter) compute() enterprisecfg.ClusterConfigSyncSta
 
 	status.RuntimeHash = runtimeFingerprint.Hash()
 	status.CustomerCount = runtimeCounts.CustomerCount
+	status.FolderCount = runtimeCounts.FolderCount
 	status.ModelConfigCount = runtimeCounts.ModelConfigCount
 	status.ProviderCount = runtimeCounts.ProviderCount
+	status.PromptCount = runtimeCounts.PromptCount
+	status.PromptSessionCount = runtimeCounts.PromptSessionCount
+	status.PromptVersionCount = runtimeCounts.PromptVersionCount
 	status.RoutingRuleCount = runtimeCounts.RoutingRuleCount
 	status.TeamCount = runtimeCounts.TeamCount
 	status.VirtualKeyCount = runtimeCounts.VirtualKeyCount
@@ -181,6 +189,16 @@ func (r *clusterConfigSyncReporter) compute() enterprisecfg.ClusterConfigSyncSta
 	if err != nil {
 		status.LastError = fmt.Sprintf("failed to build config store fingerprint: %v", err)
 		return status
+	}
+	if promptCounts, err := buildStorePromptRepoCounts(ctx, store); err != nil {
+		if logger != nil {
+			logger.Warn("failed to count prompt repository resources for cluster status: %v", err)
+		}
+	} else {
+		status.FolderCount = promptCounts.FolderCount
+		status.PromptCount = promptCounts.PromptCount
+		status.PromptSessionCount = promptCounts.PromptSessionCount
+		status.PromptVersionCount = promptCounts.PromptVersionCount
 	}
 
 	status.StoreHash = storeFingerprint.Hash()
@@ -332,6 +350,42 @@ func buildStoreClusterConfigFingerprint(ctx context.Context, store configstore.C
 		MCP:        mcpHash,
 		Plugins:    pluginsHash,
 	}, nil
+}
+
+func buildStorePromptRepoCounts(ctx context.Context, store configstore.ConfigStore) (clusterConfigResourceCounts, error) {
+	if store == nil {
+		return clusterConfigResourceCounts{}, nil
+	}
+	dbProvider, ok := store.(gormDBProvider)
+	if !ok || dbProvider.DB() == nil {
+		return clusterConfigResourceCounts{}, nil
+	}
+
+	db := dbProvider.DB().WithContext(ctx)
+	counts := clusterConfigResourceCounts{}
+	var count int64
+
+	if err := db.Model(&configstoreTables.TableFolder{}).Count(&count).Error; err != nil {
+		return clusterConfigResourceCounts{}, err
+	}
+	counts.FolderCount = int(count)
+
+	if err := db.Model(&configstoreTables.TablePrompt{}).Count(&count).Error; err != nil {
+		return clusterConfigResourceCounts{}, err
+	}
+	counts.PromptCount = int(count)
+
+	if err := db.Model(&configstoreTables.TablePromptVersion{}).Count(&count).Error; err != nil {
+		return clusterConfigResourceCounts{}, err
+	}
+	counts.PromptVersionCount = int(count)
+
+	if err := db.Model(&configstoreTables.TablePromptSession{}).Count(&count).Error; err != nil {
+		return clusterConfigResourceCounts{}, err
+	}
+	counts.PromptSessionCount = int(count)
+
+	return counts, nil
 }
 
 func (f clusterConfigFingerprint) Hash() string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
@@ -174,5 +175,68 @@ func TestHashRuntimeGovernanceDataCountsRoutingRulesAndModelConfigs(t *testing.T
 	}
 	if counts.ModelConfigCount != 1 || counts.RoutingRuleCount != 1 {
 		t.Fatalf("expected model/routing counts to be tracked, got %+v", counts)
+	}
+}
+
+func TestClusterConfigSyncReporterIncludesPromptRepositoryCounts(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	store := newClusterPluginApplyStore(t)
+	server := &BifrostHTTPServer{
+		Ctx: schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+		Config: &lib.Config{
+			ConfigStore:      store,
+			ClientConfig:     &configstore.ClientConfig{},
+			GovernanceConfig: &configstore.GovernanceConfig{},
+		},
+	}
+
+	if err := server.ApplyClusterFolderConfig(context.Background(), "folder-1", &configstoreTables.TableFolder{
+		ID:        "folder-1",
+		Name:      "Shared",
+		CreatedAt: time.Unix(1700000200, 0).UTC(),
+		UpdatedAt: time.Unix(1700000200, 0).UTC(),
+	}, false); err != nil {
+		t.Fatalf("ApplyClusterFolderConfig() error = %v", err)
+	}
+	if err := server.ApplyClusterPromptConfig(context.Background(), "prompt-1", &configstoreTables.TablePrompt{
+		ID:        "prompt-1",
+		Name:      "Support Reply",
+		FolderID:  bifrost.Ptr("folder-1"),
+		CreatedAt: time.Unix(1700000201, 0).UTC(),
+		UpdatedAt: time.Unix(1700000201, 0).UTC(),
+	}, false); err != nil {
+		t.Fatalf("ApplyClusterPromptConfig() error = %v", err)
+	}
+	if err := server.ApplyClusterPromptVersionConfig(context.Background(), 91, &configstoreTables.TablePromptVersion{
+		ID:            91,
+		PromptID:      "prompt-1",
+		VersionNumber: 1,
+		IsLatest:      true,
+		CreatedAt:     time.Unix(1700000202, 0).UTC(),
+		Messages: []configstoreTables.TablePromptVersionMessage{
+			{ID: 601, PromptID: "prompt-1", VersionID: 91, OrderIndex: 0, Message: configstoreTables.PromptMessage(`{"role":"user","content":"Hi"}`)},
+		},
+	}, false); err != nil {
+		t.Fatalf("ApplyClusterPromptVersionConfig() error = %v", err)
+	}
+	versionID := uint(91)
+	if err := server.ApplyClusterPromptSessionConfig(context.Background(), 92, &configstoreTables.TablePromptSession{
+		ID:        92,
+		PromptID:  "prompt-1",
+		VersionID: &versionID,
+		Name:      "Draft",
+		CreatedAt: time.Unix(1700000203, 0).UTC(),
+		UpdatedAt: time.Unix(1700000204, 0).UTC(),
+		Messages: []configstoreTables.TablePromptSessionMessage{
+			{ID: 701, PromptID: "prompt-1", SessionID: 92, OrderIndex: 0, Message: configstoreTables.PromptMessage(`{"role":"assistant","content":"Draft"}`)},
+		},
+	}, false); err != nil {
+		t.Fatalf("ApplyClusterPromptSessionConfig() error = %v", err)
+	}
+
+	status := newClusterConfigSyncReporter(server).compute()
+	if status.FolderCount != 1 || status.PromptCount != 1 || status.PromptVersionCount != 1 || status.PromptSessionCount != 1 {
+		t.Fatalf("expected prompt repository counts to be tracked, got %+v", status)
 	}
 }
