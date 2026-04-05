@@ -493,6 +493,11 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 		// Reloading pricing manager
 		h.configManager.ReloadPricingManager(ctx)
 	}
+	var (
+		propagatedAuthConfig     *configstore.AuthConfig
+		propagatedAuthShouldWipe bool
+	)
+
 	// Checking auth config and trying to update if required
 	if payload.AuthConfig != nil {
 		// Getting current governance config
@@ -608,6 +613,15 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 				return
 			}
 		}
+
+		updatedAuthConfig, err := h.store.ConfigStore.GetAuthConfig(ctx)
+		if err != nil {
+			logger.Warn("failed to fetch auth config from store after update: %v", err)
+			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to fetch auth config from store after update: %v", err))
+			return
+		}
+		propagatedAuthConfig = updatedAuthConfig
+		propagatedAuthShouldWipe = authChanged
 		// Note: AuthMiddleware is updated via ServerCallbacks.UpdateAuthConfig (handled by BifrostHTTPServer)
 	}
 
@@ -630,6 +644,13 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 		h.propagateClusterConfigChange(ctx, &ClusterConfigChange{
 			Scope:           ClusterConfigScopeFramework,
 			FrameworkConfig: frameworkConfig,
+		})
+	}
+	if propagatedAuthConfig != nil {
+		h.propagateClusterConfigChange(ctx, &ClusterConfigChange{
+			Scope:         ClusterConfigScopeAuth,
+			AuthConfig:    propagatedAuthConfig,
+			FlushSessions: propagatedAuthShouldWipe,
 		})
 	}
 

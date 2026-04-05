@@ -70,6 +70,8 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 	switch change.Scope {
 	case handlers.ClusterConfigScopeClient:
 		return s.ApplyClusterClientConfig(ctx, change.ClientConfig)
+	case handlers.ClusterConfigScopeAuth:
+		return s.ApplyClusterAuthConfig(ctx, change.AuthConfig, change.FlushSessions)
 	case handlers.ClusterConfigScopeFramework:
 		return s.ApplyClusterFrameworkConfig(ctx, change.FrameworkConfig)
 	case handlers.ClusterConfigScopeProxy:
@@ -85,6 +87,25 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 	default:
 		return fmt.Errorf("unsupported cluster config scope: %s", change.Scope)
 	}
+}
+
+func (s *BifrostHTTPServer) ApplyClusterAuthConfig(ctx context.Context, cfg *configstore.AuthConfig, flushSessions bool) error {
+	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
+		return fmt.Errorf("config store not found")
+	}
+	if cfg == nil {
+		return fmt.Errorf("auth config is required")
+	}
+
+	if err := s.UpdateAuthConfig(ctx, cfg); err != nil {
+		return fmt.Errorf("failed to persist auth config: %w", err)
+	}
+	if flushSessions {
+		if err := s.Config.ConfigStore.FlushSessions(ctx); err != nil {
+			return fmt.Errorf("failed to flush sessions after auth config update: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *BifrostHTTPServer) ApplyClusterClientConfig(ctx context.Context, cfg *configstore.ClientConfig) error {
