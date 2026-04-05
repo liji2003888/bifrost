@@ -13,23 +13,29 @@ const ClusterConfigReloadEndpoint = "/_cluster/config/reload"
 type ClusterConfigScope string
 
 const (
-	ClusterConfigScopeClient     ClusterConfigScope = "client"
-	ClusterConfigScopeAuth       ClusterConfigScope = "auth"
-	ClusterConfigScopeCustomer   ClusterConfigScope = "customer"
-	ClusterConfigScopeFramework  ClusterConfigScope = "framework"
-	ClusterConfigScopeMCPClient  ClusterConfigScope = "mcp_client"
-	ClusterConfigScopeProxy      ClusterConfigScope = "proxy"
-	ClusterConfigScopeProvider   ClusterConfigScope = "provider"
-	ClusterConfigScopeTeam       ClusterConfigScope = "team"
-	ClusterConfigScopeVirtualKey ClusterConfigScope = "virtual_key"
+	ClusterConfigScopeClient      ClusterConfigScope = "client"
+	ClusterConfigScopeAuth        ClusterConfigScope = "auth"
+	ClusterConfigScopeCustomer    ClusterConfigScope = "customer"
+	ClusterConfigScopeFramework   ClusterConfigScope = "framework"
+	ClusterConfigScopeMCPClient   ClusterConfigScope = "mcp_client"
+	ClusterConfigScopeModelConfig ClusterConfigScope = "model_config"
+	ClusterConfigScopeProxy       ClusterConfigScope = "proxy"
+	ClusterConfigScopeProvider    ClusterConfigScope = "provider"
+	ClusterConfigScopeRoutingRule ClusterConfigScope = "routing_rule"
+	ClusterConfigScopeTeam        ClusterConfigScope = "team"
+	ClusterConfigScopeVirtualKey  ClusterConfigScope = "virtual_key"
 )
 
 type ClusterConfigChange struct {
 	Scope            ClusterConfigScope                      `json:"scope"`
 	CustomerID       string                                  `json:"customer_id,omitempty"`
 	CustomerConfig   *configstoreTables.TableCustomer        `json:"customer_config,omitempty"`
+	ModelConfigID    string                                  `json:"model_config_id,omitempty"`
+	ModelConfig      *configstoreTables.TableModelConfig     `json:"model_config,omitempty"`
 	Provider         schemas.ModelProvider                   `json:"provider,omitempty"`
 	MCPClientID      string                                  `json:"mcp_client_id,omitempty"`
+	RoutingRuleID    string                                  `json:"routing_rule_id,omitempty"`
+	RoutingRule      *configstoreTables.TableRoutingRule     `json:"routing_rule,omitempty"`
 	TeamID           string                                  `json:"team_id,omitempty"`
 	VirtualKeyID     string                                  `json:"virtual_key_id,omitempty"`
 	Delete           bool                                    `json:"delete,omitempty"`

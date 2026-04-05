@@ -43,12 +43,14 @@ type clusterConfigFingerprint struct {
 }
 
 type clusterConfigResourceCounts struct {
-	CustomerCount   int
-	ProviderCount   int
-	TeamCount       int
-	VirtualKeyCount int
-	MCPClientCount  int
-	PluginCount     int
+	CustomerCount    int
+	ModelConfigCount int
+	ProviderCount    int
+	RoutingRuleCount int
+	TeamCount        int
+	VirtualKeyCount  int
+	MCPClientCount   int
+	PluginCount      int
 }
 
 type clusterProviderFingerprint struct {
@@ -156,7 +158,9 @@ func (r *clusterConfigSyncReporter) compute() enterprisecfg.ClusterConfigSyncSta
 
 	status.RuntimeHash = runtimeFingerprint.Hash()
 	status.CustomerCount = runtimeCounts.CustomerCount
+	status.ModelConfigCount = runtimeCounts.ModelConfigCount
 	status.ProviderCount = runtimeCounts.ProviderCount
+	status.RoutingRuleCount = runtimeCounts.RoutingRuleCount
 	status.TeamCount = runtimeCounts.TeamCount
 	status.VirtualKeyCount = runtimeCounts.VirtualKeyCount
 	status.MCPClientCount = runtimeCounts.MCPClientCount
@@ -235,12 +239,14 @@ func buildRuntimeClusterConfigFingerprint(server *BifrostHTTPServer) (clusterCon
 			Plugins:    pluginsHash,
 		},
 		clusterConfigResourceCounts{
-			CustomerCount:   governanceCounts.CustomerCount,
-			ProviderCount:   providerCount,
-			TeamCount:       governanceCounts.TeamCount,
-			VirtualKeyCount: governanceCounts.VirtualKeyCount,
-			MCPClientCount:  mcpCount,
-			PluginCount:     pluginCount,
+			CustomerCount:    governanceCounts.CustomerCount,
+			ModelConfigCount: governanceCounts.ModelConfigCount,
+			ProviderCount:    providerCount,
+			RoutingRuleCount: governanceCounts.RoutingRuleCount,
+			TeamCount:        governanceCounts.TeamCount,
+			VirtualKeyCount:  governanceCounts.VirtualKeyCount,
+			MCPClientCount:   mcpCount,
+			PluginCount:      pluginCount,
 		},
 		nil
 }
@@ -480,9 +486,11 @@ func hashProvidersConfig(providers map[schemas.ModelProvider]configstore.Provide
 }
 
 type clusterGovernanceCounts struct {
-	CustomerCount   int
-	TeamCount       int
-	VirtualKeyCount int
+	CustomerCount    int
+	ModelConfigCount int
+	RoutingRuleCount int
+	TeamCount        int
+	VirtualKeyCount  int
 }
 
 func hashRuntimeGovernanceData(data *governance.GovernanceData) (string, clusterGovernanceCounts, error) {
@@ -518,9 +526,11 @@ func hashRuntimeGovernanceData(data *governance.GovernanceData) (string, cluster
 		return "", clusterGovernanceCounts{}, err
 	}
 	return hash, clusterGovernanceCounts{
-		CustomerCount:   len(fingerprint.Customers),
-		TeamCount:       len(fingerprint.Teams),
-		VirtualKeyCount: len(fingerprint.VirtualKeys),
+		CustomerCount:    len(fingerprint.Customers),
+		ModelConfigCount: len(fingerprint.ModelConfigs),
+		RoutingRuleCount: len(fingerprint.RoutingRules),
+		TeamCount:        len(fingerprint.Teams),
+		VirtualKeyCount:  len(fingerprint.VirtualKeys),
 	}, nil
 }
 

@@ -135,6 +135,73 @@ func (s *BifrostHTTPServer) ApplyClusterVirtualKeyConfig(ctx context.Context, id
 	return err
 }
 
+func (s *BifrostHTTPServer) ApplyClusterModelConfig(ctx context.Context, id string, cfg *configstoreTables.TableModelConfig, deleteModelConfig bool) error {
+	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
+		return fmt.Errorf("config store not found")
+	}
+
+	id = normalizeClusterGovernanceID(id, func() string {
+		if cfg == nil {
+			return ""
+		}
+		return cfg.ID
+	}(), "model config")
+	if id == "" {
+		return fmt.Errorf("model config id is required")
+	}
+
+	if deleteModelConfig {
+		if err := s.Config.ConfigStore.DeleteModelConfig(ctx, id); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			return fmt.Errorf("failed to delete model config: %w", err)
+		}
+		return s.RemoveModelConfig(ctx, id)
+	}
+	if cfg == nil {
+		return fmt.Errorf("model config payload is required")
+	}
+	if err := ensureClusterBudgetPayload("model config", id, cfg.BudgetID, cfg.Budget); err != nil {
+		return err
+	}
+	if err := ensureClusterRateLimitPayload("model config", id, cfg.RateLimitID, cfg.RateLimit); err != nil {
+		return err
+	}
+	if err := s.applyClusterModelConfigRecord(ctx, cfg); err != nil {
+		return err
+	}
+	_, err := s.ReloadModelConfig(ctx, id)
+	return err
+}
+
+func (s *BifrostHTTPServer) ApplyClusterRoutingRuleConfig(ctx context.Context, id string, cfg *configstoreTables.TableRoutingRule, deleteRule bool) error {
+	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
+		return fmt.Errorf("config store not found")
+	}
+
+	id = normalizeClusterGovernanceID(id, func() string {
+		if cfg == nil {
+			return ""
+		}
+		return cfg.ID
+	}(), "routing rule")
+	if id == "" {
+		return fmt.Errorf("routing rule id is required")
+	}
+
+	if deleteRule {
+		if err := s.Config.ConfigStore.DeleteRoutingRule(ctx, id); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			return fmt.Errorf("failed to delete routing rule: %w", err)
+		}
+		return s.RemoveRoutingRule(ctx, id)
+	}
+	if cfg == nil {
+		return fmt.Errorf("routing rule payload is required")
+	}
+	if err := s.applyClusterRoutingRuleRecord(ctx, cfg); err != nil {
+		return err
+	}
+	return s.ReloadRoutingRule(ctx, id)
+}
+
 func (s *BifrostHTTPServer) applyClusterCustomerRecord(ctx context.Context, cfg *configstoreTables.TableCustomer) error {
 	store := s.Config.ConfigStore
 	return store.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
@@ -217,6 +284,68 @@ func (s *BifrostHTTPServer) applyClusterTeamRecord(ctx context.Context, cfg *con
 
 		return nil
 	})
+}
+
+func (s *BifrostHTTPServer) applyClusterModelConfigRecord(ctx context.Context, cfg *configstoreTables.TableModelConfig) error {
+	store := s.Config.ConfigStore
+	return store.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+		existing, err := store.GetModelConfigByID(ctx, cfg.ID)
+		if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			return fmt.Errorf("failed to get existing model config: %w", err)
+		}
+		if errors.Is(err, configstore.ErrNotFound) {
+			existing = nil
+		}
+
+		if err := upsertClusterBudget(ctx, store, tx, cfg.Budget); err != nil {
+			return fmt.Errorf("failed to sync model config budget: %w", err)
+		}
+		if err := upsertClusterRateLimit(ctx, store, tx, cfg.RateLimit); err != nil {
+			return fmt.Errorf("failed to sync model config rate limit: %w", err)
+		}
+
+		row := clusterModelConfigRecord(cfg)
+		if existing == nil {
+			if err := store.CreateModelConfig(ctx, row, tx); err != nil {
+				return fmt.Errorf("failed to create model config: %w", err)
+			}
+		} else {
+			if err := store.UpdateModelConfig(ctx, row, tx); err != nil {
+				return fmt.Errorf("failed to update model config: %w", err)
+			}
+			if err := deleteOrphanedBudget(ctx, store, tx, existing.BudgetID, row.BudgetID); err != nil {
+				return err
+			}
+			if err := deleteOrphanedRateLimit(ctx, store, tx, existing.RateLimitID, row.RateLimitID); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
+func (s *BifrostHTTPServer) applyClusterRoutingRuleRecord(ctx context.Context, cfg *configstoreTables.TableRoutingRule) error {
+	store := s.Config.ConfigStore
+	existing, err := store.GetRoutingRule(ctx, cfg.ID)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+		return fmt.Errorf("failed to get existing routing rule: %w", err)
+	}
+	if errors.Is(err, configstore.ErrNotFound) {
+		existing = nil
+	}
+
+	row := clusterRoutingRuleRecord(cfg)
+	if existing == nil {
+		if err := store.CreateRoutingRule(ctx, row); err != nil {
+			return fmt.Errorf("failed to create routing rule: %w", err)
+		}
+		return nil
+	}
+	if err := store.UpdateRoutingRule(ctx, row); err != nil {
+		return fmt.Errorf("failed to update routing rule: %w", err)
+	}
+	return nil
 }
 
 func (s *BifrostHTTPServer) applyClusterVirtualKeyRecord(ctx context.Context, cfg *configstoreTables.TableVirtualKey) error {
@@ -512,6 +641,36 @@ func clusterVirtualKeyRecord(cfg *configstoreTables.TableVirtualKey) *configstor
 	record.RateLimit = nil
 	record.ProviderConfigs = nil
 	record.MCPConfigs = nil
+	return &record
+}
+
+func clusterModelConfigRecord(cfg *configstoreTables.TableModelConfig) *configstoreTables.TableModelConfig {
+	record := *cfg
+	record.Budget = nil
+	record.RateLimit = nil
+	return &record
+}
+
+func clusterRoutingRuleRecord(cfg *configstoreTables.TableRoutingRule) *configstoreTables.TableRoutingRule {
+	record := *cfg
+	if len(cfg.Targets) > 0 {
+		record.Targets = append([]configstoreTables.TableRoutingTarget(nil), cfg.Targets...)
+	} else {
+		record.Targets = nil
+	}
+	if len(cfg.ParsedFallbacks) > 0 {
+		record.ParsedFallbacks = append([]string(nil), cfg.ParsedFallbacks...)
+	} else {
+		record.ParsedFallbacks = nil
+	}
+	if cfg.ParsedQuery != nil {
+		record.ParsedQuery = make(map[string]any, len(cfg.ParsedQuery))
+		for key, value := range cfg.ParsedQuery {
+			record.ParsedQuery[key] = value
+		}
+	} else {
+		record.ParsedQuery = nil
+	}
 	return &record
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"sort"
 	"strconv"
@@ -2428,6 +2429,13 @@ func (h *GovernanceHandler) createModelConfig(ctx *fasthttp.RequestCtx) {
 		logger.Error("failed to reload model config in memory: %v", err)
 		preloadedMC = &mc
 	}
+
+	h.propagateClusterGovernanceChange(ctx, &ClusterConfigChange{
+		Scope:         ClusterConfigScopeModelConfig,
+		ModelConfigID: mc.ID,
+		ModelConfig:   cloneClusterModelConfig(preloadedMC),
+	})
+
 	SendJSON(ctx, map[string]interface{}{
 		"message":      "Model config created successfully",
 		"model_config": preloadedMC,
@@ -2610,6 +2618,13 @@ func (h *GovernanceHandler) updateModelConfig(ctx *fasthttp.RequestCtx) {
 		logger.Error("failed to reload model config in memory: %v", err)
 		updatedMC = mc
 	}
+
+	h.propagateClusterGovernanceChange(ctx, &ClusterConfigChange{
+		Scope:         ClusterConfigScopeModelConfig,
+		ModelConfigID: mc.ID,
+		ModelConfig:   cloneClusterModelConfig(updatedMC),
+	})
+
 	SendJSON(ctx, map[string]interface{}{
 		"message":      "Model config updated successfully",
 		"model_config": updatedMC,
@@ -2644,6 +2659,13 @@ func (h *GovernanceHandler) deleteModelConfig(ctx *fasthttp.RequestCtx) {
 		logger.Error("failed to remove model config from memory: %v", err)
 		// Continue anyway, the config is deleted from DB
 	}
+
+	h.propagateClusterGovernanceChange(ctx, &ClusterConfigChange{
+		Scope:         ClusterConfigScopeModelConfig,
+		ModelConfigID: mcID,
+		Delete:        true,
+	})
+
 	SendJSON(ctx, map[string]interface{}{
 		"message": "Model config deleted successfully",
 	})
@@ -3226,6 +3248,12 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	h.propagateClusterGovernanceChange(ctx, &ClusterConfigChange{
+		Scope:         ClusterConfigScopeRoutingRule,
+		RoutingRuleID: rule.ID,
+		RoutingRule:   cloneClusterRoutingRule(rule),
+	})
+
 	SendJSON(ctx, map[string]interface{}{
 		"message": "Routing rule created successfully",
 		"rule":    rule,
@@ -3328,6 +3356,12 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	h.propagateClusterGovernanceChange(ctx, &ClusterConfigChange{
+		Scope:         ClusterConfigScopeRoutingRule,
+		RoutingRuleID: rule.ID,
+		RoutingRule:   cloneClusterRoutingRule(rule),
+	})
+
 	SendJSON(ctx, map[string]interface{}{
 		"message": "Routing rule updated successfully",
 		"rule":    rule,
@@ -3352,6 +3386,12 @@ func (h *GovernanceHandler) deleteRoutingRule(ctx *fasthttp.RequestCtx) {
 	if err := h.governanceManager.RemoveRoutingRule(ctx, ruleID); err != nil {
 		logger.Error("failed to remove routing rule from memory: %v", err)
 	}
+
+	h.propagateClusterGovernanceChange(ctx, &ClusterConfigChange{
+		Scope:         ClusterConfigScopeRoutingRule,
+		RoutingRuleID: ruleID,
+		Delete:        true,
+	})
 
 	SendJSON(ctx, map[string]interface{}{
 		"message": "Routing rule deleted successfully",
@@ -3423,6 +3463,41 @@ func cloneClusterVirtualKey(vk *configstoreTables.TableVirtualKey) *configstoreT
 			Name:     mcpConfig.MCPClient.Name,
 		}
 		clone.MCPConfigs = append(clone.MCPConfigs, mcpClone)
+	}
+	return &clone
+}
+
+func cloneClusterModelConfig(mc *configstoreTables.TableModelConfig) *configstoreTables.TableModelConfig {
+	if mc == nil {
+		return nil
+	}
+
+	clone := *mc
+	clone.Budget = cloneClusterBudget(mc.Budget)
+	clone.RateLimit = cloneClusterRateLimit(mc.RateLimit)
+	return &clone
+}
+
+func cloneClusterRoutingRule(rule *configstoreTables.TableRoutingRule) *configstoreTables.TableRoutingRule {
+	if rule == nil {
+		return nil
+	}
+
+	clone := *rule
+	if len(rule.Targets) > 0 {
+		clone.Targets = append([]configstoreTables.TableRoutingTarget(nil), rule.Targets...)
+	} else {
+		clone.Targets = nil
+	}
+	if len(rule.ParsedFallbacks) > 0 {
+		clone.ParsedFallbacks = append([]string(nil), rule.ParsedFallbacks...)
+	} else {
+		clone.ParsedFallbacks = nil
+	}
+	if rule.ParsedQuery != nil {
+		clone.ParsedQuery = maps.Clone(rule.ParsedQuery)
+	} else {
+		clone.ParsedQuery = nil
 	}
 	return &clone
 }

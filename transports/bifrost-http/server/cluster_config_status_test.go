@@ -9,6 +9,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	governanceplugin "github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"gorm.io/gorm"
@@ -140,5 +141,38 @@ func TestClusterConfigSyncReporterUsesAuthMiddlewareRuntimeSnapshot(t *testing.T
 	}
 	if slices.Contains(status.DriftDomains, "auth") {
 		t.Fatalf("expected no auth drift domain, got %+v", status.DriftDomains)
+	}
+}
+
+func TestHashRuntimeGovernanceDataCountsRoutingRulesAndModelConfigs(t *testing.T) {
+	hash, counts, err := hashRuntimeGovernanceData(&governanceplugin.GovernanceData{
+		RoutingRules: map[string]*configstoreTables.TableRoutingRule{
+			"rule-1": {
+				ID:            "rule-1",
+				Name:          "Rule",
+				Enabled:       true,
+				CelExpression: "true",
+				Scope:         "global",
+				Priority:      1,
+				Targets: []configstoreTables.TableRoutingTarget{
+					{Weight: 1},
+				},
+			},
+		},
+		ModelConfigs: []*configstoreTables.TableModelConfig{
+			{
+				ID:        "model-config-1",
+				ModelName: "gpt-4.1",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("hashRuntimeGovernanceData() error = %v", err)
+	}
+	if hash == "" {
+		t.Fatal("expected governance hash to be populated")
+	}
+	if counts.ModelConfigCount != 1 || counts.RoutingRuleCount != 1 {
+		t.Fatalf("expected model/routing counts to be tracked, got %+v", counts)
 	}
 }

@@ -307,4 +307,67 @@ func TestPropagateClusterConfigChangeAppliesGovernanceResourcesOnRemotePeer(t *t
 	if storedVirtualKey.TeamID == nil || *storedVirtualKey.TeamID != team.ID || storedVirtualKey.Value != virtualKey.Value {
 		t.Fatalf("unexpected remote virtual key: %+v", storedVirtualKey)
 	}
+
+	modelProvider := "openai"
+	modelConfig := &configstoreTables.TableModelConfig{
+		ID:        "model-config-propagated",
+		ModelName: "gpt-4.1",
+		Provider:  &modelProvider,
+		BudgetID:  bifrost.Ptr("budget-model-config-propagated"),
+		Budget: &configstoreTables.TableBudget{
+			ID:            "budget-model-config-propagated",
+			MaxLimit:      200,
+			ResetDuration: "1h",
+			LastReset:     time.Unix(1700000000, 0).UTC(),
+			CurrentUsage:  9.5,
+		},
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:         handlers.ClusterConfigScopeModelConfig,
+		ModelConfigID: modelConfig.ID,
+		ModelConfig:   modelConfig,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(model config) error = %v", err)
+	}
+
+	storedModelConfig, err := remoteStore.GetModelConfigByID(context.Background(), modelConfig.ID)
+	if err != nil {
+		t.Fatalf("remote GetModelConfigByID() error = %v", err)
+	}
+	if storedModelConfig.ModelName != modelConfig.ModelName || storedModelConfig.Provider == nil || *storedModelConfig.Provider != modelProvider {
+		t.Fatalf("unexpected remote model config: %+v", storedModelConfig)
+	}
+
+	scopeID := team.ID
+	routingRule := &configstoreTables.TableRoutingRule{
+		ID:            "routing-rule-propagated",
+		Name:          "Cluster Routing Rule",
+		Enabled:       true,
+		CelExpression: "true",
+		Scope:         "team",
+		ScopeID:       &scopeID,
+		Priority:      10,
+		Targets: []configstoreTables.TableRoutingTarget{
+			{
+				Provider: &modelProvider,
+				Model:    bifrost.Ptr("gpt-4.1"),
+				Weight:   1,
+			},
+		},
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:         handlers.ClusterConfigScopeRoutingRule,
+		RoutingRuleID: routingRule.ID,
+		RoutingRule:   routingRule,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(routing rule) error = %v", err)
+	}
+
+	storedRoutingRule, err := remoteStore.GetRoutingRule(context.Background(), routingRule.ID)
+	if err != nil {
+		t.Fatalf("remote GetRoutingRule() error = %v", err)
+	}
+	if storedRoutingRule.Scope != routingRule.Scope || storedRoutingRule.ScopeID == nil || *storedRoutingRule.ScopeID != scopeID || len(storedRoutingRule.Targets) != 1 {
+		t.Fatalf("unexpected remote routing rule: %+v", storedRoutingRule)
+	}
 }

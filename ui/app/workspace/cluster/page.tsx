@@ -216,10 +216,10 @@ export default function ClusterPage() {
 									}
 								/>
 								<InfoPair label="Config Store" value={localConfigSync?.store_connected ? localConfigSync.store_kind || "connected" : "Disabled"} />
-									<InfoPair
-										label="Tracked Resources"
-										value={`${localConfigSync?.provider_count ?? 0} providers · ${localConfigSync?.customer_count ?? 0} customers · ${localConfigSync?.team_count ?? 0} teams · ${localConfigSync?.virtual_key_count ?? 0} virtual keys · ${localConfigSync?.mcp_client_count ?? 0} MCP clients`}
-									/>
+								<InfoPair
+									label="Tracked Resources"
+									value={`${localConfigSync?.provider_count ?? 0} providers · ${localConfigSync?.customer_count ?? 0} customers · ${localConfigSync?.team_count ?? 0} teams · ${localConfigSync?.virtual_key_count ?? 0} virtual keys · ${localConfigSync?.model_config_count ?? 0} model configs · ${localConfigSync?.routing_rule_count ?? 0} routing rules · ${localConfigSync?.mcp_client_count ?? 0} MCP clients`}
+								/>
 								<InfoPair
 									label="Runtime Fingerprint"
 									value={localConfigSync?.runtime_hash ? `${localConfigSync.runtime_hash.slice(0, 12)}...` : "-"}

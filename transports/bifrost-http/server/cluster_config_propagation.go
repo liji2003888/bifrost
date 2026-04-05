@@ -80,6 +80,8 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		return s.ApplyClusterFrameworkConfig(ctx, change.FrameworkConfig)
 	case handlers.ClusterConfigScopeMCPClient:
 		return s.ApplyClusterMCPClientConfig(ctx, change.MCPClientID, change.MCPClientConfig, change.Delete)
+	case handlers.ClusterConfigScopeModelConfig:
+		return s.ApplyClusterModelConfig(ctx, change.ModelConfigID, change.ModelConfig, change.Delete)
 	case handlers.ClusterConfigScopeProxy:
 		return s.ApplyClusterProxyConfig(ctx, change.ProxyConfig)
 	case handlers.ClusterConfigScopeProvider:
@@ -90,6 +92,8 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 			return s.RemoveProvider(ctx, change.Provider)
 		}
 		return s.ApplyClusterProviderConfig(ctx, change.Provider, change.ProviderConfig)
+	case handlers.ClusterConfigScopeRoutingRule:
+		return s.ApplyClusterRoutingRuleConfig(ctx, change.RoutingRuleID, change.RoutingRule, change.Delete)
 	case handlers.ClusterConfigScopeTeam:
 		return s.ApplyClusterTeamConfig(ctx, change.TeamID, change.TeamConfig, change.Delete)
 	case handlers.ClusterConfigScopeVirtualKey:
