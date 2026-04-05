@@ -1189,6 +1189,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to initialize cluster service: %v", err)
 		}
+		s.ClusterService.SetConfigSyncReporter(newClusterConfigSyncReporter(s).Status)
 	}
 	// Initialize WebSocket handler early so plugins can wire event broadcasters during Init.
 	// Log callbacks are registered later in RegisterAPIRoutes when logging plugin is available.

@@ -177,6 +177,47 @@ func TestClusterServiceRefreshesDiscoveredPeers(t *testing.T) {
 	}
 }
 
+func TestClusterStatusIncludesLocalConfigSyncStatus(t *testing.T) {
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	service, err := NewClusterService(&ClusterConfig{Enabled: true}, store, "127.0.0.1:8080", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService() error = %v", err)
+	}
+	defer service.Close()
+
+	inSync := true
+	service.SetConfigSyncReporter(func() ClusterConfigSyncStatus {
+		return ClusterConfigSyncStatus{
+			StoreConnected: true,
+			StoreKind:      "sqlite",
+			RuntimeHash:    "runtime-hash",
+			StoreHash:      "runtime-hash",
+			InSync:         &inSync,
+			DriftDomains:   []string{"providers"},
+			ProviderCount:  2,
+		}
+	})
+
+	status := service.Status()
+	if status.ConfigSync == nil {
+		t.Fatal("expected local config sync status to be present")
+	}
+	if !status.ConfigSync.StoreConnected || status.ConfigSync.StoreKind != "sqlite" {
+		t.Fatalf("unexpected config sync status: %+v", status.ConfigSync)
+	}
+	if status.ConfigSync.InSync == nil || !*status.ConfigSync.InSync {
+		t.Fatalf("expected in-sync flag to be true, got %+v", status.ConfigSync)
+	}
+	if len(status.ConfigSync.DriftDomains) != 1 || status.ConfigSync.DriftDomains[0] != "providers" {
+		t.Fatalf("expected drift domains to be copied, got %+v", status.ConfigSync)
+	}
+}
+
 func TestClusterServiceRemovesStaleDiscoveredPeersButKeepsStaticPeers(t *testing.T) {
 	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
 	if err != nil {
@@ -233,6 +274,7 @@ func TestClusterCheckPeersCapturesRemoteStatusMetadata(t *testing.T) {
 	defer store.Close()
 
 	startedAt := time.Now().UTC().Add(-5 * time.Minute)
+	remoteInSync := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get(ClusterAuthHeader); got != "cluster-secret" {
 			t.Fatalf("expected cluster auth header to be forwarded, got %q", got)
@@ -243,6 +285,14 @@ func TestClusterCheckPeersCapturesRemoteStatusMetadata(t *testing.T) {
 			StartedAt: startedAt,
 			Healthy:   false,
 			KVKeys:    42,
+			ConfigSync: &ClusterConfigSyncStatus{
+				StoreConnected: true,
+				StoreKind:      "postgres",
+				RuntimeHash:    "runtime-b",
+				StoreHash:      "store-b",
+				InSync:         &remoteInSync,
+				DriftDomains:   []string{"providers", "mcp"},
+			},
 			Discovery: &ClusterDiscoveryStatus{
 				Enabled:   true,
 				Type:      ClusterDiscoveryDNS,
@@ -289,5 +339,14 @@ func TestClusterCheckPeersCapturesRemoteStatusMetadata(t *testing.T) {
 	}
 	if peer.StartedAt == nil || !peer.StartedAt.Equal(startedAt) {
 		t.Fatalf("expected peer started time to be populated, got %+v", peer)
+	}
+	if peer.ConfigSync == nil {
+		t.Fatalf("expected peer config sync status to be populated, got %+v", peer)
+	}
+	if peer.ConfigSync.StoreKind != "postgres" || peer.ConfigSync.InSync == nil || *peer.ConfigSync.InSync {
+		t.Fatalf("unexpected peer config sync state: %+v", peer.ConfigSync)
+	}
+	if len(peer.ConfigSync.DriftDomains) != 2 {
+		t.Fatalf("expected peer drift domains to be populated, got %+v", peer.ConfigSync)
 	}
 }

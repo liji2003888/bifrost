@@ -43,26 +43,42 @@ type ClusterMutation struct {
 }
 
 type ClusterPeerStatus struct {
-	Address              string     `json:"address"`
-	Healthy              bool       `json:"healthy"`
-	ReportedHealthy      *bool      `json:"reported_healthy,omitempty"`
-	NodeID               string     `json:"node_id,omitempty"`
-	StartedAt            *time.Time `json:"started_at,omitempty"`
-	KVKeys               int        `json:"kv_keys,omitempty"`
-	DiscoveryPeerCount   int        `json:"discovery_peer_count,omitempty"`
-	LastSeen             *time.Time `json:"last_seen,omitempty"`
-	LastError            string     `json:"last_error,omitempty"`
-	ConsecutiveSuccesses int        `json:"consecutive_successes"`
-	ConsecutiveFailures  int        `json:"consecutive_failures"`
+	Address              string                   `json:"address"`
+	Healthy              bool                     `json:"healthy"`
+	ReportedHealthy      *bool                    `json:"reported_healthy,omitempty"`
+	NodeID               string                   `json:"node_id,omitempty"`
+	StartedAt            *time.Time               `json:"started_at,omitempty"`
+	KVKeys               int                      `json:"kv_keys,omitempty"`
+	DiscoveryPeerCount   int                      `json:"discovery_peer_count,omitempty"`
+	ConfigSync           *ClusterConfigSyncStatus `json:"config_sync,omitempty"`
+	LastSeen             *time.Time               `json:"last_seen,omitempty"`
+	LastError            string                   `json:"last_error,omitempty"`
+	ConsecutiveSuccesses int                      `json:"consecutive_successes"`
+	ConsecutiveFailures  int                      `json:"consecutive_failures"`
 }
 
 type ClusterStatus struct {
-	NodeID    string                  `json:"node_id"`
-	StartedAt time.Time               `json:"started_at"`
-	Healthy   bool                    `json:"healthy"`
-	KVKeys    int                     `json:"kv_keys"`
-	Peers     []ClusterPeerStatus     `json:"peers"`
-	Discovery *ClusterDiscoveryStatus `json:"discovery,omitempty"`
+	NodeID     string                   `json:"node_id"`
+	StartedAt  time.Time                `json:"started_at"`
+	Healthy    bool                     `json:"healthy"`
+	KVKeys     int                      `json:"kv_keys"`
+	ConfigSync *ClusterConfigSyncStatus `json:"config_sync,omitempty"`
+	Peers      []ClusterPeerStatus      `json:"peers"`
+	Discovery  *ClusterDiscoveryStatus  `json:"discovery,omitempty"`
+}
+
+type ClusterConfigSyncStatus struct {
+	StoreConnected  bool     `json:"store_connected"`
+	StoreKind       string   `json:"store_kind,omitempty"`
+	RuntimeHash     string   `json:"runtime_hash,omitempty"`
+	StoreHash       string   `json:"store_hash,omitempty"`
+	InSync          *bool    `json:"in_sync,omitempty"`
+	DriftDomains    []string `json:"drift_domains,omitempty"`
+	ProviderCount   int      `json:"provider_count,omitempty"`
+	VirtualKeyCount int      `json:"virtual_key_count,omitempty"`
+	MCPClientCount  int      `json:"mcp_client_count,omitempty"`
+	PluginCount     int      `json:"plugin_count,omitempty"`
+	LastError       string   `json:"last_error,omitempty"`
 }
 
 type ClusterDiscoveryStatus struct {
@@ -86,6 +102,7 @@ type peerState struct {
 	startedAt            *time.Time
 	kvKeys               int
 	discoveryPeerCount   int
+	configSync           *ClusterConfigSyncStatus
 	lastSeen             *time.Time
 	lastError            string
 	consecutiveSuccesses int
@@ -103,12 +120,13 @@ type ClusterService struct {
 	auth    string
 	self    map[string]struct{}
 
-	startedAt time.Time
-	queue     chan clusterEvent
-	stopCh    chan struct{}
-	stopOnce  sync.Once
-	wg        sync.WaitGroup
-	resolver  clusterDiscoveryResolver
+	startedAt          time.Time
+	queue              chan clusterEvent
+	stopCh             chan struct{}
+	stopOnce           sync.Once
+	wg                 sync.WaitGroup
+	resolver           clusterDiscoveryResolver
+	configSyncReporter func() ClusterConfigSyncStatus
 
 	mu                   sync.RWMutex
 	peers                map[string]*peerState
@@ -250,6 +268,12 @@ func (s *ClusterService) Status() ClusterStatus {
 		return ClusterStatus{}
 	}
 
+	var localConfigSync *ClusterConfigSyncStatus
+	if s.configSyncReporter != nil {
+		status := s.configSyncReporter()
+		localConfigSync = cloneClusterConfigSyncStatus(&status)
+	}
+
 	s.mu.RLock()
 	peers := make([]ClusterPeerStatus, 0, len(s.peers))
 	discoveredPeers := 0
@@ -277,6 +301,7 @@ func (s *ClusterService) Status() ClusterStatus {
 			StartedAt:            startedAt,
 			KVKeys:               peer.kvKeys,
 			DiscoveryPeerCount:   peer.discoveryPeerCount,
+			ConfigSync:           cloneClusterConfigSyncStatus(peer.configSync),
 			LastSeen:             lastSeen,
 			LastError:            peer.lastError,
 			ConsecutiveSuccesses: peer.consecutiveSuccesses,
@@ -312,12 +337,13 @@ func (s *ClusterService) Status() ClusterStatus {
 	}
 
 	return ClusterStatus{
-		NodeID:    s.nodeID,
-		StartedAt: s.startedAt,
-		Healthy:   healthy,
-		KVKeys:    s.kvStore.Len(),
-		Peers:     peers,
-		Discovery: clusterDiscoveryStatus(s.cfg, lastRefresh, discoveryLastError, discoveredPeers),
+		NodeID:     s.nodeID,
+		StartedAt:  s.startedAt,
+		Healthy:    healthy,
+		KVKeys:     s.kvStore.Len(),
+		ConfigSync: localConfigSync,
+		Peers:      peers,
+		Discovery:  clusterDiscoveryStatus(s.cfg, lastRefresh, discoveryLastError, discoveredPeers),
 	}
 }
 
@@ -522,6 +548,7 @@ func (s *ClusterService) markPeerSuccess(address string, status *ClusterStatus) 
 		peer.reportedHealthy = &reportedHealthy
 		peer.nodeID = strings.TrimSpace(status.NodeID)
 		peer.kvKeys = status.KVKeys
+		peer.configSync = cloneClusterConfigSyncStatus(status.ConfigSync)
 		if status.StartedAt.IsZero() {
 			peer.startedAt = nil
 		} else {
@@ -555,6 +582,7 @@ func (s *ClusterService) markPeerFailure(address string, err error) {
 		peer.lastError = err.Error()
 	}
 	peer.reportedHealthy = nil
+	peer.configSync = nil
 	if peer.consecutiveFailures >= failureThreshold {
 		peer.healthy = false
 	}
@@ -635,6 +663,13 @@ func (s *ClusterService) IsInternalTokenValid(token string) bool {
 	return strings.TrimSpace(token) == expected
 }
 
+func (s *ClusterService) SetConfigSyncReporter(reporter func() ClusterConfigSyncStatus) {
+	if s == nil {
+		return
+	}
+	s.configSyncReporter = reporter
+}
+
 func (s *ClusterService) NodeID() string {
 	if s == nil {
 		return ""
@@ -708,6 +743,21 @@ func normalizeClusterAddress(value string) string {
 		return strings.TrimRight(address, "/")
 	}
 	return "http://" + strings.TrimRight(address, "/")
+}
+
+func cloneClusterConfigSyncStatus(status *ClusterConfigSyncStatus) *ClusterConfigSyncStatus {
+	if status == nil {
+		return nil
+	}
+	cloned := *status
+	if len(status.DriftDomains) > 0 {
+		cloned.DriftDomains = append([]string(nil), status.DriftDomains...)
+	}
+	if status.InSync != nil {
+		value := *status.InSync
+		cloned.InSync = &value
+	}
+	return &cloned
 }
 
 func defaultClusterDiscoveryResolver() clusterDiscoveryResolver {

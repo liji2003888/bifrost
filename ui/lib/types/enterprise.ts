@@ -1,3 +1,17 @@
+export interface ClusterConfigSyncStatus {
+	store_connected: boolean;
+	store_kind?: string;
+	runtime_hash?: string;
+	store_hash?: string;
+	in_sync?: boolean;
+	drift_domains?: string[];
+	provider_count?: number;
+	virtual_key_count?: number;
+	mcp_client_count?: number;
+	plugin_count?: number;
+	last_error?: string;
+}
+
 export interface ClusterPeerStatus {
 	address: string;
 	healthy: boolean;
@@ -6,6 +20,7 @@ export interface ClusterPeerStatus {
 	started_at?: string;
 	kv_keys?: number;
 	discovery_peer_count?: number;
+	config_sync?: ClusterConfigSyncStatus;
 	last_seen?: string;
 	last_error?: string;
 	consecutive_successes: number;
@@ -25,6 +40,7 @@ export interface ClusterStatus {
 	started_at: string;
 	healthy: boolean;
 	kv_keys: number;
+	config_sync?: ClusterConfigSyncStatus;
 	peers: ClusterPeerStatus[];
 	discovery?: ClusterDiscoveryStatus;
 }

@@ -41,6 +41,21 @@ export default function ClusterPage() {
 
 	const clusterServiceDisabled = isServiceDisabledError(clusterError);
 	const vaultServiceDisabled = isServiceDisabledError(vaultError);
+	const localConfigSync = clusterStatus?.config_sync;
+
+	const peerRuntimeDriftCount = useMemo(() => {
+		if (!clusterStatus?.peers?.length || !localConfigSync?.runtime_hash) {
+			return 0;
+		}
+		return clusterStatus.peers.filter((peer) => peer.config_sync?.runtime_hash && peer.config_sync.runtime_hash !== localConfigSync.runtime_hash).length;
+	}, [clusterStatus?.peers, localConfigSync?.runtime_hash]);
+
+	const peersOutOfSyncWithStoreCount = useMemo(() => {
+		if (!clusterStatus?.peers?.length) {
+			return 0;
+		}
+		return clusterStatus.peers.filter((peer) => peer.config_sync?.store_connected && peer.config_sync?.in_sync === false).length;
+	}, [clusterStatus?.peers]);
 
 	const summaryCards = useMemo(() => {
 		if (!clusterStatus) {
@@ -68,12 +83,17 @@ export default function ClusterPage() {
 				icon: GitBranch,
 			},
 			{
+				label: "Runtime Drift",
+				value: peerRuntimeDriftCount.toLocaleString(),
+				icon: RefreshCw,
+			},
+			{
 				label: "Managed Secrets",
 				value: vaultStatus ? vaultStatus.managed_secrets.toLocaleString() : vaultServiceDisabled ? "Disabled" : "-",
 				icon: KeyRound,
 			},
 		];
-	}, [clusterStatus, vaultStatus, vaultServiceDisabled]);
+	}, [clusterStatus, peerRuntimeDriftCount, vaultStatus, vaultServiceDisabled]);
 
 	if (clusterLoading && !clusterStatus) {
 		return <FullPageLoader />;
@@ -120,7 +140,40 @@ export default function ClusterPage() {
 
 			{clusterStatus && (
 				<>
-					<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+					{localConfigSync?.store_connected && localConfigSync.in_sync === false && (
+						<Alert variant="info">
+							<AlertCircle />
+							<AlertTitle>Current node runtime is behind ConfigStore</AlertTitle>
+							<AlertDescription>
+								This node is still serving a different runtime config than the persisted ConfigStore state. Cluster mode currently replicates KV state,
+								not generic config hot reloads, so peer nodes can drift until they reload the changed config.
+							</AlertDescription>
+						</Alert>
+					)}
+
+					{peerRuntimeDriftCount > 0 && (
+						<Alert variant="info">
+							<AlertCircle />
+							<AlertTitle>Runtime drift detected across the cluster</AlertTitle>
+							<AlertDescription>
+								{peerRuntimeDriftCount} peer node{peerRuntimeDriftCount === 1 ? "" : "s"} currently expose a different runtime config fingerprint than this
+								node.
+							</AlertDescription>
+						</Alert>
+					)}
+
+					{peersOutOfSyncWithStoreCount > 0 && (
+						<Alert variant="info">
+							<AlertCircle />
+							<AlertTitle>Some peer nodes are not reloaded from ConfigStore</AlertTitle>
+							<AlertDescription>
+								{peersOutOfSyncWithStoreCount} peer node{peersOutOfSyncWithStoreCount === 1 ? "" : "s"} report runtime drift from their own
+								ConfigStore snapshot.
+							</AlertDescription>
+						</Alert>
+					)}
+
+					<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
 						{summaryCards.map((card) => (
 							<Card key={card.label} className="shadow-none">
 								<CardContent className="flex items-start justify-between px-4 py-4">
@@ -144,12 +197,37 @@ export default function ClusterPage() {
 								<InfoPair label="Started" value={formatTimestamp(clusterStatus.started_at)} />
 								<InfoPair label="Status" value={<HealthBadge healthy={clusterStatus.healthy} />} />
 								<InfoPair
+									label="Config Sync"
+									value={
+										!localConfigSync?.store_connected
+											? "No ConfigStore"
+											: localConfigSync.in_sync === false
+												? "Runtime drift"
+												: "In sync"
+									}
+								/>
+								<InfoPair
 									label="Discovery"
 									value={
 										clusterStatus.discovery?.enabled
 											? `${clusterStatus.discovery.type || "enabled"} (${clusterStatus.discovery.peer_count} peers)`
 											: "Disabled"
 									}
+								/>
+								<InfoPair label="Config Store" value={localConfigSync?.store_connected ? localConfigSync.store_kind || "connected" : "Disabled"} />
+								<InfoPair
+									label="Tracked Resources"
+									value={`${localConfigSync?.provider_count ?? 0} providers · ${localConfigSync?.virtual_key_count ?? 0} virtual keys`}
+								/>
+								<InfoPair
+									label="Runtime Fingerprint"
+									value={localConfigSync?.runtime_hash ? `${localConfigSync.runtime_hash.slice(0, 12)}...` : "-"}
+									mono
+								/>
+								<InfoPair
+									label="Store Fingerprint"
+									value={localConfigSync?.store_hash ? `${localConfigSync.store_hash.slice(0, 12)}...` : localConfigSync?.store_connected ? "-" : "N/A"}
+									mono
 								/>
 							</CardContent>
 						</Card>
@@ -199,6 +277,7 @@ export default function ClusterPage() {
 									<TableRow>
 										<TableHead>Address</TableHead>
 										<TableHead>Status</TableHead>
+										<TableHead>Config Sync</TableHead>
 										<TableHead>Last Seen</TableHead>
 										<TableHead>Successes</TableHead>
 										<TableHead>Failures</TableHead>
@@ -208,7 +287,7 @@ export default function ClusterPage() {
 								<TableBody>
 									{clusterStatus.peers.length === 0 ? (
 										<TableRow>
-											<TableCell colSpan={6} className="h-24 text-center">
+											<TableCell colSpan={7} className="h-24 text-center">
 												<span className="text-muted-foreground text-sm">No peers are registered for this node yet.</span>
 											</TableCell>
 										</TableRow>
@@ -233,6 +312,28 @@ export default function ClusterPage() {
 													</div>
 												</TableCell>
 												<TableCell>
+													<div className="flex flex-col gap-0.5 text-sm">
+														<span>
+															{!peer.config_sync?.store_connected
+																? "No store"
+																: peer.config_sync.in_sync === false
+																	? "Runtime drift"
+																	: "In sync"}
+														</span>
+														<span className="text-muted-foreground text-xs">
+															{peer.config_sync?.runtime_hash && localConfigSync?.runtime_hash
+																? peer.config_sync.runtime_hash === localConfigSync.runtime_hash
+																	? "Matches local runtime"
+																	: "Differs from local runtime"
+																: "Runtime match unavailable"}
+														</span>
+														<span className="text-muted-foreground text-xs">
+															{peer.config_sync?.store_kind || "store type unavailable"}
+															{peer.config_sync?.drift_domains?.length ? ` · ${peer.config_sync.drift_domains.join(", ")}` : ""}
+														</span>
+													</div>
+												</TableCell>
+												<TableCell>
 													<div className="flex flex-col gap-0.5">
 														<span>{formatTimestamp(peer.last_seen)}</span>
 														<span className="text-muted-foreground text-xs">{formatRelativeTimestamp(peer.last_seen)}</span>
@@ -246,6 +347,13 @@ export default function ClusterPage() {
 									)}
 								</TableBody>
 							</Table>
+							{localConfigSync?.last_error && (
+								<Alert variant="info" className="mt-4">
+									<AlertCircle />
+									<AlertTitle>Config sync status is partially degraded</AlertTitle>
+									<AlertDescription>{localConfigSync.last_error}</AlertDescription>
+								</Alert>
+							)}
 						</CardContent>
 					</Card>
 				</>
