@@ -160,6 +160,10 @@ export const baseApi = createApi({
 		"Prompts",
 		"Versions",
 		"Sessions",
+		"AdaptiveRouting",
+		"Alerts",
+		"LogExports",
+		"VaultStatus",
 	],
 	endpoints: () => ({}),
 });

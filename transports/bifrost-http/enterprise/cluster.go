@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -44,6 +45,11 @@ type ClusterMutation struct {
 type ClusterPeerStatus struct {
 	Address              string     `json:"address"`
 	Healthy              bool       `json:"healthy"`
+	ReportedHealthy      *bool      `json:"reported_healthy,omitempty"`
+	NodeID               string     `json:"node_id,omitempty"`
+	StartedAt            *time.Time `json:"started_at,omitempty"`
+	KVKeys               int        `json:"kv_keys,omitempty"`
+	DiscoveryPeerCount   int        `json:"discovery_peer_count,omitempty"`
 	LastSeen             *time.Time `json:"last_seen,omitempty"`
 	LastError            string     `json:"last_error,omitempty"`
 	ConsecutiveSuccesses int        `json:"consecutive_successes"`
@@ -75,6 +81,11 @@ type clusterEvent struct {
 type peerState struct {
 	address              string
 	healthy              bool
+	reportedHealthy      *bool
+	nodeID               string
+	startedAt            *time.Time
+	kvKeys               int
+	discoveryPeerCount   int
 	lastSeen             *time.Time
 	lastError            string
 	consecutiveSuccesses int
@@ -248,9 +259,24 @@ func (s *ClusterService) Status() ClusterStatus {
 			t := *peer.lastSeen
 			lastSeen = &t
 		}
+		var reportedHealthy *bool
+		if peer.reportedHealthy != nil {
+			value := *peer.reportedHealthy
+			reportedHealthy = &value
+		}
+		var startedAt *time.Time
+		if peer.startedAt != nil {
+			t := *peer.startedAt
+			startedAt = &t
+		}
 		peers = append(peers, ClusterPeerStatus{
 			Address:              peer.address,
 			Healthy:              peer.healthy,
+			ReportedHealthy:      reportedHealthy,
+			NodeID:               peer.nodeID,
+			StartedAt:            startedAt,
+			KVKeys:               peer.kvKeys,
+			DiscoveryPeerCount:   peer.discoveryPeerCount,
 			LastSeen:             lastSeen,
 			LastError:            peer.lastError,
 			ConsecutiveSuccesses: peer.consecutiveSuccesses,
@@ -276,6 +302,10 @@ func (s *ClusterService) Status() ClusterStatus {
 	failureThreshold := clusterFailureThreshold(s.cfg)
 	for _, peer := range peers {
 		if peer.ConsecutiveFailures >= failureThreshold {
+			healthy = false
+			break
+		}
+		if peer.ReportedHealthy != nil && !*peer.ReportedHealthy {
 			healthy = false
 			break
 		}
@@ -337,7 +367,7 @@ func (s *ClusterService) broadcast(event clusterEvent) {
 			s.markPeerFailure(peer, fmt.Errorf("peer returned status %d", resp.StatusCode))
 			continue
 		}
-		s.markPeerSuccess(peer)
+		s.markPeerSuccess(peer, nil)
 	}
 }
 
@@ -382,12 +412,18 @@ func (s *ClusterService) checkPeers() {
 			s.markPeerFailure(peer, err)
 			continue
 		}
-		resp.Body.Close()
 		if resp.StatusCode >= http.StatusBadRequest {
+			resp.Body.Close()
 			s.markPeerFailure(peer, fmt.Errorf("peer returned status %d", resp.StatusCode))
 			continue
 		}
-		s.markPeerSuccess(peer)
+		status, err := readClusterStatus(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			s.markPeerFailure(peer, fmt.Errorf("invalid cluster status response: %w", err))
+			continue
+		}
+		s.markPeerSuccess(peer, status)
 	}
 }
 
@@ -466,7 +502,7 @@ func (s *ClusterService) syncDiscoveredPeers(addresses []string) {
 	}
 }
 
-func (s *ClusterService) markPeerSuccess(address string) {
+func (s *ClusterService) markPeerSuccess(address string, status *ClusterStatus) {
 	now := time.Now().UTC()
 	successThreshold := clusterSuccessThreshold(s.cfg)
 
@@ -481,6 +517,23 @@ func (s *ClusterService) markPeerSuccess(address string) {
 	peer.consecutiveFailures = 0
 	peer.lastError = ""
 	peer.lastSeen = &now
+	if status != nil {
+		reportedHealthy := status.Healthy
+		peer.reportedHealthy = &reportedHealthy
+		peer.nodeID = strings.TrimSpace(status.NodeID)
+		peer.kvKeys = status.KVKeys
+		if status.StartedAt.IsZero() {
+			peer.startedAt = nil
+		} else {
+			startedAt := status.StartedAt
+			peer.startedAt = &startedAt
+		}
+		if status.Discovery != nil {
+			peer.discoveryPeerCount = status.Discovery.PeerCount
+		} else {
+			peer.discoveryPeerCount = 0
+		}
+	}
 	if peer.consecutiveSuccesses >= successThreshold {
 		peer.healthy = true
 	}
@@ -501,9 +554,30 @@ func (s *ClusterService) markPeerFailure(address string, err error) {
 	if err != nil {
 		peer.lastError = err.Error()
 	}
+	peer.reportedHealthy = nil
 	if peer.consecutiveFailures >= failureThreshold {
 		peer.healthy = false
 	}
+}
+
+func readClusterStatus(reader io.Reader) (*ClusterStatus, error) {
+	if reader == nil {
+		return nil, nil
+	}
+
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+
+	var status ClusterStatus
+	if err := sonic.Unmarshal(body, &status); err != nil {
+		return nil, err
+	}
+	return &status, nil
 }
 
 func (s *ClusterService) addAuthHeader(req *http.Request) {

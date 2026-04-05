@@ -2,6 +2,7 @@ package enterprise
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -221,5 +222,72 @@ func TestClusterServiceRemovesStaleDiscoveredPeersButKeepsStaticPeers(t *testing
 	}
 	if addresses["http://10.1.2.3:8080"] {
 		t.Fatalf("expected stale discovered peer to be removed, got %+v", status.Peers)
+	}
+}
+
+func TestClusterCheckPeersCapturesRemoteStatusMetadata(t *testing.T) {
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	startedAt := time.Now().UTC().Add(-5 * time.Minute)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get(ClusterAuthHeader); got != "cluster-secret" {
+			t.Fatalf("expected cluster auth header to be forwarded, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(ClusterStatus{
+			NodeID:    "node-b",
+			StartedAt: startedAt,
+			Healthy:   false,
+			KVKeys:    42,
+			Discovery: &ClusterDiscoveryStatus{
+				Enabled:   true,
+				Type:      ClusterDiscoveryDNS,
+				PeerCount: 3,
+			},
+		}); err != nil {
+			t.Fatalf("Encode() error = %v", err)
+		}
+	}))
+	defer server.Close()
+
+	service, err := NewClusterService(&ClusterConfig{
+		Enabled:   true,
+		Peers:     []string{server.URL},
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, store, "127.0.0.1:8080", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService() error = %v", err)
+	}
+	defer service.Close()
+
+	service.checkPeers()
+
+	status := service.Status()
+	if status.Healthy {
+		t.Fatal("expected cluster to reflect unhealthy remote peer state")
+	}
+	if len(status.Peers) != 1 {
+		t.Fatalf("expected one peer, got %+v", status.Peers)
+	}
+
+	peer := status.Peers[0]
+	if peer.NodeID != "node-b" {
+		t.Fatalf("expected peer node id to be populated, got %+v", peer)
+	}
+	if peer.ReportedHealthy == nil || *peer.ReportedHealthy {
+		t.Fatalf("expected peer reported healthy to be false, got %+v", peer)
+	}
+	if peer.KVKeys != 42 {
+		t.Fatalf("expected peer kv keys to be populated, got %+v", peer)
+	}
+	if peer.DiscoveryPeerCount != 3 {
+		t.Fatalf("expected peer discovery count to be populated, got %+v", peer)
+	}
+	if peer.StartedAt == nil || !peer.StartedAt.Equal(startedAt) {
+		t.Fatalf("expected peer started time to be populated, got %+v", peer)
 	}
 }

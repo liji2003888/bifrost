@@ -4,6 +4,7 @@ export { baseApi, clearAuthStorage, getErrorMessage, setAuthToken } from "./base
 // API slices and hooks
 export * from "./configApi";
 export * from "./devApi";
+export * from "./enterpriseApi";
 export * from "./governanceApi";
 export * from "./logsApi";
 export * from "./mcpApi";
