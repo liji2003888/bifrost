@@ -19,6 +19,7 @@ const (
 	ClusterConfigScopeFramework          ClusterConfigScope = "framework"
 	ClusterConfigScopeMCPClient          ClusterConfigScope = "mcp_client"
 	ClusterConfigScopeModelConfig        ClusterConfigScope = "model_config"
+	ClusterConfigScopePlugin             ClusterConfigScope = "plugin"
 	ClusterConfigScopeProviderGovernance ClusterConfigScope = "provider_governance"
 	ClusterConfigScopeProxy              ClusterConfigScope = "proxy"
 	ClusterConfigScopeProvider           ClusterConfigScope = "provider"
@@ -33,6 +34,8 @@ type ClusterConfigChange struct {
 	CustomerConfig     *configstoreTables.TableCustomer        `json:"customer_config,omitempty"`
 	ModelConfigID      string                                  `json:"model_config_id,omitempty"`
 	ModelConfig        *configstoreTables.TableModelConfig     `json:"model_config,omitempty"`
+	PluginName         string                                  `json:"plugin_name,omitempty"`
+	PluginConfig       *configstoreTables.TablePlugin          `json:"plugin_config,omitempty"`
 	Provider           schemas.ModelProvider                   `json:"provider,omitempty"`
 	ProviderGovernance *configstoreTables.TableProvider        `json:"provider_governance,omitempty"`
 	MCPClientID        string                                  `json:"mcp_client_id,omitempty"`

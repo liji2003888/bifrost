@@ -25,35 +25,35 @@ type PluginsLoader interface {
 type PluginsHandler struct {
 	configStore   configstore.ConfigStore
 	pluginsLoader PluginsLoader
+	propagator    ClusterConfigPropagator
 }
 
 // NewPluginsHandler creates a new PluginsHandler
-func NewPluginsHandler(pluginsLoader PluginsLoader, configStore configstore.ConfigStore) *PluginsHandler {
+func NewPluginsHandler(pluginsLoader PluginsLoader, configStore configstore.ConfigStore, propagator ClusterConfigPropagator) *PluginsHandler {
 	return &PluginsHandler{
 		pluginsLoader: pluginsLoader,
 		configStore:   configStore,
+		propagator:    propagator,
 	}
 }
 
-
-
 // CreatePluginRequest is the request body for creating a plugin
 type CreatePluginRequest struct {
-	Name      string           `json:"name"`
-	Enabled   bool             `json:"enabled"`
-	Config    map[string]any   `json:"config"`
-	Path      *string          `json:"path"`
+	Name      string                   `json:"name"`
+	Enabled   bool                     `json:"enabled"`
+	Config    map[string]any           `json:"config"`
+	Path      *string                  `json:"path"`
 	Placement *schemas.PluginPlacement `json:"placement,omitempty"`
-	Order     *int             `json:"order,omitempty"`
+	Order     *int                     `json:"order,omitempty"`
 }
 
 // UpdatePluginRequest is the request body for updating a plugin
 type UpdatePluginRequest struct {
-	Enabled   bool             `json:"enabled"`
-	Path      *string          `json:"path"`
-	Config    map[string]any   `json:"config"`
+	Enabled   bool                     `json:"enabled"`
+	Path      *string                  `json:"path"`
+	Config    map[string]any           `json:"config"`
 	Placement *schemas.PluginPlacement `json:"placement,omitempty"`
-	Order     *int             `json:"order,omitempty"`
+	Order     *int                     `json:"order,omitempty"`
 }
 
 // RegisterRoutes registers the routes for the PluginsHandler
@@ -66,15 +66,15 @@ func (h *PluginsHandler) RegisterRoutes(r *router.Router, middlewares ...schemas
 }
 
 type PluginResponse struct {
-	Name       string               `json:"name"`
-	ActualName string               `json:"actualName"`
-	Enabled    bool                 `json:"enabled"`
-	Config     any                  `json:"config"`
-	IsCustom   bool                 `json:"isCustom"`
-	Path       *string              `json:"path"`
-	Placement  *schemas.PluginPlacement     `json:"placement,omitempty"`
-	Order      *int                 `json:"order,omitempty"`
-	Status     schemas.PluginStatus `json:"status"`
+	Name       string                   `json:"name"`
+	ActualName string                   `json:"actualName"`
+	Enabled    bool                     `json:"enabled"`
+	Config     any                      `json:"config"`
+	IsCustom   bool                     `json:"isCustom"`
+	Path       *string                  `json:"path"`
+	Placement  *schemas.PluginPlacement `json:"placement,omitempty"`
+	Order      *int                     `json:"order,omitempty"`
+	Status     schemas.PluginStatus     `json:"status"`
 }
 
 // buildPluginResponse constructs a PluginResponse with status for a given TablePlugin.
@@ -308,6 +308,8 @@ func (h *PluginsHandler) createPlugin(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	h.propagateClusterPluginChange(ctx, plugin, false)
+
 	ctx.SetStatusCode(fasthttp.StatusCreated)
 	SendJSON(ctx, map[string]any{
 		"message": "Plugin created successfully",
@@ -436,6 +438,8 @@ func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
 		}
 	}
 
+	h.propagateClusterPluginChange(ctx, plugin, false)
+
 	SendJSON(ctx, map[string]interface{}{
 		"message": "Plugin updated successfully",
 		"plugin":  h.buildPluginResponse(ctx, plugin),
@@ -485,7 +489,58 @@ func (h *PluginsHandler) deletePlugin(ctx *fasthttp.RequestCtx) {
 			return
 		}
 	}
+
+	h.propagateClusterPluginChange(ctx, &configstoreTables.TablePlugin{
+		Name:     name,
+		Enabled:  false,
+		Path:     nil,
+		IsCustom: !lib.IsBuiltinPlugin(name),
+	}, true)
+
 	SendJSON(ctx, map[string]interface{}{
 		"message": "Plugin deleted successfully",
 	})
+}
+
+func (h *PluginsHandler) propagateClusterPluginChange(ctx context.Context, plugin *configstoreTables.TablePlugin, deletePlugin bool) {
+	if h == nil || h.propagator == nil || plugin == nil {
+		return
+	}
+	if !shouldPropagateClusterPlugin(plugin) {
+		return
+	}
+	change := &ClusterConfigChange{
+		Scope:      ClusterConfigScopePlugin,
+		PluginName: plugin.Name,
+		Delete:     deletePlugin,
+	}
+	if !deletePlugin {
+		change.PluginConfig = cloneClusterPlugin(plugin)
+	}
+	if err := h.propagator.PropagateClusterConfigChange(ctx, change); err != nil {
+		logger.Warn("failed to propagate plugin cluster config change for %s: %v", plugin.Name, err)
+	}
+}
+
+func shouldPropagateClusterPlugin(plugin *configstoreTables.TablePlugin) bool {
+	if plugin == nil {
+		return false
+	}
+	if plugin.IsCustom {
+		return false
+	}
+	if plugin.Path != nil && *plugin.Path != "" {
+		return false
+	}
+	return lib.IsBuiltinPlugin(plugin.Name)
+}
+
+func cloneClusterPlugin(plugin *configstoreTables.TablePlugin) *configstoreTables.TablePlugin {
+	if plugin == nil {
+		return nil
+	}
+	clone := *plugin
+	clone.Path = nil
+	clone.IsCustom = false
+	return &clone
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -414,5 +415,107 @@ func TestPropagateClusterConfigChangeAppliesGovernanceResourcesOnRemotePeer(t *t
 	}
 	if storedClearedProviderGovernance.BudgetID != nil || storedClearedProviderGovernance.RateLimitID != nil {
 		t.Fatalf("unexpected remote provider governance after clear: %+v", storedClearedProviderGovernance)
+	}
+}
+
+func TestPropagateClusterConfigChangeAppliesBuiltinPluginConfigOnRemotePeer(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+	handlers.SetLogger(bifrost.NewNoOpLogger())
+
+	remoteStore := newClusterPluginApplyStore(t)
+
+	remoteKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(remote) error = %v", err)
+	}
+	defer remoteKV.Close()
+
+	remoteCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, remoteKV, "remote-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(remote) error = %v", err)
+	}
+	defer remoteCluster.Close()
+
+	remoteServer := &BifrostHTTPServer{
+		Ctx:            schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+		Config:         &lib.Config{ConfigStore: remoteStore},
+		ClusterService: remoteCluster,
+	}
+
+	remoteRouter := router.New()
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+	defer remoteHTTPServer.Shutdown()
+
+	go func() {
+		_ = remoteHTTPServer.Serve(listener)
+	}()
+
+	localKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(local) error = %v", err)
+	}
+	defer localKV.Close()
+
+	localCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		Peers:     []string{"http://" + listener.Addr().String()},
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, localKV, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(local) error = %v", err)
+	}
+	defer localCluster.Close()
+
+	localServer := &BifrostHTTPServer{
+		ClusterService: localCluster,
+	}
+
+	pluginConfig := &configstoreTables.TablePlugin{
+		Name:     "loadbalancer",
+		Enabled:  false,
+		IsCustom: false,
+		Config: map[string]any{
+			"latency_weight": 0.6,
+		},
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:        handlers.ClusterConfigScopePlugin,
+		PluginName:   "loadbalancer",
+		PluginConfig: pluginConfig,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(plugin create/update) error = %v", err)
+	}
+
+	remotePlugin, err := remoteStore.GetPlugin(context.Background(), "loadbalancer")
+	if err != nil {
+		t.Fatalf("GetPlugin(loadbalancer) error = %v", err)
+	}
+	if remotePlugin.Enabled || remotePlugin.IsCustom || remotePlugin.Path != nil {
+		t.Fatalf("unexpected remote plugin record: %+v", remotePlugin)
+	}
+	config, ok := remotePlugin.Config.(map[string]any)
+	if !ok || config["latency_weight"] != 0.6 {
+		t.Fatalf("expected remote plugin config to be preserved, got %+v", remotePlugin.Config)
+	}
+
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:      handlers.ClusterConfigScopePlugin,
+		PluginName: "loadbalancer",
+		Delete:     true,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(plugin delete) error = %v", err)
+	}
+
+	if _, err := remoteStore.GetPlugin(context.Background(), "loadbalancer"); !errors.Is(err, configstore.ErrNotFound) {
+		t.Fatalf("expected propagated plugin delete to remove remote config, got err=%v", err)
 	}
 }
