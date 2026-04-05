@@ -311,7 +311,9 @@ func (s *BifrostHTTPServer) ReloadVirtualKey(ctx context.Context, id string) (*t
 		return nil, err
 	}
 	governancePlugin.GetGovernanceStore().UpdateVirtualKeyInMemory(virtualKey, nil, nil, nil)
-	s.MCPServerHandler.SyncVKMCPServer(virtualKey)
+	if s.MCPServerHandler != nil {
+		s.MCPServerHandler.SyncVKMCPServer(virtualKey)
+	}
 	return virtualKey, nil
 }
 
@@ -333,7 +335,9 @@ func (s *BifrostHTTPServer) RemoveVirtualKey(ctx context.Context, id string) err
 		return nil
 	}
 	governancePlugin.GetGovernanceStore().DeleteVirtualKeyInMemory(id)
-	s.MCPServerHandler.DeleteVKMCPServer(preloadedVk.Value)
+	if s.MCPServerHandler != nil {
+		s.MCPServerHandler.DeleteVKMCPServer(preloadedVk.Value)
+	}
 	return nil
 }
 
@@ -1007,7 +1011,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	}
 	governancePlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](s.Config, governancePluginName)
 	if governancePlugin != nil {
-		governanceHandler, err = handlers.NewGovernanceHandler(callbacks, s.Config.ConfigStore)
+		governanceHandler, err = handlers.NewGovernanceHandler(callbacks, s.Config.ConfigStore, clusterPropagator)
 		if err != nil {
 			return fmt.Errorf("failed to initialize governance handler: %v", err)
 		}

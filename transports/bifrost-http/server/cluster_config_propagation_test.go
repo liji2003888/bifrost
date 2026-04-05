@@ -3,17 +3,22 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/fasthttp/router"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/kvstore"
 	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
+	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	"github.com/valyala/fasthttp"
 )
 
 func TestPropagateClusterConfigChangeBroadcastsPayloadToPeers(t *testing.T) {
@@ -78,5 +83,228 @@ func TestPropagateClusterConfigChangeBroadcastsPayloadToPeers(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for propagated cluster config change")
+	}
+}
+
+func TestPropagateClusterConfigChangeAppliesAuthConfigOnRemotePeer(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+	handlers.SetLogger(bifrost.NewNoOpLogger())
+
+	remoteStore := &authClusterConfigStore{
+		clientConfig: &configstore.ClientConfig{},
+	}
+	remoteAuthMiddleware, err := handlers.InitAuthMiddleware(remoteStore, nil)
+	if err != nil {
+		t.Fatalf("InitAuthMiddleware() error = %v", err)
+	}
+
+	remoteKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(remote) error = %v", err)
+	}
+	defer remoteKV.Close()
+
+	remoteCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, remoteKV, "remote-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(remote) error = %v", err)
+	}
+	defer remoteCluster.Close()
+
+	remoteServer := &BifrostHTTPServer{
+		Ctx:            schemas.NewBifrostContext(context.Background(), schemas.NoDeadline),
+		Config:         &lib.Config{ConfigStore: remoteStore, ClientConfig: remoteStore.clientConfig},
+		AuthMiddleware: remoteAuthMiddleware,
+		ClusterService: remoteCluster,
+	}
+
+	remoteRouter := router.New()
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+	defer remoteHTTPServer.Shutdown()
+
+	go func() {
+		_ = remoteHTTPServer.Serve(listener)
+	}()
+
+	localKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(local) error = %v", err)
+	}
+	defer localKV.Close()
+
+	localCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		Peers:     []string{"http://" + listener.Addr().String()},
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, localKV, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(local) error = %v", err)
+	}
+	defer localCluster.Close()
+
+	localServer := &BifrostHTTPServer{
+		ClusterService: localCluster,
+	}
+
+	change := &handlers.ClusterConfigChange{
+		Scope: handlers.ClusterConfigScopeAuth,
+		AuthConfig: &configstore.AuthConfig{
+			AdminUserName:          schemas.NewEnvVar("admin"),
+			AdminPassword:          schemas.NewEnvVar("stored-hash"),
+			IsEnabled:              true,
+			DisableAuthOnInference: false,
+		},
+		FlushSessions: true,
+	}
+
+	if err := localServer.PropagateClusterConfigChange(context.Background(), change); err != nil {
+		t.Fatalf("PropagateClusterConfigChange() error = %v", err)
+	}
+
+	if remoteStore.authConfig == nil || !remoteStore.authConfig.IsEnabled {
+		t.Fatalf("expected remote auth config to be persisted, got %+v", remoteStore.authConfig)
+	}
+	if !remoteStore.flushSessionsCalled {
+		t.Fatal("expected remote peer to flush sessions after propagated auth change")
+	}
+	assertAPIMiddlewareRejectsWithoutAuth(t, remoteAuthMiddleware)
+}
+
+func TestPropagateClusterConfigChangeAppliesGovernanceResourcesOnRemotePeer(t *testing.T) {
+	remoteServer, remoteStore, cleanup := newGovernanceClusterTestServer(t)
+	defer cleanup()
+
+	remoteKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(remote) error = %v", err)
+	}
+	defer remoteKV.Close()
+
+	remoteCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, remoteKV, "remote-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(remote) error = %v", err)
+	}
+	defer remoteCluster.Close()
+
+	remoteServer.ClusterService = remoteCluster
+	remoteServer.Ctx = schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+
+	remoteRouter := router.New()
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+	defer remoteHTTPServer.Shutdown()
+
+	go func() {
+		_ = remoteHTTPServer.Serve(listener)
+	}()
+
+	localKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New(local) error = %v", err)
+	}
+	defer localKV.Close()
+
+	localCluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		Peers:     []string{"http://" + listener.Addr().String()},
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, localKV, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService(local) error = %v", err)
+	}
+	defer localCluster.Close()
+
+	localServer := &BifrostHTTPServer{
+		ClusterService: localCluster,
+	}
+
+	customerBudgetID := "budget-propagated-customer"
+	customer := &configstoreTables.TableCustomer{
+		ID:       "customer-propagated",
+		Name:     "Cluster Customer",
+		BudgetID: bifrost.Ptr(customerBudgetID),
+		Budget: &configstoreTables.TableBudget{
+			ID:            customerBudgetID,
+			MaxLimit:      100,
+			ResetDuration: "1h",
+			LastReset:     time.Unix(1700000000, 0).UTC(),
+			CurrentUsage:  3.5,
+		},
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:          handlers.ClusterConfigScopeCustomer,
+		CustomerID:     customer.ID,
+		CustomerConfig: customer,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(customer) error = %v", err)
+	}
+
+	customerTeamID := "team-propagated"
+	team := &configstoreTables.TableTeam{
+		ID:         customerTeamID,
+		Name:       "Cluster Team",
+		CustomerID: bifrost.Ptr(customer.ID),
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:      handlers.ClusterConfigScopeTeam,
+		TeamID:     team.ID,
+		TeamConfig: team,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(team) error = %v", err)
+	}
+
+	virtualKey := &configstoreTables.TableVirtualKey{
+		ID:       "vk-propagated",
+		Name:     "Cluster Virtual Key",
+		Value:    "sk-bf-propagated",
+		IsActive: true,
+		TeamID:   bifrost.Ptr(team.ID),
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:            handlers.ClusterConfigScopeVirtualKey,
+		VirtualKeyID:     virtualKey.ID,
+		VirtualKeyConfig: virtualKey,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(virtual key) error = %v", err)
+	}
+
+	storedCustomer, err := remoteStore.GetCustomer(context.Background(), customer.ID)
+	if err != nil {
+		t.Fatalf("remote GetCustomer() error = %v", err)
+	}
+	if storedCustomer.Name != customer.Name {
+		t.Fatalf("expected remote customer name %q, got %q", customer.Name, storedCustomer.Name)
+	}
+
+	storedTeam, err := remoteStore.GetTeam(context.Background(), team.ID)
+	if err != nil {
+		t.Fatalf("remote GetTeam() error = %v", err)
+	}
+	if storedTeam.CustomerID == nil || *storedTeam.CustomerID != customer.ID {
+		t.Fatalf("expected remote team to reference customer %s, got %+v", customer.ID, storedTeam.CustomerID)
+	}
+
+	storedVirtualKey, err := remoteStore.GetVirtualKey(context.Background(), virtualKey.ID)
+	if err != nil {
+		t.Fatalf("remote GetVirtualKey() error = %v", err)
+	}
+	if storedVirtualKey.TeamID == nil || *storedVirtualKey.TeamID != team.ID || storedVirtualKey.Value != virtualKey.Value {
+		t.Fatalf("unexpected remote virtual key: %+v", storedVirtualKey)
 	}
 }

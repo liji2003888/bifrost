@@ -74,7 +74,9 @@ type ClusterConfigSyncStatus struct {
 	StoreHash       string   `json:"store_hash,omitempty"`
 	InSync          *bool    `json:"in_sync,omitempty"`
 	DriftDomains    []string `json:"drift_domains,omitempty"`
+	CustomerCount   int      `json:"customer_count,omitempty"`
 	ProviderCount   int      `json:"provider_count,omitempty"`
+	TeamCount       int      `json:"team_count,omitempty"`
 	VirtualKeyCount int      `json:"virtual_key_count,omitempty"`
 	MCPClientCount  int      `json:"mcp_client_count,omitempty"`
 	PluginCount     int      `json:"plugin_count,omitempty"`

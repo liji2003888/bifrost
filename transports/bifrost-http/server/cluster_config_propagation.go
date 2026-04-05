@@ -74,6 +74,8 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		return s.ApplyClusterClientConfig(ctx, change.ClientConfig)
 	case handlers.ClusterConfigScopeAuth:
 		return s.ApplyClusterAuthConfig(ctx, change.AuthConfig, change.FlushSessions)
+	case handlers.ClusterConfigScopeCustomer:
+		return s.ApplyClusterCustomerConfig(ctx, change.CustomerID, change.CustomerConfig, change.Delete)
 	case handlers.ClusterConfigScopeFramework:
 		return s.ApplyClusterFrameworkConfig(ctx, change.FrameworkConfig)
 	case handlers.ClusterConfigScopeMCPClient:
@@ -88,6 +90,10 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 			return s.RemoveProvider(ctx, change.Provider)
 		}
 		return s.ApplyClusterProviderConfig(ctx, change.Provider, change.ProviderConfig)
+	case handlers.ClusterConfigScopeTeam:
+		return s.ApplyClusterTeamConfig(ctx, change.TeamID, change.TeamConfig, change.Delete)
+	case handlers.ClusterConfigScopeVirtualKey:
+		return s.ApplyClusterVirtualKeyConfig(ctx, change.VirtualKeyID, change.VirtualKeyConfig, change.Delete)
 	default:
 		return fmt.Errorf("unsupported cluster config scope: %s", change.Scope)
 	}

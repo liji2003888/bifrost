@@ -13,26 +13,35 @@ const ClusterConfigReloadEndpoint = "/_cluster/config/reload"
 type ClusterConfigScope string
 
 const (
-	ClusterConfigScopeClient    ClusterConfigScope = "client"
-	ClusterConfigScopeAuth      ClusterConfigScope = "auth"
-	ClusterConfigScopeFramework ClusterConfigScope = "framework"
-	ClusterConfigScopeMCPClient ClusterConfigScope = "mcp_client"
-	ClusterConfigScopeProxy     ClusterConfigScope = "proxy"
-	ClusterConfigScopeProvider  ClusterConfigScope = "provider"
+	ClusterConfigScopeClient     ClusterConfigScope = "client"
+	ClusterConfigScopeAuth       ClusterConfigScope = "auth"
+	ClusterConfigScopeCustomer   ClusterConfigScope = "customer"
+	ClusterConfigScopeFramework  ClusterConfigScope = "framework"
+	ClusterConfigScopeMCPClient  ClusterConfigScope = "mcp_client"
+	ClusterConfigScopeProxy      ClusterConfigScope = "proxy"
+	ClusterConfigScopeProvider   ClusterConfigScope = "provider"
+	ClusterConfigScopeTeam       ClusterConfigScope = "team"
+	ClusterConfigScopeVirtualKey ClusterConfigScope = "virtual_key"
 )
 
 type ClusterConfigChange struct {
-	Scope           ClusterConfigScope                      `json:"scope"`
-	Provider        schemas.ModelProvider                   `json:"provider,omitempty"`
-	MCPClientID     string                                  `json:"mcp_client_id,omitempty"`
-	Delete          bool                                    `json:"delete,omitempty"`
-	FlushSessions   bool                                    `json:"flush_sessions,omitempty"`
-	ClientConfig    *configstore.ClientConfig               `json:"client_config,omitempty"`
-	AuthConfig      *configstore.AuthConfig                 `json:"auth_config,omitempty"`
-	FrameworkConfig *configstoreTables.TableFrameworkConfig `json:"framework_config,omitempty"`
-	MCPClientConfig *schemas.MCPClientConfig                `json:"mcp_client_config,omitempty"`
-	ProxyConfig     *configstoreTables.GlobalProxyConfig    `json:"proxy_config,omitempty"`
-	ProviderConfig  *configstore.ProviderConfig             `json:"provider_config,omitempty"`
+	Scope            ClusterConfigScope                      `json:"scope"`
+	CustomerID       string                                  `json:"customer_id,omitempty"`
+	CustomerConfig   *configstoreTables.TableCustomer        `json:"customer_config,omitempty"`
+	Provider         schemas.ModelProvider                   `json:"provider,omitempty"`
+	MCPClientID      string                                  `json:"mcp_client_id,omitempty"`
+	TeamID           string                                  `json:"team_id,omitempty"`
+	VirtualKeyID     string                                  `json:"virtual_key_id,omitempty"`
+	Delete           bool                                    `json:"delete,omitempty"`
+	FlushSessions    bool                                    `json:"flush_sessions,omitempty"`
+	ClientConfig     *configstore.ClientConfig               `json:"client_config,omitempty"`
+	AuthConfig       *configstore.AuthConfig                 `json:"auth_config,omitempty"`
+	FrameworkConfig  *configstoreTables.TableFrameworkConfig `json:"framework_config,omitempty"`
+	MCPClientConfig  *schemas.MCPClientConfig                `json:"mcp_client_config,omitempty"`
+	ProxyConfig      *configstoreTables.GlobalProxyConfig    `json:"proxy_config,omitempty"`
+	ProviderConfig   *configstore.ProviderConfig             `json:"provider_config,omitempty"`
+	TeamConfig       *configstoreTables.TableTeam            `json:"team_config,omitempty"`
+	VirtualKeyConfig *configstoreTables.TableVirtualKey      `json:"virtual_key_config,omitempty"`
 }
 
 type ClusterConfigPropagator interface {

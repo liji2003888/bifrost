@@ -184,6 +184,7 @@ build: build-ui ## Build bifrost-http binary
 		if [ -n "$(DYNAMIC)" ]; then \
 			echo "$(CYAN)Building for $$TARGET_OS/$$TARGET_ARCH with dynamic linking...$(NC)"; \
 			cd transports/bifrost-http && CGO_ENABLED=1 GOOS=$$TARGET_OS GOARCH=$$TARGET_ARCH $(if $(LOCAL),,GOWORK=off) go build \
+				-tags "embedui" \
 				-ldflags="-w -s -X main.Version=v$(VERSION)" \
 				-a -trimpath \
 				-o ../../tmp/bifrost-http \
@@ -193,7 +194,7 @@ build: build-ui ## Build bifrost-http binary
 			cd transports/bifrost-http && CGO_ENABLED=1 GOOS=$$TARGET_OS GOARCH=$$TARGET_ARCH $(if $(LOCAL),,GOWORK=off) go build \
 				-ldflags="-w -s -extldflags "-static" -X main.Version=v$(VERSION)" \
 				-a -trimpath \
-				-tags "sqlite_static" \
+				-tags "sqlite_static embedui" \
 				-o ../../tmp/bifrost-http \
 				.; \
 		fi; \
@@ -203,7 +204,7 @@ build: build-ui ## Build bifrost-http binary
 		cd transports/bifrost-http && CGO_ENABLED=1 GOOS=$$TARGET_OS GOARCH=$$TARGET_ARCH $(if $(LOCAL),,GOWORK=off) go build \
 			-ldflags="-w -s -X main.Version=v$(VERSION)" \
 			-a -trimpath \
-			-tags "sqlite_static" \
+			-tags "sqlite_static embedui" \
 			-o ../../tmp/bifrost-http \
 			.; \
 		echo "$(GREEN)Built: tmp/bifrost-http (version: v$(VERSION))$(NC)"; \

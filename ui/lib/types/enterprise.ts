@@ -5,7 +5,9 @@ export interface ClusterConfigSyncStatus {
 	store_hash?: string;
 	in_sync?: boolean;
 	drift_domains?: string[];
+	customer_count?: number;
 	provider_count?: number;
+	team_count?: number;
 	virtual_key_count?: number;
 	mcp_client_count?: number;
 	plugin_count?: number;

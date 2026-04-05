@@ -31,6 +31,23 @@ func (h *UIHandler) RegisterRoutes(router *router.Router, middlewares ...schemas
 	router.GET("/{filepath:*}", lib.ChainMiddlewares(h.serveDashboard, middlewares...))
 }
 
+func (h *UIHandler) readEmbeddedUIFile(cleanPath string) ([]byte, string, error) {
+	data, err := h.uiContent.ReadFile(cleanPath)
+	if err == nil {
+		return data, cleanPath, nil
+	}
+
+	if strings.HasPrefix(cleanPath, "ui/") {
+		fallbackPath := "embedded_ui/" + strings.TrimPrefix(cleanPath, "ui/")
+		data, fallbackErr := h.uiContent.ReadFile(fallbackPath)
+		if fallbackErr == nil {
+			return data, fallbackPath, nil
+		}
+	}
+
+	return nil, cleanPath, err
+}
+
 // ServeDashboard serves the dashboard UI.
 func (h *UIHandler) serveDashboard(ctx *fasthttp.RequestCtx) {
 	// Get the request path
@@ -81,7 +98,7 @@ func (h *UIHandler) serveDashboard(ctx *fasthttp.RequestCtx) {
 	hasExtension := strings.Contains(filepath.Base(cleanPath), ".")
 
 	// Try to read the file from embedded filesystem
-	data, err := h.uiContent.ReadFile(cleanPath)
+	data, resolvedPath, err := h.readEmbeddedUIFile(cleanPath)
 	if err != nil {
 
 		// If it's a static asset (has extension) and not found, return 404
@@ -94,24 +111,26 @@ func (h *UIHandler) serveDashboard(ctx *fasthttp.RequestCtx) {
 		// For routes without extensions (SPA routing), try {path}/index.html first
 		if !hasExtension {
 			indexPath := cleanPath + "/index.html"
-			data, err = h.uiContent.ReadFile(indexPath)
+			data, resolvedPath, err = h.readEmbeddedUIFile(indexPath)
 			if err == nil {
-				cleanPath = indexPath
+				cleanPath = resolvedPath
 			} else {
 				// If that fails, serve root index.html as fallback
-				data, err = h.uiContent.ReadFile("ui/index.html")
+				data, resolvedPath, err = h.readEmbeddedUIFile("ui/index.html")
 				if err != nil {
 					ctx.SetStatusCode(fasthttp.StatusNotFound)
 					ctx.SetBodyString("404 - File not found")
 					return
 				}
-				cleanPath = "ui/index.html"
+				cleanPath = resolvedPath
 			}
 		} else {
 			ctx.SetStatusCode(fasthttp.StatusNotFound)
 			ctx.SetBodyString("404 - File not found")
 			return
 		}
+	} else {
+		cleanPath = resolvedPath
 	}
 
 	// Set content type based on file extension

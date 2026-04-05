@@ -68,6 +68,8 @@ buildGoModule {
     fi
   '';
 
+  tags = [ "embedui" ];
+
   ldflags = [
     "-s"
     "-w"

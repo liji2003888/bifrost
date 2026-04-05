@@ -43,7 +43,9 @@ type clusterConfigFingerprint struct {
 }
 
 type clusterConfigResourceCounts struct {
+	CustomerCount   int
 	ProviderCount   int
+	TeamCount       int
 	VirtualKeyCount int
 	MCPClientCount  int
 	PluginCount     int
@@ -153,7 +155,9 @@ func (r *clusterConfigSyncReporter) compute() enterprisecfg.ClusterConfigSyncSta
 	}
 
 	status.RuntimeHash = runtimeFingerprint.Hash()
+	status.CustomerCount = runtimeCounts.CustomerCount
 	status.ProviderCount = runtimeCounts.ProviderCount
+	status.TeamCount = runtimeCounts.TeamCount
 	status.VirtualKeyCount = runtimeCounts.VirtualKeyCount
 	status.MCPClientCount = runtimeCounts.MCPClientCount
 	status.PluginCount = runtimeCounts.PluginCount
@@ -207,7 +211,7 @@ func buildRuntimeClusterConfigFingerprint(server *BifrostHTTPServer) (clusterCon
 	if err != nil {
 		return clusterConfigFingerprint{}, clusterConfigResourceCounts{}, err
 	}
-	governanceHash, virtualKeyCount, err := hashRuntimeGovernanceData(server.GetGovernanceData())
+	governanceHash, governanceCounts, err := hashRuntimeGovernanceData(server.GetGovernanceData())
 	if err != nil {
 		return clusterConfigFingerprint{}, clusterConfigResourceCounts{}, err
 	}
@@ -231,8 +235,10 @@ func buildRuntimeClusterConfigFingerprint(server *BifrostHTTPServer) (clusterCon
 			Plugins:    pluginsHash,
 		},
 		clusterConfigResourceCounts{
+			CustomerCount:   governanceCounts.CustomerCount,
 			ProviderCount:   providerCount,
-			VirtualKeyCount: virtualKeyCount,
+			TeamCount:       governanceCounts.TeamCount,
+			VirtualKeyCount: governanceCounts.VirtualKeyCount,
 			MCPClientCount:  mcpCount,
 			PluginCount:     pluginCount,
 		},
@@ -473,9 +479,15 @@ func hashProvidersConfig(providers map[schemas.ModelProvider]configstore.Provide
 	return hash, len(fingerprints), nil
 }
 
-func hashRuntimeGovernanceData(data *governance.GovernanceData) (string, int, error) {
+type clusterGovernanceCounts struct {
+	CustomerCount   int
+	TeamCount       int
+	VirtualKeyCount int
+}
+
+func hashRuntimeGovernanceData(data *governance.GovernanceData) (string, clusterGovernanceCounts, error) {
 	if data == nil {
-		return "", 0, nil
+		return "", clusterGovernanceCounts{}, nil
 	}
 
 	fingerprint := clusterGovernanceFingerprint{
@@ -499,13 +511,17 @@ func hashRuntimeGovernanceData(data *governance.GovernanceData) (string, int, er
 		Providers:    hashRuntimeGovernanceProviders(data.Providers),
 	}
 	if err := validateNamedResources(fingerprint.VirtualKeys, fingerprint.Teams, fingerprint.Customers, fingerprint.Budgets, fingerprint.RateLimits, fingerprint.RoutingRules, fingerprint.ModelConfigs, fingerprint.Providers); err != nil {
-		return "", 0, err
+		return "", clusterGovernanceCounts{}, err
 	}
 	hash, err := hashSortedValue(fingerprint)
 	if err != nil {
-		return "", 0, err
+		return "", clusterGovernanceCounts{}, err
 	}
-	return hash, len(fingerprint.VirtualKeys), nil
+	return hash, clusterGovernanceCounts{
+		CustomerCount:   len(fingerprint.Customers),
+		TeamCount:       len(fingerprint.Teams),
+		VirtualKeyCount: len(fingerprint.VirtualKeys),
+	}, nil
 }
 
 func hashStoreGovernanceConfig(cfg *configstore.GovernanceConfig) (string, error) {

@@ -53,7 +53,6 @@ package main
 
 import (
 	"context"
-	"embed"
 	"flag"
 	"fmt"
 	"os"
@@ -68,9 +67,6 @@ import (
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	bifrostServer "github.com/maximhq/bifrost/transports/bifrost-http/server"
 )
-
-//go:embed all:ui
-var uiContent embed.FS
 
 var Version string
 
