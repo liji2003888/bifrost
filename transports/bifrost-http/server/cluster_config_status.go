@@ -33,6 +33,7 @@ type clusterConfigSyncReporter struct {
 
 type clusterConfigFingerprint struct {
 	Client     string `json:"client,omitempty"`
+	Auth       string `json:"auth,omitempty"`
 	Framework  string `json:"framework,omitempty"`
 	Proxy      string `json:"proxy,omitempty"`
 	Providers  string `json:"providers,omitempty"`
@@ -190,6 +191,10 @@ func buildRuntimeClusterConfigFingerprint(server *BifrostHTTPServer) (clusterCon
 	if err != nil {
 		return clusterConfigFingerprint{}, clusterConfigResourceCounts{}, err
 	}
+	authHash, err := hashAuthConfig(currentRuntimeAuthConfig(server))
+	if err != nil {
+		return clusterConfigFingerprint{}, clusterConfigResourceCounts{}, err
+	}
 	frameworkHash, err := hashFrameworkConfigFromRuntime(server.Config.FrameworkConfig)
 	if err != nil {
 		return clusterConfigFingerprint{}, clusterConfigResourceCounts{}, err
@@ -217,6 +222,7 @@ func buildRuntimeClusterConfigFingerprint(server *BifrostHTTPServer) (clusterCon
 
 	return clusterConfigFingerprint{
 			Client:     clientHash,
+			Auth:       authHash,
 			Framework:  frameworkHash,
 			Proxy:      proxyHash,
 			Providers:  providersHash,
@@ -239,6 +245,10 @@ func buildStoreClusterConfigFingerprint(ctx context.Context, store configstore.C
 	}
 
 	clientConfig, err := store.GetClientConfig(ctx)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+		return clusterConfigFingerprint{}, err
+	}
+	authConfig, err := store.GetAuthConfig(ctx)
 	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 		return clusterConfigFingerprint{}, err
 	}
@@ -271,6 +281,10 @@ func buildStoreClusterConfigFingerprint(ctx context.Context, store configstore.C
 	if err != nil {
 		return clusterConfigFingerprint{}, err
 	}
+	authHash, err := hashAuthConfig(authConfig)
+	if err != nil {
+		return clusterConfigFingerprint{}, err
+	}
 	frameworkHash, err := hashFrameworkConfigFromStore(frameworkConfig)
 	if err != nil {
 		return clusterConfigFingerprint{}, err
@@ -298,6 +312,7 @@ func buildStoreClusterConfigFingerprint(ctx context.Context, store configstore.C
 
 	return clusterConfigFingerprint{
 		Client:     clientHash,
+		Auth:       authHash,
 		Framework:  frameworkHash,
 		Proxy:      proxyHash,
 		Providers:  providersHash,
@@ -316,9 +331,12 @@ func (f clusterConfigFingerprint) Hash() string {
 }
 
 func (f clusterConfigFingerprint) DriftDomains(other clusterConfigFingerprint) []string {
-	drift := make([]string, 0, 7)
+	drift := make([]string, 0, 8)
 	if f.Client != other.Client {
 		drift = append(drift, "client")
+	}
+	if f.Auth != other.Auth {
+		drift = append(drift, "auth")
 	}
 	if f.Framework != other.Framework {
 		drift = append(drift, "framework")
@@ -341,6 +359,21 @@ func (f clusterConfigFingerprint) DriftDomains(other clusterConfigFingerprint) [
 	return drift
 }
 
+func currentRuntimeAuthConfig(server *BifrostHTTPServer) *configstore.AuthConfig {
+	if server == nil {
+		return nil
+	}
+	if server.AuthMiddleware != nil {
+		if authConfig := server.AuthMiddleware.CurrentAuthConfig(); authConfig != nil {
+			return authConfig
+		}
+	}
+	if server.Config != nil && server.Config.GovernanceConfig != nil {
+		return server.Config.GovernanceConfig.AuthConfig
+	}
+	return nil
+}
+
 func hashClientConfig(cfg *configstore.ClientConfig) (string, error) {
 	if cfg == nil {
 		return "", nil
@@ -348,6 +381,25 @@ func hashClientConfig(cfg *configstore.ClientConfig) (string, error) {
 	cloned := *cfg
 	cloned.ConfigHash = ""
 	return cloned.GenerateClientConfigHash()
+}
+
+func hashAuthConfig(cfg *configstore.AuthConfig) (string, error) {
+	if cfg == nil {
+		return "", nil
+	}
+
+	payload := struct {
+		AdminUserName          *schemas.EnvVar `json:"admin_username,omitempty"`
+		AdminPassword          *schemas.EnvVar `json:"admin_password,omitempty"`
+		IsEnabled              bool            `json:"is_enabled"`
+		DisableAuthOnInference bool            `json:"disable_auth_on_inference"`
+	}{
+		AdminUserName:          cfg.AdminUserName,
+		AdminPassword:          cfg.AdminPassword,
+		IsEnabled:              cfg.IsEnabled,
+		DisableAuthOnInference: cfg.DisableAuthOnInference,
+	}
+	return hashSortedValue(payload)
 }
 
 func hashFrameworkConfigFromRuntime(cfg *framework.FrameworkConfig) (string, error) {

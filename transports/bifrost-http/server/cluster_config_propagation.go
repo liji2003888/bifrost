@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework"
 	"github.com/maximhq/bifrost/framework/configstore"
@@ -74,6 +76,8 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		return s.ApplyClusterAuthConfig(ctx, change.AuthConfig, change.FlushSessions)
 	case handlers.ClusterConfigScopeFramework:
 		return s.ApplyClusterFrameworkConfig(ctx, change.FrameworkConfig)
+	case handlers.ClusterConfigScopeMCPClient:
+		return s.ApplyClusterMCPClientConfig(ctx, change.MCPClientID, change.MCPClientConfig, change.Delete)
 	case handlers.ClusterConfigScopeProxy:
 		return s.ApplyClusterProxyConfig(ctx, change.ProxyConfig)
 	case handlers.ClusterConfigScopeProvider:
@@ -190,6 +194,83 @@ func (s *BifrostHTTPServer) ApplyClusterFrameworkConfig(ctx context.Context, cfg
 		return fmt.Errorf("failed to persist framework config: %w", err)
 	}
 	return s.ReloadFrameworkConfigFromConfigStore(ctx)
+}
+
+func (s *BifrostHTTPServer) ApplyClusterMCPClientConfig(ctx context.Context, id string, cfg *schemas.MCPClientConfig, deleteClient bool) error {
+	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
+		return fmt.Errorf("config store not found")
+	}
+	if strings.TrimSpace(id) == "" && cfg != nil {
+		id = strings.TrimSpace(cfg.ID)
+	}
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("mcp client id is required")
+	}
+
+	if deleteClient {
+		if err := s.Config.ConfigStore.DeleteMCPClientConfig(ctx, id); err != nil {
+			return fmt.Errorf("failed to delete mcp client config: %w", err)
+		}
+		return s.RemoveMCPClient(ctx, id)
+	}
+	if cfg == nil {
+		return fmt.Errorf("mcp client config is required")
+	}
+
+	normalized := *cfg
+	normalized.ID = id
+	if _, err := s.Config.GetMCPClient(id); err != nil {
+		if err := s.Config.ConfigStore.CreateMCPClientConfig(ctx, &normalized); err != nil {
+			return fmt.Errorf("failed to create mcp client config: %w", err)
+		}
+		if err := s.AddMCPClient(ctx, &normalized); err != nil {
+			if rollbackErr := s.Config.ConfigStore.DeleteMCPClientConfig(ctx, id); rollbackErr != nil {
+				logger.Warn("failed to rollback mcp client config after add error: %v", rollbackErr)
+			}
+			return fmt.Errorf("failed to add mcp client: %w", err)
+		}
+		return nil
+	}
+
+	oldDBConfig, err := s.Config.ConfigStore.GetMCPClientByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("failed to get existing mcp client config: %w", err)
+	}
+	if err := s.Config.ConfigStore.UpdateMCPClientConfig(ctx, id, clusterMCPClientToTable(&normalized)); err != nil {
+		return fmt.Errorf("failed to update mcp client config: %w", err)
+	}
+	if err := s.UpdateMCPClient(ctx, id, &normalized); err != nil {
+		if oldDBConfig != nil {
+			if rollbackErr := s.Config.ConfigStore.UpdateMCPClientConfig(ctx, id, oldDBConfig); rollbackErr != nil {
+				logger.Warn("failed to rollback mcp client config after update error: %v", rollbackErr)
+			}
+		}
+		return fmt.Errorf("failed to update mcp client: %w", err)
+	}
+	return nil
+}
+
+func clusterMCPClientToTable(cfg *schemas.MCPClientConfig) *configstoreTables.TableMCPClient {
+	if cfg == nil {
+		return nil
+	}
+
+	return &configstoreTables.TableMCPClient{
+		ClientID:           cfg.ID,
+		Name:               cfg.Name,
+		IsCodeModeClient:   cfg.IsCodeModeClient,
+		ConnectionType:     string(cfg.ConnectionType),
+		ConnectionString:   cfg.ConnectionString,
+		StdioConfig:        cfg.StdioConfig,
+		ToolsToExecute:     cfg.ToolsToExecute,
+		ToolsToAutoExecute: cfg.ToolsToAutoExecute,
+		Headers:            cfg.Headers,
+		IsPingAvailable:    bifrost.Ptr(cfg.IsPingAvailable),
+		ToolPricing:        cfg.ToolPricing,
+		ToolSyncInterval:   int(cfg.ToolSyncInterval.Minutes()),
+		AuthType:           string(cfg.AuthType),
+		OauthConfigID:      cfg.OauthConfigID,
+	}
 }
 
 func (s *BifrostHTTPServer) ReloadProxyConfigFromConfigStore(ctx context.Context) error {

@@ -35,15 +35,17 @@ type MCPHandler struct {
 	store        *lib.Config
 	mcpManager   MCPManager
 	oauthHandler *OAuthHandler
+	propagator   ClusterConfigPropagator
 }
 
 // NewMCPHandler creates a new MCP handler instance
-func NewMCPHandler(mcpManager MCPManager, client *bifrost.Bifrost, store *lib.Config, oauthHandler *OAuthHandler) *MCPHandler {
+func NewMCPHandler(mcpManager MCPManager, client *bifrost.Bifrost, store *lib.Config, oauthHandler *OAuthHandler, propagator ClusterConfigPropagator) *MCPHandler {
 	return &MCPHandler{
 		client:       client,
 		store:        store,
 		mcpManager:   mcpManager,
 		oauthHandler: oauthHandler,
+		propagator:   propagator,
 	}
 }
 
@@ -474,6 +476,12 @@ func (h *MCPHandler) addMCPClient(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	h.propagateClusterMCPClientChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopeMCPClient,
+		MCPClientID:     schemasConfig.ID,
+		MCPClientConfig: schemasConfig,
+	})
+
 	SendJSON(ctx, map[string]any{
 		"status":  "success",
 		"message": "MCP client connected successfully",
@@ -599,6 +607,12 @@ func (h *MCPHandler) updateMCPClient(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	h.propagateClusterMCPClientChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopeMCPClient,
+		MCPClientID:     id,
+		MCPClientConfig: schemasConfig,
+	})
+
 	SendJSON(ctx, map[string]any{
 		"status":  "success",
 		"message": "MCP client edited successfully",
@@ -628,6 +642,13 @@ func (h *MCPHandler) deleteMCPClient(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to remove MCP client: %v", err))
 		return
 	}
+
+	h.propagateClusterMCPClientChange(ctx, &ClusterConfigChange{
+		Scope:       ClusterConfigScopeMCPClient,
+		MCPClientID: id,
+		Delete:      true,
+	})
+
 	SendJSON(ctx, map[string]any{
 		"status":  "success",
 		"message": "MCP client removed successfully",
@@ -816,6 +837,12 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
+	h.propagateClusterMCPClientChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopeMCPClient,
+		MCPClientID:     mcpClientConfig.ID,
+		MCPClientConfig: mcpClientConfig,
+	})
+
 	// Clear pending MCP client config from oauth_config (cleanup)
 	if err := h.oauthHandler.RemovePendingMCPClient(oauthConfigID); err != nil {
 		logger.Warn(fmt.Sprintf("[OAuth Complete] Failed to clear pending MCP client config: %v", err))
@@ -827,4 +854,13 @@ func (h *MCPHandler) completeMCPClientOAuth(ctx *fasthttp.RequestCtx) {
 		"status":  "success",
 		"message": "MCP client connected successfully with OAuth",
 	})
+}
+
+func (h *MCPHandler) propagateClusterMCPClientChange(ctx context.Context, change *ClusterConfigChange) {
+	if h == nil || h.propagator == nil || change == nil {
+		return
+	}
+	if err := h.propagator.PropagateClusterConfigChange(ctx, change); err != nil {
+		logger.Warn("failed to propagate mcp client cluster config change for client %s: %v", change.MCPClientID, err)
+	}
 }

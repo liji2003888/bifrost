@@ -562,6 +562,29 @@ func (m *AuthMiddleware) UpdateAuthConfig(authConfig *configstore.AuthConfig) {
 	m.authConfig.Store(authConfig)
 }
 
+// CurrentAuthConfig returns a copy of the in-memory auth config used by the middleware.
+func (m *AuthMiddleware) CurrentAuthConfig() *configstore.AuthConfig {
+	if m == nil {
+		return nil
+	}
+
+	authConfig := m.authConfig.Load()
+	if authConfig == nil {
+		return nil
+	}
+
+	cloned := *authConfig
+	if authConfig.AdminUserName != nil {
+		username := *authConfig.AdminUserName
+		cloned.AdminUserName = &username
+	}
+	if authConfig.AdminPassword != nil {
+		password := *authConfig.AdminPassword
+		cloned.AdminPassword = &password
+	}
+	return &cloned
+}
+
 // UpdateWhitelistedRoutes updates the configured whitelisted routes that bypass auth middleware.
 func (m *AuthMiddleware) UpdateWhitelistedRoutes(routes []string) {
 	m.whitelistedRoutes.Store(&routes)

@@ -217,7 +217,7 @@ export default function ClusterPage() {
 								<InfoPair label="Config Store" value={localConfigSync?.store_connected ? localConfigSync.store_kind || "connected" : "Disabled"} />
 								<InfoPair
 									label="Tracked Resources"
-									value={`${localConfigSync?.provider_count ?? 0} providers · ${localConfigSync?.virtual_key_count ?? 0} virtual keys`}
+									value={`${localConfigSync?.provider_count ?? 0} providers · ${localConfigSync?.virtual_key_count ?? 0} virtual keys · ${localConfigSync?.mcp_client_count ?? 0} MCP clients`}
 								/>
 								<InfoPair
 									label="Runtime Fingerprint"
