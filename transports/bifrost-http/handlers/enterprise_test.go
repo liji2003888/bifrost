@@ -3,10 +3,12 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +18,9 @@ import (
 	"github.com/maximhq/bifrost/framework/logstore"
 	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 	"github.com/maximhq/bifrost/transports/bifrost-http/loadbalancer"
+	"github.com/fasthttp/router"
 	"github.com/valyala/fasthttp"
+	"github.com/valyala/fasthttp/fasthttputil"
 )
 
 type fakeLoadBalancerStatusProvider struct {
@@ -66,6 +70,91 @@ func (f *fakeLoadBalancerStatusProvider) ListDirectionSnapshots(provider schemas
 		result = append(result, direction)
 	}
 	return result
+}
+
+func TestRegisterRoutesExposesDisabledEnterpriseStatusEndpoints(t *testing.T) {
+	handler := NewEnterpriseHandler(nil, nil, nil, nil, nil, nil, &fakeClusterConfigApplier{})
+	testRouter := router.New()
+	handler.RegisterRoutes(testRouter)
+
+	listener := fasthttputil.NewInmemoryListener()
+	server := &fasthttp.Server{Handler: testRouter.Handler}
+	go server.Serve(listener) //nolint:errcheck
+	defer listener.Close()
+
+	client := &fasthttp.Client{
+		Dial: func(addr string) (net.Conn, error) {
+			return listener.Dial()
+		},
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
+
+	testCases := []struct {
+		name        string
+		method      string
+		uri         string
+		wantMessage string
+	}{
+		{
+			name:        "cluster status",
+			method:      fasthttp.MethodGet,
+			uri:         "http://enterprise.local/api/cluster/status",
+			wantMessage: "cluster service is not enabled",
+		},
+		{
+			name:        "vault status",
+			method:      fasthttp.MethodGet,
+			uri:         "http://enterprise.local/api/vault/status",
+			wantMessage: "vault service is not enabled",
+		},
+		{
+			name:        "adaptive routing",
+			method:      fasthttp.MethodGet,
+			uri:         "http://enterprise.local/api/adaptive-routing/status",
+			wantMessage: "adaptive routing is not enabled",
+		},
+		{
+			name:        "audit logs",
+			method:      fasthttp.MethodGet,
+			uri:         "http://enterprise.local/api/audit-logs",
+			wantMessage: "audit service is not enabled",
+		},
+		{
+			name:        "log exports",
+			method:      fasthttp.MethodGet,
+			uri:         "http://enterprise.local/api/log-exports",
+			wantMessage: "log export service is not enabled",
+		},
+		{
+			name:        "alerts",
+			method:      fasthttp.MethodGet,
+			uri:         "http://enterprise.local/api/alerts",
+			wantMessage: "alert service is not enabled",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := fasthttp.AcquireRequest()
+			resp := fasthttp.AcquireResponse()
+			defer fasthttp.ReleaseRequest(req)
+			defer fasthttp.ReleaseResponse(resp)
+
+			req.Header.SetMethod(tc.method)
+			req.SetRequestURI(tc.uri)
+
+			if err := client.Do(req, resp); err != nil {
+				t.Fatalf("client.Do() error = %v", err)
+			}
+			if resp.StatusCode() != fasthttp.StatusServiceUnavailable {
+				t.Fatalf("expected 503, got %d: %s", resp.StatusCode(), string(resp.Body()))
+			}
+			if !strings.Contains(strings.ToLower(string(resp.Body())), tc.wantMessage) {
+				t.Fatalf("expected response body to contain %q, got %s", tc.wantMessage, string(resp.Body()))
+			}
+		})
+	}
 }
 
 func TestCollectAdaptiveRoutingStatusAggregatesPeerResponses(t *testing.T) {

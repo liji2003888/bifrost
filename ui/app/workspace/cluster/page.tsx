@@ -140,16 +140,17 @@ export default function ClusterPage() {
 
 			{clusterStatus && (
 				<>
-					{localConfigSync?.store_connected && localConfigSync.in_sync === false && (
-						<Alert variant="info">
-							<AlertCircle />
-							<AlertTitle>Current node runtime is behind ConfigStore</AlertTitle>
-							<AlertDescription>
-								This node is still serving a different runtime config than the persisted ConfigStore state. Cluster mode currently replicates KV state,
-								not generic config hot reloads, so peer nodes can drift until they reload the changed config.
-							</AlertDescription>
-						</Alert>
-					)}
+						{localConfigSync?.store_connected && localConfigSync.in_sync === false && (
+							<Alert variant="info">
+								<AlertCircle />
+								<AlertTitle>Current node runtime is behind ConfigStore</AlertTitle>
+								<AlertDescription>
+									This node is still serving a different runtime config than the persisted ConfigStore state. Cluster sync now hot-reloads the core
+									config domains and selected governance resources, so drift here usually means a peer missed a reload or is reading a different
+									ConfigStore snapshot.
+								</AlertDescription>
+							</Alert>
+						)}
 
 					{peerRuntimeDriftCount > 0 && (
 						<Alert variant="info">

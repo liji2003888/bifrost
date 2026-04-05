@@ -319,3 +319,31 @@ Current implementation status:
 - Cluster mode currently supports static peers plus health polling and KV replication.
 - Audit logs, log exports, and alerts are functional.
 - Vault runtime synchronization and automatic discovery backends for cluster mode are still pending.
+
+### 2026-04-05 15:37:40 CST | Base Commit d4bcbed8 | Consolidated Follow-up Work
+
+- Hardened cluster runtime behavior with cluster token authentication, peer health thresholds, richer peer metadata, and runtime-versus-ConfigStore fingerprinting for drift detection.
+- Added dynamic cluster discovery for `dns` and `kubernetes`, including periodic peer refresh, stale discovered-peer cleanup, and discovery status reporting in cluster health views.
+- Extended adaptive routing from key-level metrics to route-plus-direction metrics, with provider/model direction health snapshots, fallback reordering based on direction health, and a new `/api/adaptive-routing/status` surface.
+- Added cluster-aware read aggregation for adaptive routing status, alerts, audit logs, and log export jobs so operators can inspect multiple nodes from a single dashboard view.
+- Implemented Vault runtime synchronization for HashiCorp Vault KV and in-cluster Kubernetes Secrets, including env-backed provider hot refresh, optional auto-deprecate behavior for removed secrets, and `/api/vault/status`.
+- Improved audit and export safety by preferring real user identity in audit records, hashing session fallback identifiers, persisting export job metadata across restarts, and adding export file download support.
+- Added controlled cluster config propagation and hot reload for these scopes: `client`, `auth`, `framework`, `proxy`, `provider`, `mcp_client`, `customer`, `team`, and `virtual_key`.
+- Added peer-side governance apply logic for `customers`, `teams`, and `virtual keys`, including dependency waiting and stable MCP client resolution for virtual-key MCP bindings.
+- Replaced the enterprise placeholder pages for Cluster Mode, Adaptive Routing, and Audit Logs with working UI views backed by real APIs, cluster-aware summaries, drift indicators, alert visibility, and export management.
+- Added UI/runtime support so enterprise status endpoints remain registered even when the corresponding service is disabled, allowing the UI to show explicit “not enabled” states instead of generic 404-based errors.
+- Added a UI embed fallback for default test and dev binaries, while preserving production UI embedding through the `embedui` build path in the main binary, Docker images, and Nix packaging.
+- Added regression coverage for cluster auth, discovery refresh, config propagation, governance replication, disabled enterprise status routes, export persistence, audit behavior, Vault sync, and cluster-aware aggregation behavior.
+
+Current supported enterprise scope after today’s work:
+
+- Adaptive load balancing is functional at key, route, and direction visibility layers.
+- Cluster mode supports static peers, DNS/Kubernetes discovery, health polling, KV replication, config drift inspection, and controlled hot propagation for the core runtime/governance scopes listed above.
+- Audit logs, alerting, log exports, Vault runtime sync, and the corresponding enterprise UI pages are functional.
+
+Still intentionally not completed:
+
+- Consul/etcd discovery backends and a fuller gossip-based shared state plane.
+- Cluster auto-sync for broader governance objects such as routing rules, model configs, and provider-governance metadata.
+- AWS Secrets Manager, GCP Secret Manager, and Azure Key Vault backends.
+- RBAC backend APIs, MCP with federated auth, and other enterprise-only governance surfaces that are still placeholder/fallback oriented.

@@ -131,8 +131,18 @@ func (h *EnterpriseHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 		return
 	}
 
+	r.GET("/api/cluster/status", lib.ChainMiddlewares(h.getClusterStatus, middlewares...))
+	r.GET("/api/audit-logs", lib.ChainMiddlewares(h.getAuditLogs, middlewares...))
+	r.POST("/api/logs/exports", lib.ChainMiddlewares(h.createLogsExport, middlewares...))
+	r.POST("/api/mcp-logs/exports", lib.ChainMiddlewares(h.createMCPLogsExport, middlewares...))
+	r.GET("/api/log-exports", lib.ChainMiddlewares(h.listExportJobs, middlewares...))
+	r.GET("/api/log-exports/{id}", lib.ChainMiddlewares(h.getExportJob, middlewares...))
+	r.GET("/api/log-exports/{id}/download", lib.ChainMiddlewares(h.downloadExportJob, middlewares...))
+	r.GET("/api/alerts", lib.ChainMiddlewares(h.getAlerts, middlewares...))
+	r.GET("/api/vault/status", lib.ChainMiddlewares(h.getVaultStatus, middlewares...))
+	r.GET("/api/adaptive-routing/status", lib.ChainMiddlewares(h.getAdaptiveRoutingStatus, middlewares...))
+
 	if h.cluster != nil {
-		r.GET("/api/cluster/status", lib.ChainMiddlewares(h.getClusterStatus, middlewares...))
 		r.GET("/_cluster/status", h.getInternalClusterStatus)
 		r.POST("/_cluster/kv/set", h.applyClusterSet)
 		r.POST("/_cluster/kv/delete", h.applyClusterDelete)
@@ -151,25 +161,6 @@ func (h *EnterpriseHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 		if h.lb != nil {
 			r.GET(clusterAdaptiveRoutingEndpoint, h.getInternalAdaptiveRoutingStatus)
 		}
-	}
-	if h.audit != nil {
-		r.GET("/api/audit-logs", lib.ChainMiddlewares(h.getAuditLogs, middlewares...))
-	}
-	if h.exports != nil {
-		r.POST("/api/logs/exports", lib.ChainMiddlewares(h.createLogsExport, middlewares...))
-		r.POST("/api/mcp-logs/exports", lib.ChainMiddlewares(h.createMCPLogsExport, middlewares...))
-		r.GET("/api/log-exports", lib.ChainMiddlewares(h.listExportJobs, middlewares...))
-		r.GET("/api/log-exports/{id}", lib.ChainMiddlewares(h.getExportJob, middlewares...))
-		r.GET("/api/log-exports/{id}/download", lib.ChainMiddlewares(h.downloadExportJob, middlewares...))
-	}
-	if h.alerts != nil {
-		r.GET("/api/alerts", lib.ChainMiddlewares(h.getAlerts, middlewares...))
-	}
-	if h.vault != nil {
-		r.GET("/api/vault/status", lib.ChainMiddlewares(h.getVaultStatus, middlewares...))
-	}
-	if h.lb != nil {
-		r.GET("/api/adaptive-routing/status", lib.ChainMiddlewares(h.getAdaptiveRoutingStatus, middlewares...))
 	}
 }
 
