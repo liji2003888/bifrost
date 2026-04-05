@@ -38,6 +38,7 @@ type GovernanceManager interface {
 	ReloadModelConfig(ctx context.Context, id string) (*configstoreTables.TableModelConfig, error)
 	RemoveModelConfig(ctx context.Context, id string) error
 	ReloadProvider(ctx context.Context, provider schemas.ModelProvider) (*configstoreTables.TableProvider, error)
+	ReloadProviderGovernance(ctx context.Context, provider schemas.ModelProvider) (*configstoreTables.TableProvider, error)
 	RemoveProvider(ctx context.Context, provider schemas.ModelProvider) error
 	ReloadRoutingRule(ctx context.Context, id string) error
 	RemoveRoutingRule(ctx context.Context, id string) error
@@ -2893,13 +2894,20 @@ func (h *GovernanceHandler) updateProviderGovernance(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Reload provider in memory
-	updatedProvider, err := h.governanceManager.ReloadProvider(ctx, schemas.ModelProvider(providerName))
+	updatedProvider, err := h.governanceManager.ReloadProviderGovernance(ctx, schemas.ModelProvider(providerName))
 	if err != nil {
 		logger.Error("failed to reload provider in memory: %v", err)
 		// Use the local provider object if reload fails
 	} else {
 		provider = updatedProvider
 	}
+
+	h.propagateClusterGovernanceChange(ctx, &ClusterConfigChange{
+		Scope:              ClusterConfigScopeProviderGovernance,
+		Provider:           schemas.ModelProvider(providerName),
+		ProviderGovernance: cloneClusterProviderGovernance(provider),
+	})
+
 	SendJSON(ctx, map[string]interface{}{
 		"message": "Provider governance updated successfully",
 		"provider": ProviderGovernanceResponse{
@@ -2969,10 +2977,20 @@ func (h *GovernanceHandler) deleteProviderGovernance(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	// Reload provider in memory (to clear the budget/rate limit)
-	if _, err := h.governanceManager.ReloadProvider(ctx, schemas.ModelProvider(providerName)); err != nil {
+	reloadedProvider, err := h.governanceManager.ReloadProviderGovernance(ctx, schemas.ModelProvider(providerName))
+	if err != nil {
 		logger.Error("failed to reload provider in memory: %v", err)
 		// Continue anyway, the governance is deleted from DB
+	} else {
+		provider = reloadedProvider
 	}
+
+	h.propagateClusterGovernanceChange(ctx, &ClusterConfigChange{
+		Scope:              ClusterConfigScopeProviderGovernance,
+		Provider:           schemas.ModelProvider(providerName),
+		ProviderGovernance: cloneClusterProviderGovernance(provider),
+	})
+
 	SendJSON(ctx, map[string]interface{}{
 		"message": "Provider governance deleted successfully",
 	})
@@ -3475,6 +3493,25 @@ func cloneClusterModelConfig(mc *configstoreTables.TableModelConfig) *configstor
 	clone := *mc
 	clone.Budget = cloneClusterBudget(mc.Budget)
 	clone.RateLimit = cloneClusterRateLimit(mc.RateLimit)
+	return &clone
+}
+
+func cloneClusterProviderGovernance(provider *configstoreTables.TableProvider) *configstoreTables.TableProvider {
+	if provider == nil {
+		return nil
+	}
+
+	clone := *provider
+	clone.Keys = nil
+	clone.Models = nil
+	clone.NetworkConfig = nil
+	clone.ConcurrencyAndBufferSize = nil
+	clone.ProxyConfig = nil
+	clone.CustomProviderConfig = nil
+	clone.OpenAIConfig = nil
+	clone.PricingOverrides = nil
+	clone.Budget = cloneClusterBudget(provider.Budget)
+	clone.RateLimit = cloneClusterRateLimit(provider.RateLimit)
 	return &clone
 }
 

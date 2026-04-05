@@ -85,11 +85,25 @@ func newGovernanceClusterTestServer(t *testing.T) (*BifrostHTTPServer, configsto
 	return server, store, cleanup
 }
 
+func seedGovernanceTestProvider(t *testing.T, store configstore.ConfigStore, provider schemas.ModelProvider) {
+	t.Helper()
+
+	record := &configstoreTables.TableProvider{
+		Name:      string(provider),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if err := store.DB().Create(record).Error; err != nil {
+		t.Fatalf("failed to seed provider %s: %v", provider, err)
+	}
+}
+
 func TestApplyClusterConfigChangeGovernanceLifecycle(t *testing.T) {
 	server, store, cleanup := newGovernanceClusterTestServer(t)
 	defer cleanup()
 
 	ctx := context.Background()
+	seedGovernanceTestProvider(t, store, "openai")
 	customerBudgetID := "budget-customer-1"
 	customer := &configstoreTables.TableCustomer{
 		ID:       "customer-1",
@@ -266,6 +280,87 @@ func TestApplyClusterConfigChangeGovernanceLifecycle(t *testing.T) {
 	}
 	if _, err := store.GetBudget(ctx, modelBudgetID); !errors.Is(err, configstore.ErrNotFound) {
 		t.Fatalf("expected model config budget %s to be deleted, got err=%v", modelBudgetID, err)
+	}
+
+	providerBudgetID := "budget-provider-governance-1"
+	providerGovernance := &configstoreTables.TableProvider{
+		Name:     "openai",
+		BudgetID: bifrost.Ptr(providerBudgetID),
+		Budget: &configstoreTables.TableBudget{
+			ID:            providerBudgetID,
+			MaxLimit:      300,
+			ResetDuration: "1h",
+			LastReset:     time.Unix(1700000000, 0).UTC(),
+			CurrentUsage:  15.5,
+		},
+	}
+	if err := server.ApplyClusterConfigChange(ctx, &handlers.ClusterConfigChange{
+		Scope:              handlers.ClusterConfigScopeProviderGovernance,
+		Provider:           "openai",
+		ProviderGovernance: providerGovernance,
+	}); err != nil {
+		t.Fatalf("ApplyClusterConfigChange(provider governance create) error = %v", err)
+	}
+
+	storedProviderGovernance, err := store.GetProvider(ctx, "openai")
+	if err != nil {
+		t.Fatalf("GetProvider(provider governance create) error = %v", err)
+	}
+	if storedProviderGovernance.BudgetID == nil || *storedProviderGovernance.BudgetID != providerBudgetID || storedProviderGovernance.RateLimitID != nil {
+		t.Fatalf("unexpected stored provider governance after create: %+v", storedProviderGovernance)
+	}
+
+	providerRateLimitID := "ratelimit-provider-governance-1"
+	updatedProviderGovernance := &configstoreTables.TableProvider{
+		Name:        "openai",
+		RateLimitID: bifrost.Ptr(providerRateLimitID),
+		RateLimit: &configstoreTables.TableRateLimit{
+			ID:                   providerRateLimitID,
+			TokenMaxLimit:        bifrost.Ptr(int64(5000)),
+			TokenResetDuration:   bifrost.Ptr("1m"),
+			RequestMaxLimit:      bifrost.Ptr(int64(100)),
+			RequestResetDuration: bifrost.Ptr("1m"),
+			TokenLastReset:       time.Unix(1700000000, 0).UTC(),
+			RequestLastReset:     time.Unix(1700000000, 0).UTC(),
+		},
+	}
+	if err := server.ApplyClusterConfigChange(ctx, &handlers.ClusterConfigChange{
+		Scope:              handlers.ClusterConfigScopeProviderGovernance,
+		Provider:           "openai",
+		ProviderGovernance: updatedProviderGovernance,
+	}); err != nil {
+		t.Fatalf("ApplyClusterConfigChange(provider governance update) error = %v", err)
+	}
+
+	storedUpdatedProviderGovernance, err := store.GetProvider(ctx, "openai")
+	if err != nil {
+		t.Fatalf("GetProvider(provider governance update) error = %v", err)
+	}
+	if storedUpdatedProviderGovernance.BudgetID != nil || storedUpdatedProviderGovernance.RateLimitID == nil || *storedUpdatedProviderGovernance.RateLimitID != providerRateLimitID {
+		t.Fatalf("unexpected stored provider governance after update: %+v", storedUpdatedProviderGovernance)
+	}
+	if _, err := store.GetBudget(ctx, providerBudgetID); !errors.Is(err, configstore.ErrNotFound) {
+		t.Fatalf("expected provider governance budget %s to be deleted, got err=%v", providerBudgetID, err)
+	}
+
+	clearedProviderGovernance := &configstoreTables.TableProvider{Name: "openai"}
+	if err := server.ApplyClusterConfigChange(ctx, &handlers.ClusterConfigChange{
+		Scope:              handlers.ClusterConfigScopeProviderGovernance,
+		Provider:           "openai",
+		ProviderGovernance: clearedProviderGovernance,
+	}); err != nil {
+		t.Fatalf("ApplyClusterConfigChange(provider governance clear) error = %v", err)
+	}
+
+	storedClearedProviderGovernance, err := store.GetProvider(ctx, "openai")
+	if err != nil {
+		t.Fatalf("GetProvider(provider governance clear) error = %v", err)
+	}
+	if storedClearedProviderGovernance.BudgetID != nil || storedClearedProviderGovernance.RateLimitID != nil {
+		t.Fatalf("unexpected stored provider governance after clear: %+v", storedClearedProviderGovernance)
+	}
+	if _, err := store.GetRateLimit(ctx, providerRateLimitID); !errors.Is(err, configstore.ErrNotFound) {
+		t.Fatalf("expected provider governance rate limit %s to be deleted, got err=%v", providerRateLimitID, err)
 	}
 
 	scopeID := customer.ID

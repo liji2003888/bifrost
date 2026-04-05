@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
@@ -172,6 +173,36 @@ func (s *BifrostHTTPServer) ApplyClusterModelConfig(ctx context.Context, id stri
 	return err
 }
 
+func (s *BifrostHTTPServer) ApplyClusterProviderGovernanceConfig(ctx context.Context, provider schemas.ModelProvider, cfg *configstoreTables.TableProvider) error {
+	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
+		return fmt.Errorf("config store not found")
+	}
+
+	if provider == "" && cfg != nil {
+		provider = schemas.ModelProvider(strings.TrimSpace(cfg.Name))
+	}
+	if provider == "" {
+		return fmt.Errorf("provider is required for provider governance config")
+	}
+	if cfg == nil {
+		return fmt.Errorf("provider governance payload is required")
+	}
+	if err := s.waitForClusterProviderRecord(ctx, provider); err != nil {
+		return err
+	}
+	if err := ensureClusterBudgetPayload("provider governance", string(provider), cfg.BudgetID, cfg.Budget); err != nil {
+		return err
+	}
+	if err := ensureClusterRateLimitPayload("provider governance", string(provider), cfg.RateLimitID, cfg.RateLimit); err != nil {
+		return err
+	}
+	if err := s.applyClusterProviderGovernanceRecord(ctx, provider, cfg); err != nil {
+		return err
+	}
+	_, err := s.ReloadProviderGovernance(ctx, provider)
+	return err
+}
+
 func (s *BifrostHTTPServer) ApplyClusterRoutingRuleConfig(ctx context.Context, id string, cfg *configstoreTables.TableRoutingRule, deleteRule bool) error {
 	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
 		return fmt.Errorf("config store not found")
@@ -319,6 +350,43 @@ func (s *BifrostHTTPServer) applyClusterModelConfigRecord(ctx context.Context, c
 			if err := deleteOrphanedRateLimit(ctx, store, tx, existing.RateLimitID, row.RateLimitID); err != nil {
 				return err
 			}
+		}
+
+		return nil
+	})
+}
+
+func (s *BifrostHTTPServer) applyClusterProviderGovernanceRecord(ctx context.Context, provider schemas.ModelProvider, cfg *configstoreTables.TableProvider) error {
+	store := s.Config.ConfigStore
+	return store.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+		existing, err := store.GetProvider(ctx, provider)
+		if err != nil {
+			return fmt.Errorf("failed to get existing provider governance: %w", err)
+		}
+
+		if err := upsertClusterBudget(ctx, store, tx, cfg.Budget); err != nil {
+			return fmt.Errorf("failed to sync provider governance budget: %w", err)
+		}
+		if err := upsertClusterRateLimit(ctx, store, tx, cfg.RateLimit); err != nil {
+			return fmt.Errorf("failed to sync provider governance rate limit: %w", err)
+		}
+
+		result := tx.WithContext(ctx).Model(&configstoreTables.TableProvider{}).Where("name = ?", string(provider)).Updates(map[string]any{
+			"budget_id":     cfg.BudgetID,
+			"rate_limit_id": cfg.RateLimitID,
+		})
+		if result.Error != nil {
+			return fmt.Errorf("failed to update provider governance: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("provider %s not found", provider)
+		}
+
+		if err := deleteOrphanedBudget(ctx, store, tx, existing.BudgetID, cfg.BudgetID); err != nil {
+			return err
+		}
+		if err := deleteOrphanedRateLimit(ctx, store, tx, existing.RateLimitID, cfg.RateLimitID); err != nil {
+			return err
 		}
 
 		return nil
@@ -551,6 +619,20 @@ func (s *BifrostHTTPServer) waitForClusterTeam(ctx context.Context, teamID *stri
 	}, lib.DBLookupMaxRetries, lib.DBLookupDelay)
 	if err != nil {
 		return fmt.Errorf("team dependency %s is not available on this node: %w", id, err)
+	}
+	return nil
+}
+
+func (s *BifrostHTTPServer) waitForClusterProviderRecord(ctx context.Context, provider schemas.ModelProvider) error {
+	if provider == "" {
+		return fmt.Errorf("provider is required")
+	}
+
+	_, err := s.Config.ConfigStore.RetryOnNotFound(ctx, func(ctx context.Context) (any, error) {
+		return s.Config.ConfigStore.GetProvider(ctx, provider)
+	}, lib.DBLookupMaxRetries, lib.DBLookupDelay)
+	if err != nil {
+		return fmt.Errorf("provider dependency %s is not available on this node: %w", provider, err)
 	}
 	return nil
 }

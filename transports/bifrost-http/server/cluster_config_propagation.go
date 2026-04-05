@@ -82,6 +82,8 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		return s.ApplyClusterMCPClientConfig(ctx, change.MCPClientID, change.MCPClientConfig, change.Delete)
 	case handlers.ClusterConfigScopeModelConfig:
 		return s.ApplyClusterModelConfig(ctx, change.ModelConfigID, change.ModelConfig, change.Delete)
+	case handlers.ClusterConfigScopeProviderGovernance:
+		return s.ApplyClusterProviderGovernanceConfig(ctx, change.Provider, change.ProviderGovernance)
 	case handlers.ClusterConfigScopeProxy:
 		return s.ApplyClusterProxyConfig(ctx, change.ProxyConfig)
 	case handlers.ClusterConfigScopeProvider:

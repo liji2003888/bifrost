@@ -84,6 +84,7 @@ type ServerCallbacks interface {
 	ReloadModelConfig(ctx context.Context, id string) (*tables.TableModelConfig, error)
 	RemoveModelConfig(ctx context.Context, id string) error
 	ReloadProvider(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error)
+	ReloadProviderGovernance(ctx context.Context, provider schemas.ModelProvider) (*tables.TableProvider, error)
 	RemoveProvider(ctx context.Context, provider schemas.ModelProvider) error
 	ReloadRoutingRule(ctx context.Context, id string) error
 	RemoveRoutingRule(ctx context.Context, id string) error

@@ -181,6 +181,7 @@ func TestPropagateClusterConfigChangeAppliesAuthConfigOnRemotePeer(t *testing.T)
 func TestPropagateClusterConfigChangeAppliesGovernanceResourcesOnRemotePeer(t *testing.T) {
 	remoteServer, remoteStore, cleanup := newGovernanceClusterTestServer(t)
 	defer cleanup()
+	seedGovernanceTestProvider(t, remoteStore, "openai")
 
 	remoteKV, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
 	if err != nil {
@@ -369,5 +370,49 @@ func TestPropagateClusterConfigChangeAppliesGovernanceResourcesOnRemotePeer(t *t
 	}
 	if storedRoutingRule.Scope != routingRule.Scope || storedRoutingRule.ScopeID == nil || *storedRoutingRule.ScopeID != scopeID || len(storedRoutingRule.Targets) != 1 {
 		t.Fatalf("unexpected remote routing rule: %+v", storedRoutingRule)
+	}
+
+	providerGovernance := &configstoreTables.TableProvider{
+		Name:     "openai",
+		BudgetID: bifrost.Ptr("budget-provider-governance-propagated"),
+		Budget: &configstoreTables.TableBudget{
+			ID:            "budget-provider-governance-propagated",
+			MaxLimit:      150,
+			ResetDuration: "1h",
+			LastReset:     time.Unix(1700000000, 0).UTC(),
+			CurrentUsage:  7.25,
+		},
+	}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:              handlers.ClusterConfigScopeProviderGovernance,
+		Provider:           "openai",
+		ProviderGovernance: providerGovernance,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(provider governance create) error = %v", err)
+	}
+
+	storedProviderGovernance, err := remoteStore.GetProvider(context.Background(), "openai")
+	if err != nil {
+		t.Fatalf("remote GetProvider(provider governance create) error = %v", err)
+	}
+	if storedProviderGovernance.BudgetID == nil || *storedProviderGovernance.BudgetID != "budget-provider-governance-propagated" {
+		t.Fatalf("unexpected remote provider governance after create: %+v", storedProviderGovernance)
+	}
+
+	clearedProviderGovernance := &configstoreTables.TableProvider{Name: "openai"}
+	if err := localServer.PropagateClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:              handlers.ClusterConfigScopeProviderGovernance,
+		Provider:           "openai",
+		ProviderGovernance: clearedProviderGovernance,
+	}); err != nil {
+		t.Fatalf("PropagateClusterConfigChange(provider governance clear) error = %v", err)
+	}
+
+	storedClearedProviderGovernance, err := remoteStore.GetProvider(context.Background(), "openai")
+	if err != nil {
+		t.Fatalf("remote GetProvider(provider governance clear) error = %v", err)
+	}
+	if storedClearedProviderGovernance.BudgetID != nil || storedClearedProviderGovernance.RateLimitID != nil {
+		t.Fatalf("unexpected remote provider governance after clear: %+v", storedClearedProviderGovernance)
 	}
 }
