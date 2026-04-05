@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -45,10 +46,32 @@ type RouteStatus struct {
 	RouteSnapshot
 }
 
+type DirectionSnapshot struct {
+	Samples             int64
+	Successes           int64
+	Failures            int64
+	ConsecutiveFailures int64
+	ErrorEWMA           float64
+	LatencyEWMA         float64
+	LastUpdated         time.Time
+}
+
+type DirectionStatus struct {
+	Provider schemas.ModelProvider `json:"provider"`
+	Model    string                `json:"model"`
+	Score    float64               `json:"score"`
+	DirectionSnapshot
+}
+
 type routeKey struct {
 	provider schemas.ModelProvider
 	model    string
 	keyID    string
+}
+
+type directionKey struct {
+	provider schemas.ModelProvider
+	model    string
 }
 
 type routeStats struct {
@@ -75,8 +98,9 @@ type trackerConfig struct {
 }
 
 type Tracker struct {
-	cfg    trackerConfig
-	routes sync.Map
+	cfg        trackerConfig
+	routes     sync.Map
+	directions sync.Map
 }
 
 func Init(config *enterprisecfg.LoadBalancerConfig, logger schemas.Logger) (*Plugin, error) {
@@ -107,6 +131,7 @@ func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostReq
 	if ctx != nil {
 		ctx.SetValue(startTimeKey, time.Now())
 	}
+	p.reorderFallbacks(ctx, req)
 	return req, nil, nil
 }
 
@@ -119,14 +144,16 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	if bifrost.IsStreamRequestType(requestType) && !bifrost.IsFinalChunk(ctx) {
 		return resp, bifrostErr, nil
 	}
-
-	keyID := strings.TrimSpace(bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeySelectedKeyID))
-	if keyID == "" || provider == "" {
+	if provider == "" {
 		return resp, bifrostErr, nil
 	}
 
+	keyID := strings.TrimSpace(bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeySelectedKeyID))
 	latencyMs := extractLatencyMillis(ctx, resp)
-	p.tracker.Observe(provider, model, keyID, latencyMs, bifrostErr == nil)
+	p.tracker.ObserveDirection(provider, model, latencyMs, bifrostErr == nil)
+	if keyID != "" {
+		p.tracker.Observe(provider, model, keyID, latencyMs, bifrostErr == nil)
+	}
 
 	return resp, bifrostErr, nil
 }
@@ -146,6 +173,20 @@ func (p *Plugin) ListSnapshots(provider schemas.ModelProvider, model string) []R
 	return p.tracker.ListSnapshots(provider, model)
 }
 
+func (p *Plugin) DirectionSnapshot(provider schemas.ModelProvider, model string) (DirectionSnapshot, bool) {
+	if p == nil || p.tracker == nil {
+		return DirectionSnapshot{}, false
+	}
+	return p.tracker.DirectionSnapshot(provider, model)
+}
+
+func (p *Plugin) ListDirectionSnapshots(provider schemas.ModelProvider, model string) []DirectionStatus {
+	if p == nil || p.tracker == nil {
+		return nil
+	}
+	return p.tracker.ListDirectionSnapshots(provider, model)
+}
+
 func (t *Tracker) Observe(provider schemas.ModelProvider, model, keyID string, latencyMs float64, success bool) {
 	if provider == "" || strings.TrimSpace(keyID) == "" {
 		return
@@ -154,32 +195,19 @@ func (t *Tracker) Observe(provider schemas.ModelProvider, model, keyID string, l
 	stats := t.getOrCreate(routeKey{provider: provider, model: model, keyID: keyID})
 	stats.mu.Lock()
 	defer stats.mu.Unlock()
+	observeStats(stats, t.cfg, latencyMs, success)
+}
 
-	errorSample := 0.0
-	if !success {
-		errorSample = 1.0
-	}
-	if latencyMs <= 0 {
-		latencyMs = 1
-	}
-
-	if stats.samples == 0 {
-		stats.errorEWMA = errorSample
-		stats.latencyEWMA = latencyMs
-	} else {
-		stats.errorEWMA = ewma(stats.errorEWMA, errorSample, t.cfg.ewmaAlpha)
-		stats.latencyEWMA = ewma(stats.latencyEWMA, latencyMs, t.cfg.ewmaAlpha)
+func (t *Tracker) ObserveDirection(provider schemas.ModelProvider, model string, latencyMs float64, success bool) {
+	if provider == "" {
+		return
 	}
 
-	stats.samples++
-	if success {
-		stats.successes++
-		stats.consecutiveFailures = 0
-	} else {
-		stats.failures++
-		stats.consecutiveFailures++
-	}
-	stats.lastUpdated = time.Now()
+	stats := t.getOrCreateDirection(directionKey{provider: provider, model: model})
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+
+	observeStats(stats, t.cfg, latencyMs, success)
 }
 
 func (t *Tracker) Snapshot(provider schemas.ModelProvider, model, keyID string) (RouteSnapshot, bool) {
@@ -192,6 +220,26 @@ func (t *Tracker) Snapshot(provider schemas.ModelProvider, model, keyID string) 
 	defer stats.mu.RUnlock()
 
 	return RouteSnapshot{
+		Samples:             stats.samples,
+		Successes:           stats.successes,
+		Failures:            stats.failures,
+		ConsecutiveFailures: stats.consecutiveFailures,
+		ErrorEWMA:           stats.errorEWMA,
+		LatencyEWMA:         stats.latencyEWMA,
+		LastUpdated:         stats.lastUpdated,
+	}, true
+}
+
+func (t *Tracker) DirectionSnapshot(provider schemas.ModelProvider, model string) (DirectionSnapshot, bool) {
+	stats, ok := t.getDirection(directionKey{provider: provider, model: model})
+	if !ok {
+		return DirectionSnapshot{}, false
+	}
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+
+	return DirectionSnapshot{
 		Samples:             stats.samples,
 		Successes:           stats.successes,
 		Failures:            stats.failures,
@@ -254,6 +302,69 @@ func (t *Tracker) ListSnapshots(provider schemas.ModelProvider, model string) []
 	})
 
 	return snapshots
+}
+
+func (t *Tracker) ListDirectionSnapshots(provider schemas.ModelProvider, model string) []DirectionStatus {
+	if t == nil {
+		return nil
+	}
+
+	statuses := make([]DirectionStatus, 0)
+	t.directions.Range(func(key, value any) bool {
+		direction, ok := key.(directionKey)
+		if !ok {
+			return true
+		}
+		if provider != "" && direction.provider != provider {
+			return true
+		}
+		if model != "" && direction.model != model {
+			return true
+		}
+
+		stats, ok := value.(*routeStats)
+		if !ok {
+			return true
+		}
+		stats.mu.RLock()
+		statuses = append(statuses, DirectionStatus{
+			Provider: direction.provider,
+			Model:    direction.model,
+			DirectionSnapshot: DirectionSnapshot{
+				Samples:             stats.samples,
+				Successes:           stats.successes,
+				Failures:            stats.failures,
+				ConsecutiveFailures: stats.consecutiveFailures,
+				ErrorEWMA:           stats.errorEWMA,
+				LatencyEWMA:         stats.latencyEWMA,
+				LastUpdated:         stats.lastUpdated,
+			},
+		})
+		stats.mu.RUnlock()
+		return true
+	})
+
+	baselineLatency := 0.0
+	for _, status := range statuses {
+		if status.LatencyEWMA <= 0 {
+			continue
+		}
+		if baselineLatency == 0 || status.LatencyEWMA < baselineLatency {
+			baselineLatency = status.LatencyEWMA
+		}
+	}
+	for i := range statuses {
+		statuses[i].Score = t.directionScore(statuses[i].DirectionSnapshot, baselineLatency)
+	}
+
+	slices.SortFunc(statuses, func(a, b DirectionStatus) int {
+		if cmp := strings.Compare(string(a.Provider), string(b.Provider)); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Model, b.Model)
+	})
+
+	return statuses
 }
 
 func (t *Tracker) SelectKey(ctx *schemas.BifrostContext, keys []schemas.Key, providerKey schemas.ModelProvider, model string) (schemas.Key, error) {
@@ -333,8 +444,83 @@ func (t *Tracker) findBaselineLatency(provider schemas.ModelProvider, model stri
 	return best
 }
 
+func (t *Tracker) ReorderFallbacks(fallbacks []schemas.Fallback) ([]schemas.Fallback, bool) {
+	if t == nil || len(fallbacks) < 2 {
+		return fallbacks, false
+	}
+
+	type fallbackCandidate struct {
+		index    int
+		fallback schemas.Fallback
+		snapshot DirectionSnapshot
+		known    bool
+		score    float64
+	}
+
+	candidates := make([]fallbackCandidate, 0, len(fallbacks))
+	baselineLatency := 0.0
+	knownCount := 0
+	for i, fallback := range fallbacks {
+		snapshot, ok := t.DirectionSnapshot(fallback.Provider, fallback.Model)
+		if ok {
+			knownCount++
+			if snapshot.LatencyEWMA > 0 && (baselineLatency == 0 || snapshot.LatencyEWMA < baselineLatency) {
+				baselineLatency = snapshot.LatencyEWMA
+			}
+		}
+		candidates = append(candidates, fallbackCandidate{
+			index:    i,
+			fallback: fallback,
+			snapshot: snapshot,
+			known:    ok,
+		})
+	}
+
+	if knownCount < 2 {
+		return fallbacks, false
+	}
+	for i := range candidates {
+		if !candidates[i].known {
+			continue
+		}
+		candidates[i].score = t.directionScore(candidates[i].snapshot, baselineLatency)
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].known != candidates[j].known {
+			return candidates[i].known && !candidates[j].known
+		}
+		if !candidates[i].known {
+			return candidates[i].index < candidates[j].index
+		}
+		if candidates[i].score == candidates[j].score {
+			return candidates[i].index < candidates[j].index
+		}
+		return candidates[i].score > candidates[j].score
+	})
+
+	reordered := make([]schemas.Fallback, len(candidates))
+	changed := false
+	for i, candidate := range candidates {
+		reordered[i] = candidate.fallback
+		if candidate.index != i {
+			changed = true
+		}
+	}
+	return reordered, changed
+}
+
 func (t *Tracker) get(route routeKey) (*routeStats, bool) {
 	value, ok := t.routes.Load(route)
+	if !ok {
+		return nil, false
+	}
+	stats, ok := value.(*routeStats)
+	return stats, ok
+}
+
+func (t *Tracker) getDirection(direction directionKey) (*routeStats, bool) {
+	value, ok := t.directions.Load(direction)
 	if !ok {
 		return nil, false
 	}
@@ -351,6 +537,18 @@ func (t *Tracker) getOrCreate(route routeKey) *routeStats {
 
 	stats := &routeStats{}
 	actual, _ := t.routes.LoadOrStore(route, stats)
+	return actual.(*routeStats)
+}
+
+func (t *Tracker) getOrCreateDirection(direction directionKey) *routeStats {
+	if value, ok := t.directions.Load(direction); ok {
+		if stats, ok := value.(*routeStats); ok {
+			return stats
+		}
+	}
+
+	stats := &routeStats{}
+	actual, _ := t.directions.LoadOrStore(direction, stats)
 	return actual.(*routeStats)
 }
 
@@ -427,6 +625,25 @@ func seedBootstrapMetrics(tracker *Tracker, bootstrap *enterprisecfg.LoadBalance
 		stats.lastUpdated = time.Now()
 		stats.mu.Unlock()
 	}
+
+	for directionID, metrics := range bootstrap.DirectionMetrics {
+		parts := strings.SplitN(directionID, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		snapshot, ok := bootstrapSnapshot(metrics)
+		if !ok {
+			continue
+		}
+		stats := tracker.getOrCreateDirection(directionKey{
+			provider: schemas.ModelProvider(parts[0]),
+			model:    parts[1],
+		})
+		stats.mu.Lock()
+		applyBootstrapSnapshot(stats, snapshot)
+		stats.mu.Unlock()
+	}
 }
 
 func extractLatencyMillis(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse) float64 {
@@ -468,4 +685,164 @@ func maxInt64(value, floor int64) int64 {
 		return floor
 	}
 	return value
+}
+
+func observeStats(stats *routeStats, cfg trackerConfig, latencyMs float64, success bool) {
+	errorSample := 0.0
+	if !success {
+		errorSample = 1.0
+	}
+	if latencyMs <= 0 {
+		latencyMs = 1
+	}
+
+	if stats.samples == 0 {
+		stats.errorEWMA = errorSample
+		stats.latencyEWMA = latencyMs
+	} else {
+		stats.errorEWMA = ewma(stats.errorEWMA, errorSample, cfg.ewmaAlpha)
+		stats.latencyEWMA = ewma(stats.latencyEWMA, latencyMs, cfg.ewmaAlpha)
+	}
+
+	stats.samples++
+	if success {
+		stats.successes++
+		stats.consecutiveFailures = 0
+	} else {
+		stats.failures++
+		stats.consecutiveFailures++
+	}
+	stats.lastUpdated = time.Now()
+}
+
+func applyBootstrapSnapshot(stats *routeStats, snapshot DirectionSnapshot) {
+	stats.samples = snapshot.Samples
+	stats.successes = snapshot.Successes
+	stats.failures = snapshot.Failures
+	stats.errorEWMA = clamp(snapshot.ErrorEWMA, 0, 1)
+	stats.latencyEWMA = math.Max(snapshot.LatencyEWMA, 1)
+	stats.consecutiveFailures = maxInt64(snapshot.ConsecutiveFailures, 0)
+	if snapshot.LastUpdated.IsZero() {
+		stats.lastUpdated = time.Now()
+		return
+	}
+	stats.lastUpdated = snapshot.LastUpdated
+}
+
+func bootstrapSnapshot(values map[string]any) (DirectionSnapshot, bool) {
+	if len(values) == 0 {
+		return DirectionSnapshot{}, false
+	}
+
+	snapshot := DirectionSnapshot{
+		ErrorEWMA:           getFloatFromBootstrap(values, "error_rate"),
+		LatencyEWMA:         math.Max(getFloatFromBootstrap(values, "latency_ms"), 1),
+		ConsecutiveFailures: getInt64FromBootstrap(values, "consecutive_failures"),
+		Samples:             getInt64FromBootstrap(values, "sample_count"),
+	}
+	return snapshot, snapshot.Samples > 0 || snapshot.ConsecutiveFailures > 0 || snapshot.ErrorEWMA > 0 || snapshot.LatencyEWMA > 1
+}
+
+func getFloatFromBootstrap(values map[string]any, key string) float64 {
+	value, ok := values[key]
+	if !ok {
+		return 0
+	}
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case int32:
+		return float64(typed)
+	default:
+		return 0
+	}
+}
+
+func getInt64FromBootstrap(values map[string]any, key string) int64 {
+	value, ok := values[key]
+	if !ok {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case int32:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case float32:
+		return int64(typed)
+	default:
+		return 0
+	}
+}
+
+func (t *Tracker) directionScore(snapshot DirectionSnapshot, baselineLatency float64) float64 {
+	confidence := 1.0
+	if t.cfg.minimumSamples > 0 {
+		confidence = math.Min(1, float64(snapshot.Samples)/float64(t.cfg.minimumSamples))
+	}
+
+	errorFactor := clamp(1-(snapshot.ErrorEWMA*t.cfg.errorPenalty), 0.15, 1)
+	latencyFactor := 1.0
+	if baselineLatency > 0 && snapshot.LatencyEWMA > 0 {
+		latencyRatio := baselineLatency / snapshot.LatencyEWMA
+		latencyFactor = clamp(math.Pow(latencyRatio, t.cfg.latencyPenalty), 0.25, 1.25)
+	}
+	failureFactor := clamp(1-(float64(snapshot.ConsecutiveFailures)*t.cfg.consecutiveFailurePenalty), 0.1, 1)
+	dynamicMultiplier := errorFactor * latencyFactor * failureFactor
+	return ((1 - confidence) * 1.0) + (confidence * dynamicMultiplier)
+}
+
+func (p *Plugin) reorderFallbacks(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) {
+	if p == nil || p.tracker == nil || req == nil {
+		return
+	}
+	if ctx != nil && bifrost.GetIntFromContext(ctx, schemas.BifrostContextKeyFallbackIndex) > 0 {
+		return
+	}
+
+	primaryProvider, primaryModel, fallbacks := req.GetRequestFields()
+	if len(fallbacks) < 2 {
+		return
+	}
+
+	reordered, changed := p.tracker.ReorderFallbacks(fallbacks)
+	if !changed {
+		return
+	}
+
+	req.SetFallbacks(reordered)
+	if ctx != nil {
+		ctx.AppendRoutingEngineLog(
+			schemas.RoutingEngineLoadbalancing,
+			fmt.Sprintf(
+				"Reordered %d fallback providers for %s/%s: %s",
+				len(reordered),
+				primaryProvider,
+				primaryModel,
+				formatFallbacks(reordered),
+			),
+		)
+	}
+}
+
+func formatFallbacks(fallbacks []schemas.Fallback) string {
+	if len(fallbacks) == 0 {
+		return "[]"
+	}
+
+	formatted := make([]string, 0, len(fallbacks))
+	for _, fallback := range fallbacks {
+		formatted = append(formatted, fmt.Sprintf("%s/%s", fallback.Provider, fallback.Model))
+	}
+	return "[" + strings.Join(formatted, ", ") + "]"
 }

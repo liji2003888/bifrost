@@ -19,6 +19,7 @@ import (
 
 type loadBalancerStatusProvider interface {
 	ListSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.RouteStatus
+	ListDirectionSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.DirectionStatus
 }
 
 type EnterpriseHandler struct {
@@ -288,7 +289,10 @@ func (h *EnterpriseHandler) getAdaptiveRoutingStatus(ctx *fasthttp.RequestCtx) {
 
 	provider := schemas.ModelProvider(strings.TrimSpace(string(ctx.QueryArgs().Peek("provider"))))
 	model := strings.TrimSpace(string(ctx.QueryArgs().Peek("model")))
-	SendJSON(ctx, map[string]any{"routes": h.lb.ListSnapshots(provider, model)})
+	SendJSON(ctx, map[string]any{
+		"routes":     h.lb.ListSnapshots(provider, model),
+		"directions": h.lb.ListDirectionSnapshots(provider, model),
+	})
 }
 
 func (h *EnterpriseHandler) requireClusterAuth(ctx *fasthttp.RequestCtx) bool {

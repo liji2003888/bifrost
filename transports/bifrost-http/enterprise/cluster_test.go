@@ -1,6 +1,7 @@
 package enterprise
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,20 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/kvstore"
 )
+
+type fakeClusterDiscoveryResolver struct {
+	addresses []string
+	err       error
+}
+
+func (f *fakeClusterDiscoveryResolver) Discover(_ context.Context, _ *ClusterConfig, _ string) ([]string, error) {
+	if f == nil {
+		return nil, nil
+	}
+	result := make([]string, len(f.addresses))
+	copy(result, f.addresses)
+	return result, f.err
+}
 
 func TestClusterServiceAppliesRemoteMutations(t *testing.T) {
 	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
@@ -122,5 +137,89 @@ func TestClusterStatusReflectsFailedPeerThreshold(t *testing.T) {
 	service.markPeerFailure("http://peer-a", nil)
 	if status := service.Status(); status.Healthy {
 		t.Fatal("expected cluster to become unhealthy after peer failure threshold is reached")
+	}
+}
+
+func TestClusterServiceRefreshesDiscoveredPeers(t *testing.T) {
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	resolver := &fakeClusterDiscoveryResolver{
+		addresses: []string{"10.1.2.3:8080"},
+	}
+	service, err := newClusterService(&ClusterConfig{
+		Enabled: true,
+		Discovery: &ClusterDiscoveryConfig{
+			Enabled:  true,
+			Type:     ClusterDiscoveryDNS,
+			BindPort: 8080,
+			DNSNames: []string{"cluster.internal"},
+		},
+	}, store, "127.0.0.1:8080", bifrost.NewNoOpLogger(), resolver)
+	if err != nil {
+		t.Fatalf("newClusterService() error = %v", err)
+	}
+	defer service.Close()
+
+	status := service.Status()
+	if len(status.Peers) != 1 {
+		t.Fatalf("expected one discovered peer, got %+v", status.Peers)
+	}
+	if status.Peers[0].Address != "http://10.1.2.3:8080" {
+		t.Fatalf("unexpected discovered peer address: %+v", status.Peers[0])
+	}
+	if status.Discovery == nil || status.Discovery.PeerCount != 1 {
+		t.Fatalf("expected discovery status to include one peer, got %+v", status.Discovery)
+	}
+}
+
+func TestClusterServiceRemovesStaleDiscoveredPeersButKeepsStaticPeers(t *testing.T) {
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	resolver := &fakeClusterDiscoveryResolver{
+		addresses: []string{"10.1.2.3:8080"},
+	}
+	service, err := newClusterService(&ClusterConfig{
+		Enabled: true,
+		Peers:   []string{"10.9.9.9:8080"},
+		Discovery: &ClusterDiscoveryConfig{
+			Enabled:  true,
+			Type:     ClusterDiscoveryDNS,
+			BindPort: 8080,
+			DNSNames: []string{"cluster.internal"},
+		},
+	}, store, "127.0.0.1:8080", bifrost.NewNoOpLogger(), resolver)
+	if err != nil {
+		t.Fatalf("newClusterService() error = %v", err)
+	}
+	defer service.Close()
+
+	resolver.addresses = []string{"10.4.5.6:8080"}
+	service.refreshDiscoveredPeers(context.Background())
+
+	status := service.Status()
+	if len(status.Peers) != 2 {
+		t.Fatalf("expected one static and one discovered peer, got %+v", status.Peers)
+	}
+
+	addresses := map[string]bool{}
+	for _, peer := range status.Peers {
+		addresses[peer.Address] = true
+	}
+	if !addresses["http://10.9.9.9:8080"] {
+		t.Fatalf("expected static peer to remain, got %+v", status.Peers)
+	}
+	if !addresses["http://10.4.5.6:8080"] {
+		t.Fatalf("expected refreshed discovered peer to be present, got %+v", status.Peers)
+	}
+	if addresses["http://10.1.2.3:8080"] {
+		t.Fatalf("expected stale discovered peer to be removed, got %+v", status.Peers)
 	}
 }

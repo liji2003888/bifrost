@@ -128,6 +128,14 @@ func TestPostLLMHookRecordsRouteMetrics(t *testing.T) {
 	if snapshot.LatencyEWMA != 180 {
 		t.Fatalf("expected latency EWMA to be recorded, got %v", snapshot.LatencyEWMA)
 	}
+
+	direction, ok := plugin.DirectionSnapshot(schemas.OpenAI, "gpt-4o")
+	if !ok {
+		t.Fatal("expected direction snapshot to be recorded")
+	}
+	if direction.Samples != 1 || direction.Successes != 1 {
+		t.Fatalf("unexpected direction counters: %+v", direction)
+	}
 }
 
 func TestListSnapshotsFiltersByProviderAndModel(t *testing.T) {
@@ -150,5 +158,72 @@ func TestListSnapshotsFiltersByProviderAndModel(t *testing.T) {
 	modelSnapshots := plugin.ListSnapshots("", "claude-sonnet")
 	if len(modelSnapshots) != 1 || modelSnapshots[0].Provider != schemas.Anthropic {
 		t.Fatalf("unexpected model filtered snapshots: %+v", modelSnapshots)
+	}
+}
+
+func TestPreLLMHookReordersFallbacksUsingDirectionMetrics(t *testing.T) {
+	plugin, err := Init(&enterprisecfg.LoadBalancerConfig{
+		Enabled: true,
+		TrackerConfig: &enterprisecfg.LoadBalancerTrackerConfig{
+			MinimumSamples:   1,
+			ExplorationRatio: 0,
+			JitterRatio:      0,
+		},
+	}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	for range 10 {
+		plugin.tracker.ObserveDirection(schemas.OpenAI, "gpt-4.1", 1200, false)
+		plugin.tracker.ObserveDirection(schemas.Anthropic, "claude-sonnet-4", 140, true)
+	}
+
+	req := &schemas.BifrostRequest{
+		RequestType: schemas.ChatCompletionRequest,
+		ChatRequest: &schemas.BifrostChatRequest{
+			Provider: schemas.OpenAI,
+			Model:    "gpt-4o",
+			Fallbacks: []schemas.Fallback{
+				{Provider: schemas.OpenAI, Model: "gpt-4.1"},
+				{Provider: schemas.Anthropic, Model: "claude-sonnet-4"},
+			},
+		},
+	}
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+
+	if _, _, err = plugin.PreLLMHook(ctx, req); err != nil {
+		t.Fatalf("PreLLMHook() error = %v", err)
+	}
+
+	_, _, fallbacks := req.GetRequestFields()
+	if len(fallbacks) != 2 {
+		t.Fatalf("expected 2 fallbacks, got %+v", fallbacks)
+	}
+	if fallbacks[0].Provider != schemas.Anthropic || fallbacks[0].Model != "claude-sonnet-4" {
+		t.Fatalf("expected healthiest fallback to move to the front, got %+v", fallbacks)
+	}
+}
+
+func TestListDirectionSnapshotsFiltersByProviderAndModel(t *testing.T) {
+	plugin, err := Init(&enterprisecfg.LoadBalancerConfig{Enabled: true}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	plugin.tracker.ObserveDirection(schemas.OpenAI, "gpt-4o", 100, true)
+	plugin.tracker.ObserveDirection(schemas.Anthropic, "claude-sonnet", 200, true)
+
+	openAISnapshots := plugin.ListDirectionSnapshots(schemas.OpenAI, "")
+	if len(openAISnapshots) != 1 {
+		t.Fatalf("expected one filtered direction snapshot, got %d", len(openAISnapshots))
+	}
+	if openAISnapshots[0].Provider != schemas.OpenAI || openAISnapshots[0].Model != "gpt-4o" {
+		t.Fatalf("unexpected direction snapshot: %+v", openAISnapshots[0])
+	}
+
+	modelSnapshots := plugin.ListDirectionSnapshots("", "claude-sonnet")
+	if len(modelSnapshots) != 1 || modelSnapshots[0].Provider != schemas.Anthropic {
+		t.Fatalf("unexpected direction filtered snapshots: %+v", modelSnapshots)
 	}
 }
