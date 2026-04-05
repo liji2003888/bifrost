@@ -27,6 +27,7 @@ export const sessionApi = baseApi.injectEndpoints({
 				url: "/session/is-auth-enabled",
 				method: "GET",
 			}),
+			providesTags: ["SessionState"],
 		}),
 		// Login endpoint
 		login: builder.mutation<LoginResponse, LoginRequest>({
@@ -35,7 +36,7 @@ export const sessionApi = baseApi.injectEndpoints({
 				method: "POST",
 				body: credentials,
 			}),
-			invalidatesTags: [],
+			invalidatesTags: ["SessionState"],
 		}),
 
 		// Logout endpoint
@@ -53,7 +54,7 @@ export const sessionApi = baseApi.injectEndpoints({
 					clearAuthStorage();
 				}
 			},
-			invalidatesTags: ["Config", "Providers", "Logs", "VirtualKeys", "Teams", "Customers", "Budgets", "RateLimits"],
+			invalidatesTags: ["SessionState", "Config", "Providers", "Logs", "VirtualKeys", "Teams", "Customers", "Budgets", "RateLimits"],
 		}),
 	}),
 });

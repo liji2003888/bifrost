@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,11 @@ import (
 const clusterConfigPropagationTimeout = 3 * time.Second
 
 func (s *BifrostHTTPServer) PropagateClusterConfigChange(ctx context.Context, change *handlers.ClusterConfigChange) error {
-	if s == nil || s.ClusterService == nil || change == nil {
+	if s == nil || change == nil {
+		return nil
+	}
+	s.broadcastClusterConfigStoreUpdates(change)
+	if s.ClusterService == nil {
 		return nil
 	}
 
@@ -69,56 +74,124 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		return fmt.Errorf("cluster config change is required")
 	}
 
+	var err error
 	switch change.Scope {
 	case handlers.ClusterConfigScopeClient:
-		return s.ApplyClusterClientConfig(ctx, change.ClientConfig)
+		err = s.ApplyClusterClientConfig(ctx, change.ClientConfig)
 	case handlers.ClusterConfigScopeAuth:
-		return s.ApplyClusterAuthConfig(ctx, change.AuthConfig, change.FlushSessions)
+		err = s.ApplyClusterAuthConfig(ctx, change.AuthConfig, change.FlushSessions)
 	case handlers.ClusterConfigScopeCustomer:
-		return s.ApplyClusterCustomerConfig(ctx, change.CustomerID, change.CustomerConfig, change.Delete)
+		err = s.ApplyClusterCustomerConfig(ctx, change.CustomerID, change.CustomerConfig, change.Delete)
 	case handlers.ClusterConfigScopeFolder:
-		return s.ApplyClusterFolderConfig(ctx, change.FolderID, change.FolderConfig, change.Delete)
+		err = s.ApplyClusterFolderConfig(ctx, change.FolderID, change.FolderConfig, change.Delete)
 	case handlers.ClusterConfigScopeFramework:
-		return s.ApplyClusterFrameworkConfig(ctx, change.FrameworkConfig)
+		err = s.ApplyClusterFrameworkConfig(ctx, change.FrameworkConfig)
 	case handlers.ClusterConfigScopeMCPClient:
-		return s.ApplyClusterMCPClientConfig(ctx, change.MCPClientID, change.MCPClientConfig, change.Delete)
+		err = s.ApplyClusterMCPClientConfig(ctx, change.MCPClientID, change.MCPClientConfig, change.Delete)
 	case handlers.ClusterConfigScopeModelConfig:
-		return s.ApplyClusterModelConfig(ctx, change.ModelConfigID, change.ModelConfig, change.Delete)
+		err = s.ApplyClusterModelConfig(ctx, change.ModelConfigID, change.ModelConfig, change.Delete)
 	case handlers.ClusterConfigScopeOAuthConfig:
-		return s.ApplyClusterOAuthConfig(ctx, change.OAuthConfigID, change.OAuthConfig)
+		err = s.ApplyClusterOAuthConfig(ctx, change.OAuthConfigID, change.OAuthConfig)
 	case handlers.ClusterConfigScopeOAuthToken:
-		return s.ApplyClusterOAuthToken(ctx, change.OAuthTokenID, change.OAuthToken, change.Delete)
+		err = s.ApplyClusterOAuthToken(ctx, change.OAuthTokenID, change.OAuthToken, change.Delete)
 	case handlers.ClusterConfigScopePlugin:
-		return s.ApplyClusterPluginConfig(ctx, change.PluginName, change.PluginConfig, change.Delete)
+		err = s.ApplyClusterPluginConfig(ctx, change.PluginName, change.PluginConfig, change.Delete)
 	case handlers.ClusterConfigScopeProviderGovernance:
-		return s.ApplyClusterProviderGovernanceConfig(ctx, change.Provider, change.ProviderGovernance)
+		err = s.ApplyClusterProviderGovernanceConfig(ctx, change.Provider, change.ProviderGovernance)
 	case handlers.ClusterConfigScopeProxy:
-		return s.ApplyClusterProxyConfig(ctx, change.ProxyConfig)
+		err = s.ApplyClusterProxyConfig(ctx, change.ProxyConfig)
 	case handlers.ClusterConfigScopeProvider:
 		if change.Provider == "" {
 			return fmt.Errorf("provider is required for provider cluster config changes")
 		}
 		if change.Delete {
-			return s.RemoveProvider(ctx, change.Provider)
+			err = s.RemoveProvider(ctx, change.Provider)
+			break
 		}
-		return s.ApplyClusterProviderConfig(ctx, change.Provider, change.ProviderConfig)
+		err = s.ApplyClusterProviderConfig(ctx, change.Provider, change.ProviderConfig)
 	case handlers.ClusterConfigScopePrompt:
-		return s.ApplyClusterPromptConfig(ctx, change.PromptID, change.PromptConfig, change.Delete)
+		err = s.ApplyClusterPromptConfig(ctx, change.PromptID, change.PromptConfig, change.Delete)
 	case handlers.ClusterConfigScopePromptSession:
-		return s.ApplyClusterPromptSessionConfig(ctx, change.PromptSessionID, change.PromptSession, change.Delete)
+		err = s.ApplyClusterPromptSessionConfig(ctx, change.PromptSessionID, change.PromptSession, change.Delete)
 	case handlers.ClusterConfigScopePromptVersion:
-		return s.ApplyClusterPromptVersionConfig(ctx, change.PromptVersionID, change.PromptVersion, change.Delete)
+		err = s.ApplyClusterPromptVersionConfig(ctx, change.PromptVersionID, change.PromptVersion, change.Delete)
 	case handlers.ClusterConfigScopeRoutingRule:
-		return s.ApplyClusterRoutingRuleConfig(ctx, change.RoutingRuleID, change.RoutingRule, change.Delete)
+		err = s.ApplyClusterRoutingRuleConfig(ctx, change.RoutingRuleID, change.RoutingRule, change.Delete)
 	case handlers.ClusterConfigScopeSession:
-		return s.ApplyClusterSessionConfig(ctx, change.SessionToken, change.SessionConfig, change.Delete)
+		err = s.ApplyClusterSessionConfig(ctx, change.SessionToken, change.SessionConfig, change.Delete)
 	case handlers.ClusterConfigScopeTeam:
-		return s.ApplyClusterTeamConfig(ctx, change.TeamID, change.TeamConfig, change.Delete)
+		err = s.ApplyClusterTeamConfig(ctx, change.TeamID, change.TeamConfig, change.Delete)
 	case handlers.ClusterConfigScopeVirtualKey:
-		return s.ApplyClusterVirtualKeyConfig(ctx, change.VirtualKeyID, change.VirtualKeyConfig, change.Delete)
+		err = s.ApplyClusterVirtualKeyConfig(ctx, change.VirtualKeyID, change.VirtualKeyConfig, change.Delete)
 	default:
 		return fmt.Errorf("unsupported cluster config scope: %s", change.Scope)
 	}
+
+	if err == nil {
+		s.broadcastClusterConfigStoreUpdates(change)
+	}
+	return err
+}
+
+func (s *BifrostHTTPServer) broadcastClusterConfigStoreUpdates(change *handlers.ClusterConfigChange) {
+	if s == nil || s.WebSocketHandler == nil || change == nil {
+		return
+	}
+	tags := clusterConfigChangeTags(change)
+	if len(tags) == 0 {
+		return
+	}
+	s.WebSocketHandler.BroadcastUpdatesToClients(tags)
+}
+
+func clusterConfigChangeTags(change *handlers.ClusterConfigChange) []string {
+	if change == nil {
+		return nil
+	}
+
+	var tags []string
+	switch change.Scope {
+	case handlers.ClusterConfigScopeClient, handlers.ClusterConfigScopeAuth, handlers.ClusterConfigScopeFramework, handlers.ClusterConfigScopeProxy:
+		tags = append(tags, "Config")
+	case handlers.ClusterConfigScopeCustomer, handlers.ClusterConfigScopeTeam, handlers.ClusterConfigScopeVirtualKey, handlers.ClusterConfigScopeModelConfig, handlers.ClusterConfigScopeProviderGovernance, handlers.ClusterConfigScopeRoutingRule:
+		tags = append(tags, "Customers", "Teams", "VirtualKeys", "Budgets", "RateLimits", "UsageStats", "DebugStats", "HealthCheck", "ModelConfigs", "ProviderGovernance", "RoutingRules")
+	case handlers.ClusterConfigScopeMCPClient:
+		tags = append(tags, "MCPClients", "OAuth2Config")
+	case handlers.ClusterConfigScopeOAuthConfig, handlers.ClusterConfigScopeOAuthToken:
+		tags = append(tags, "OAuth2Config", "MCPClients")
+	case handlers.ClusterConfigScopePlugin:
+		tags = append(tags, "Plugins")
+	case handlers.ClusterConfigScopeProvider:
+		tags = append(tags, "Providers", "DBKeys", "Models", "BaseModels", "ProviderGovernance")
+	case handlers.ClusterConfigScopePrompt:
+		tags = append(tags, "Prompts", "Folders", "Versions", "Sessions")
+	case handlers.ClusterConfigScopeFolder:
+		tags = append(tags, "Folders", "Prompts")
+	case handlers.ClusterConfigScopePromptVersion:
+		tags = append(tags, "Versions", "Prompts")
+	case handlers.ClusterConfigScopePromptSession:
+		tags = append(tags, "Sessions", "Prompts", "Versions")
+	case handlers.ClusterConfigScopeSession:
+		tags = append(tags, "SessionState")
+	}
+
+	tags = append(tags, "ClusterNodes")
+	return dedupeStoreUpdateTags(tags)
+}
+
+func dedupeStoreUpdateTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || slices.Contains(result, tag) {
+			continue
+		}
+		result = append(result, tag)
+	}
+	return result
 }
 
 func (s *BifrostHTTPServer) ApplyClusterAuthConfig(ctx context.Context, cfg *configstore.AuthConfig, flushSessions bool) error {

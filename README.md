@@ -379,3 +379,34 @@ Current cluster auto-sync scope now includes:
 - `mcp client`, OAuth state, dashboard sessions, and built-in plugins
 - `customer`, `team`, `virtual key`, `model config`, and `routing rule`
 - prompt repository `folder`, `prompt`, `prompt version`, and `prompt session`
+
+### 2026-04-05 21:41:06 CST | Base Commit 28a3f8dce | 集群前后端联动与高可用补强
+
+- 补齐了集群配置变更后的前端自动刷新链路。
+  - 现在节点本地配置变更成功后，会通过现有 WebSocket `store_update` 消息主动广播对应的 RTK Query tags。
+  - peer 节点在应用 `/_cluster/config/reload` 变更成功后，也会向本节点已连接的前端页面广播同样的 tags。
+  - 这样浏览器无论连在哪个节点，只要任意节点完成配置更新，相关页面都会自动触发失效与重新拉取，而不需要手动刷新。
+
+- 为不同配置域补充了精确的 UI 失效标签映射，覆盖：
+  - `provider / db keys / models / base models`
+  - `customer / team / virtual key / budget / rate limit / model config / provider governance / routing rule`
+  - `mcp client / OAuth2Config`
+  - `plugin`
+  - `prompt repository` 的 `folder / prompt / version / session`
+  - `cluster status`
+
+- 新增 `SessionState` 前端缓存标签，用于更稳定地处理登录态变化。
+  - `GET /api/session/is-auth-enabled` 现在会提供 `SessionState` tag。
+  - 登录、登出以及集群侧 session 同步后，相关页面可以更可靠地自动刷新登录态。
+
+- 进一步增强了集群高可用下的 Dashboard/WebSocket 体验。
+  - 当 `ws-ticket` 在一个节点签发、WebSocket 升级请求被负载均衡打到另一个节点时，认证现在会继续回退到已同步的 session cookie。
+  - 结合本轮前面已经完成的 session 集群同步，可以避免因节点切换导致的 Dashboard 实时日志/状态流中断。
+
+本轮验证通过：
+
+- `go test ./framework/oauth2 ./transports/bifrost-http/lib -run TestDoesNotExist`
+- `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/server ./transports/bifrost-http/enterprise ./transports/bifrost-http/integrations ./transports/bifrost-http/loadbalancer ./transports/bifrost-http/websocket`
+- `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+- `npm exec next build -- --no-lint`
+- `npm exec tsc -- --noEmit`

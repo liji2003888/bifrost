@@ -164,6 +164,7 @@ export const baseApi = createApi({
 		"Alerts",
 		"LogExports",
 		"VaultStatus",
+		"SessionState",
 	],
 	endpoints: () => ({}),
 });
