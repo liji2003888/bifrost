@@ -121,6 +121,7 @@ type BifrostHTTPServer struct {
 	AuditService     *enterprisecfg.AuditService
 	LogExportService *enterprisecfg.LogExportService
 	AlertManager     *enterprisecfg.AlertManager
+	VaultService     *enterprisecfg.VaultService
 
 	Server *fasthttp.Server
 	Router *router.Router
@@ -989,7 +990,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 		loggingHandler = handlers.NewLoggingHandler(loggerPlugin.GetPluginLogManager(), s, s.Config)
 	}
 	loadBalancerPlugin, _ := lib.FindPluginAs[*loadbalancer.Plugin](s.Config, loadbalancer.PluginName)
-	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager, loadBalancerPlugin)
+	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager, s.VaultService, loadBalancerPlugin)
 	var governanceHandler *handlers.GovernanceHandler
 	governancePluginName := governance.PluginName
 	if name, ok := ctx.Value(schemas.BifrostContextKeyGovernancePluginName).(string); ok && name != "" {
@@ -1349,6 +1350,15 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 
 	logger.Info("models added to catalog")
 	s.Config.SetBifrostClient(s.Client)
+	if s.Config.VaultConfig != nil && s.Config.VaultConfig.Enabled {
+		s.VaultService, err = enterprisecfg.NewVaultService(s.Config.VaultConfig, s.Config, s.AuditService, logger)
+		if err != nil {
+			return fmt.Errorf("failed to initialize vault service: %v", err)
+		}
+		if s.VaultService != nil {
+			s.VaultService.Start()
+		}
+	}
 	// Initialize routes
 	s.Router = router.New()
 	commonMiddlewares := s.PrepareCommonMiddlewares()
@@ -1487,6 +1497,10 @@ func (s *BifrostHTTPServer) Start() error {
 				logger.Info("stopping alert manager...")
 				s.AlertManager.Stop()
 			}
+			if s.VaultService != nil {
+				logger.Info("stopping vault service...")
+				s.VaultService.Stop()
+			}
 			if s.ClusterService != nil {
 				logger.Info("stopping cluster service...")
 				s.ClusterService.Close()
@@ -1507,6 +1521,9 @@ func (s *BifrostHTTPServer) Start() error {
 	case err := <-errChan:
 		if s.AlertManager != nil {
 			s.AlertManager.Stop()
+		}
+		if s.VaultService != nil {
+			s.VaultService.Stop()
 		}
 		if s.ClusterService != nil {
 			s.ClusterService.Close()

@@ -27,11 +27,12 @@ type EnterpriseHandler struct {
 	audit   *enterprisecfg.AuditService
 	exports *enterprisecfg.LogExportService
 	alerts  *enterprisecfg.AlertManager
+	vault   *enterprisecfg.VaultService
 	lb      loadBalancerStatusProvider
 }
 
-func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager, lb loadBalancerStatusProvider) *EnterpriseHandler {
-	if cluster == nil && audit == nil && exports == nil && alerts == nil && lb == nil {
+func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager, vault *enterprisecfg.VaultService, lb loadBalancerStatusProvider) *EnterpriseHandler {
+	if cluster == nil && audit == nil && exports == nil && alerts == nil && vault == nil && lb == nil {
 		return nil
 	}
 	return &EnterpriseHandler{
@@ -39,6 +40,7 @@ func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterpri
 		audit:   audit,
 		exports: exports,
 		alerts:  alerts,
+		vault:   vault,
 		lb:      lb,
 	}
 }
@@ -66,6 +68,9 @@ func (h *EnterpriseHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 	}
 	if h.alerts != nil {
 		r.GET("/api/alerts", lib.ChainMiddlewares(h.getAlerts, middlewares...))
+	}
+	if h.vault != nil {
+		r.GET("/api/vault/status", lib.ChainMiddlewares(h.getVaultStatus, middlewares...))
 	}
 	if h.lb != nil {
 		r.GET("/api/adaptive-routing/status", lib.ChainMiddlewares(h.getAdaptiveRoutingStatus, middlewares...))
@@ -279,6 +284,14 @@ func (h *EnterpriseHandler) getAlerts(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	SendJSON(ctx, map[string]any{"alerts": h.alerts.ListActive()})
+}
+
+func (h *EnterpriseHandler) getVaultStatus(ctx *fasthttp.RequestCtx) {
+	if h.vault == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "vault service is not enabled")
+		return
+	}
+	SendJSON(ctx, h.vault.Status())
 }
 
 func (h *EnterpriseHandler) getAdaptiveRoutingStatus(ctx *fasthttp.RequestCtx) {

@@ -80,6 +80,34 @@ type HandlerStore interface {
 	GetKVStore() *kvstore.Store
 }
 
+// SnapshotProviders returns a deep-copied snapshot of the current provider map.
+// This is intended for background workers that need a stable view without holding config locks.
+func (c *Config) SnapshotProviders() map[schemas.ModelProvider]configstore.ProviderConfig {
+	if c == nil {
+		return nil
+	}
+
+	c.Mu.RLock()
+	defer c.Mu.RUnlock()
+
+	snapshot := make(map[schemas.ModelProvider]configstore.ProviderConfig, len(c.Providers))
+	for provider, providerConfig := range c.Providers {
+		payload, err := sonic.Marshal(providerConfig)
+		if err != nil {
+			snapshot[provider] = providerConfig
+			continue
+		}
+
+		var cloned configstore.ProviderConfig
+		if err := sonic.Unmarshal(payload, &cloned); err != nil {
+			snapshot[provider] = providerConfig
+			continue
+		}
+		snapshot[provider] = cloned
+	}
+	return snapshot
+}
+
 // Retry backoff constants for validation
 const (
 	MinRetryBackoff = 100 * time.Millisecond     // Minimum retry backoff: 100ms
