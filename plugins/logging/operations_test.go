@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/streaming"
 )
@@ -180,6 +181,75 @@ func TestUpdateLogEntrySuppressesChatOutputWhenContentLoggingDisabled(t *testing
 	}
 	if strings.Contains(logEntry.ContentSummary, chatText) {
 		t.Fatalf("expected content summary to suppress chat output, got %q", logEntry.ContentSummary)
+	}
+}
+
+func TestBindClientConfigRebindsContentLoggingBehavior(t *testing.T) {
+	store := newTestStore(t)
+
+	staleClientConfig := &configstore.ClientConfig{
+		DisableContentLogging: true,
+		LoggingHeaders:        []string{"x-stale"},
+	}
+	plugin, err := Init(context.Background(), &Config{
+		DisableContentLogging: &staleClientConfig.DisableContentLogging,
+		LoggingHeaders:        &staleClientConfig.LoggingHeaders,
+	}, testLogger{}, store, nil, nil)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer plugin.Cleanup()
+
+	requestID := "req-chat-rebind"
+	now := time.Now().UTC()
+	initial := &InitialLogData{
+		Object:   "chat_completion",
+		Provider: "openai",
+		Model:    "gpt-4o-mini",
+	}
+
+	if err := plugin.insertInitialLogEntry(context.Background(), requestID, "", now, 0, nil, initial); err != nil {
+		t.Fatalf("insertInitialLogEntry() error = %v", err)
+	}
+
+	updatedClientConfig := &configstore.ClientConfig{
+		DisableContentLogging: false,
+		LoggingHeaders:        []string{"x-updated"},
+	}
+	plugin.BindClientConfig(updatedClientConfig)
+
+	chatText := "assistant output after rebind"
+	update := &UpdateLogData{
+		Status: "success",
+		ChatOutput: &schemas.ChatMessage{
+			Role: schemas.ChatMessageRoleAssistant,
+			Content: &schemas.ChatMessageContent{
+				ContentStr: &chatText,
+			},
+		},
+	}
+
+	if err := plugin.updateLogEntry(context.Background(), requestID, "", "", 10, "", "", "", "", 0, nil, "", update); err != nil {
+		t.Fatalf("updateLogEntry() error = %v", err)
+	}
+
+	logEntry, err := store.FindByID(context.Background(), requestID)
+	if err != nil {
+		t.Fatalf("FindByID() error = %v", err)
+	}
+	if logEntry.OutputMessage == "" {
+		t.Fatal("expected output_message to be logged after rebinding client config")
+	}
+	if !strings.Contains(logEntry.ContentSummary, chatText) {
+		t.Fatalf("expected content summary to include chat output after rebind, got %q", logEntry.ContentSummary)
+	}
+
+	disableContentLogging, loggingHeaders := plugin.CurrentClientConfigBindings()
+	if disableContentLogging {
+		t.Fatal("expected disable_content_logging to be false after rebinding client config")
+	}
+	if !strings.EqualFold(strings.Join(loggingHeaders, ","), strings.Join(updatedClientConfig.LoggingHeaders, ",")) {
+		t.Fatalf("expected logging headers %v, got %v", updatedClientConfig.LoggingHeaders, loggingHeaders)
 	}
 }
 

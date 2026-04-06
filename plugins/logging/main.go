@@ -15,6 +15,7 @@ import (
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/mcp"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/mcpcatalog"
@@ -227,7 +228,7 @@ type LoggerPlugin struct {
 	pendingLogs           sync.Map              // Maps requestID -> *PendingLogData (PreLLMHook input data awaiting PostLLMHook)
 	writeQueue            chan *writeQueueEntry // Buffered channel for batch write queue
 	closed                atomic.Bool           // Set during cleanup to prevent sends on closed writeQueue
-	deferredUsageSem      chan struct{}          // Limits concurrent deferred usage DB updates
+	deferredUsageSem      chan struct{}         // Limits concurrent deferred usage DB updates
 }
 
 // Init creates new logger plugin with given log store
@@ -284,6 +285,47 @@ func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore 
 	go plugin.batchWriter()
 
 	return plugin, nil
+}
+
+// BindClientConfig rebinds live client-config pointers after runtime config reloads.
+func (p *LoggerPlugin) BindClientConfig(cfg *configstore.ClientConfig) {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if cfg == nil {
+		p.disableContentLogging = nil
+		p.loggingHeaders = nil
+		return
+	}
+
+	p.disableContentLogging = &cfg.DisableContentLogging
+	p.loggingHeaders = &cfg.LoggingHeaders
+}
+
+// CurrentClientConfigBindings exposes the currently bound logging client-config values.
+func (p *LoggerPlugin) CurrentClientConfigBindings() (bool, []string) {
+	if p == nil {
+		return false, nil
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	disableContentLogging := false
+	if p.disableContentLogging != nil {
+		disableContentLogging = *p.disableContentLogging
+	}
+
+	var loggingHeaders []string
+	if p.loggingHeaders != nil {
+		loggingHeaders = append([]string(nil), (*p.loggingHeaders)...)
+	}
+
+	return disableContentLogging, loggingHeaders
 }
 
 // cleanupWorker periodically removes old processing logs

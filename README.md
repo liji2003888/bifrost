@@ -511,3 +511,54 @@ Current cluster auto-sync scope now includes:
 - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
 - `npm exec next build -- --no-lint`
 - `npm exec tsc -- --noEmit`
+
+### 2026-04-06 16:43:14 CST | Base Commit 512c6c6c0 | LLM Logs 输入输出内容回归修复
+
+- 修复了最近 cluster / self-heal 引入的一处 runtime reload 回归。
+  - 根因不是日志详情页前端渲染丢字段，而是 `ReloadClientConfigFromConfigStore` 之前直接替换了 `s.Config.ClientConfig` 指针。
+  - 但内置 `logging` 和 `governance` 插件在初始化时拿的是 `ClientConfig` 内部字段地址，后续 client reload 如果直接换对象，这两个插件会继续引用旧的 client config。
+  - 在这种情况下，只要旧对象里的 `disable_content_logging`、`logging_headers`、`enforce_auth_on_inference`、`required_headers` 与当前 store/runtime 不一致，就会出现“配置看起来已更新，但插件实际还在按旧值工作”的问题。
+
+- 这次把 client runtime reload 改成了“原地更新 + 统一重绑”。
+  - `ReloadClientConfigFromConfigStore` 不再直接替换 `ClientConfig` 对象；如果 runtime 已有实例，就执行原地覆盖，尽量保留现有 live 引用。
+  - 同时新增了对依赖 client 配置的内置插件的显式重绑逻辑，当前覆盖：
+    - `logging`
+    - `governance`
+  - 这样即使节点此前已经经历过一次“错误的指针替换”，后续只要再触发一次 client config reload，就能把插件重新绑回当前正确的 runtime config。
+
+- 为 `logging` 和 `governance` 插件补了显式的 `BindClientConfig` 能力。
+  - `logging` 现在可以在 runtime reload 后重新绑定：
+    - `disable_content_logging`
+    - `logging_headers`
+  - `governance` 现在可以在 runtime reload 后重新绑定：
+    - `enforce_auth_on_inference`
+    - `required_headers`
+  - 这两个重绑方法都是幂等的，重复执行不会引入额外副作用。
+
+- 新增了回归测试，直接覆盖“插件绑在旧 client config 上，再从 ConfigStore reload”的真实场景。
+  - 测试会先构造一个 stale client config，让 `logging` / `governance` 故意绑定到旧对象。
+  - 再通过 server 触发两次 `ReloadClientConfigFromConfigStore`，验证：
+    - 插件最终会绑定到新的 store/runtime 配置
+    - 连续 reload 两次结果保持一致
+    - 整个 reload 过程保持幂等
+
+- 另外补了一条更贴近实际症状的 logging 插件回归测试。
+  - 直接验证 logging 插件在最初绑定到错误的 stale client config 后，只要执行一次显式重绑，就会重新恢复输入/输出内容写入，而不是只验证内部绑定值发生变化。
+  - 这样可以更直接地覆盖“LLM Logs 里没有输入和输出内容”的实际故障表现。
+
+本轮验证通过：
+
+- `go test ./transports/bifrost-http/server -run 'TestReloadClientConfigFromConfigStoreRebindsClientConfigDependentPlugins|TestClusterConfigSelfHealerRunOnceDeduplicatesSameSignature|TestReloadAuthConfigFromConfigStoreUpdatesRuntimeOnlyAndIsIdempotent'`
+- `go test ./plugins/logging -run 'TestBindClientConfigRebindsContentLoggingBehavior|TestUpdateLogEntrySuppressesChatOutputWhenContentLoggingDisabled|TestUpdateLogEntryUpdatesContentSummaryForChatOutput'`
+- `go test ./plugins/logging ./plugins/governance ./transports/bifrost-http/server`
+- `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/enterprise -run TestDoesNotExist`
+- `go test ./transports/bifrost-http/server ./transports/bifrost-http/handlers ./transports/bifrost-http/enterprise ./transports/bifrost-http/integrations`
+- `go test ./transports/bifrost-http/loadbalancer ./transports/bifrost-http/websocket`
+- `go test ./transports/bifrost-http/lib -run TestDoesNotExist`
+- `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+- `npm exec next build -- --no-lint`
+
+补充说明：
+
+- `go test ./transports/bifrost-http/...` 和 `go test ./transports/bifrost-http/lib ./transports/bifrost-http/loadbalancer ./transports/bifrost-http/websocket` 在当前环境里依旧出现过长时间无输出的现象，因此这轮采用了关键子包拆分验证，不拿挂起中的总命令去冒充完整通过。
+- `npm exec tsc -- --noEmit` 在当前仓库环境里仍然会因为 `.next/types` 产物引用不完整而失败，这属于已有的前端类型产物问题；本轮 `next build` 已通过，说明前端构建链路没有被这次修复打坏。

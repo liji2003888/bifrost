@@ -312,6 +312,47 @@ func (p *GovernancePlugin) GetName() string {
 	return PluginName
 }
 
+// BindClientConfig rebinds live client-config pointers after runtime config reloads.
+func (p *GovernancePlugin) BindClientConfig(cfg *configstore.ClientConfig) {
+	if p == nil {
+		return
+	}
+
+	p.cfgMutex.Lock()
+	defer p.cfgMutex.Unlock()
+
+	if cfg == nil {
+		p.isVkMandatory = nil
+		p.requiredHeaders = nil
+		return
+	}
+
+	p.isVkMandatory = &cfg.EnforceAuthOnInference
+	p.requiredHeaders = &cfg.RequiredHeaders
+}
+
+// CurrentClientConfigBindings exposes the currently bound governance client-config values.
+func (p *GovernancePlugin) CurrentClientConfigBindings() (bool, []string) {
+	if p == nil {
+		return false, nil
+	}
+
+	p.cfgMutex.RLock()
+	defer p.cfgMutex.RUnlock()
+
+	isVkMandatory := false
+	if p.isVkMandatory != nil {
+		isVkMandatory = *p.isVkMandatory
+	}
+
+	var requiredHeaders []string
+	if p.requiredHeaders != nil {
+		requiredHeaders = append([]string(nil), (*p.requiredHeaders)...)
+	}
+
+	return isVkMandatory, requiredHeaders
+}
+
 // UpdateEnforceAuthOnInference updates the enforce auth on inference config
 func (p *GovernancePlugin) UpdateEnforceAuthOnInference(enforceAuthOnInference bool) {
 	p.cfgMutex.Lock()

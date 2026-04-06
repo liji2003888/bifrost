@@ -52,6 +52,10 @@ var enterprisePlugins = []string{
 	"datadog",
 }
 
+type clientConfigRuntimeBinder interface {
+	BindClientConfig(cfg *configstore.ClientConfig)
+}
+
 func clusterNodeIdentifier(host, port string) string {
 	normalizedHost := strings.TrimSpace(host)
 	switch normalizedHost {
@@ -715,7 +719,14 @@ func (s *BifrostHTTPServer) ReloadClientConfigFromConfigStore(ctx context.Contex
 	if config == nil {
 		return fmt.Errorf("client config not found")
 	}
-	s.Config.ClientConfig = config
+
+	if s.Config.ClientConfig == nil {
+		s.Config.ClientConfig = config
+	} else {
+		*s.Config.ClientConfig = *config
+		config = s.Config.ClientConfig
+	}
+	s.rebindClientConfigDependentPlugins()
 	// Reloading whitelisted routes from the client config
 	if s.AuthMiddleware != nil {
 		s.AuthMiddleware.UpdateWhitelistedRoutes(config.WhitelistedRoutes)
@@ -738,6 +749,25 @@ func (s *BifrostHTTPServer) ReloadClientConfigFromConfigStore(ctx context.Contex
 		})
 	}
 	return nil
+}
+
+func (s *BifrostHTTPServer) rebindClientConfigDependentPlugins() {
+	if s == nil || s.Config == nil {
+		return
+	}
+
+	basePlugins := s.Config.BasePlugins.Load()
+	if basePlugins == nil {
+		return
+	}
+
+	for _, plugin := range *basePlugins {
+		binder, ok := plugin.(clientConfigRuntimeBinder)
+		if !ok {
+			continue
+		}
+		binder.BindClientConfig(s.Config.ClientConfig)
+	}
 }
 
 // UpdateAuthConfig updates auth config in the config store and updates the AuthMiddleware's in-memory config
