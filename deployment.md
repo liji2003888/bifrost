@@ -633,6 +633,143 @@ K8s 侧建议：
 - `APP_HOST=0.0.0.0`
 - Readiness / Liveness 都打 `/health`
 
+额外说明：
+
+- 当前 `kubernetes discovery` 的运行方式本质上还是 DNS 解析，因此一定要让 `service_name.namespace.svc` 解析到各个 Pod IP，而不是普通 `ClusterIP Service` 的单个 VIP
+- 最稳的方式是给 cluster discovery 单独准备一个 Headless Service，比如 `bifrost-peer`
+- 对外流量再走另一个普通 Service / Ingress，比如 `bifrost-public`
+- `k8s_label_selector` 字段目前还没有参与运行时 discovery 解析，当前真正生效的是 `service_name + k8s_namespace`
+- discovery 默认会周期刷新，不需要因为新增 Pod 而重启全部旧 Pod；当前默认刷新周期通常是 5 秒
+
+### 7.5.1 Kubernetes 常见问题
+
+#### 是否需要为了每个 Pod 单独写环境变量或改代码
+
+不需要。
+
+推荐方式是：
+
+- 所有 Pod 使用同一份 `config.json`
+- 所有 Pod 使用同一个 `cluster_config.auth_token`
+- 所有 Pod 共用同一个 `config_store`
+- 通过 `cluster_config.discovery` 自动发现 peer
+
+这意味着你不需要把每个 Pod 的 IP 写进环境变量，也不需要因为扩容去改应用代码。
+
+#### 当前 Pod 会不会把自己也当成 peer
+
+正常情况下不会。
+
+当前实现会把本节点的这些地址加入 self 集合并过滤掉：
+
+- 启动时使用的 `host:port`
+- `127.0.0.1:<port>`
+- `localhost:<port>`
+- `::1:<port>`
+- 当前 Pod 网卡上的各个 IP 加当前监听端口
+
+因此只要 discovery 解析出来的是“当前 Pod 实际 IP + 正确端口”，它通常会正确跳过自己。
+
+#### 使用 Headless Service 后，会不会覆盖到所有 Pod
+
+会，但更准确地说不是 “通知 Service”，而是：
+
+1. 每个节点会周期性解析 `service_name.namespace.svc`
+2. 解析结果如果是 Headless Service，通常会得到一组 Pod IP
+3. 每个节点会把这些 Pod IP 作为 peer 集合
+4. 后续配置变更会 fanout 到当前 peer 集合里的所有节点
+
+所以在 K8s 场景里，真正生效的是 “DNS 解析出来的 Pod 列表”，不是 Service 自己做广播。
+
+#### 新增 Pod 后，旧 Pod 要不要全部重启
+
+如果你用的是 `discovery`，通常不需要。
+
+旧 Pod 会在 discovery 刷新周期内自动发现新 Pod，然后后续变更会自动传播给它。当前默认刷新通常是 5 秒左右。
+
+但要注意：
+
+- 新节点更适合依赖共享 `config_store` 恢复现有持久化配置
+- 当前 fanout 不是 durable queue，所以它只能保证“加入之后的新变更”自动传播
+- 因此生产上仍然强烈建议所有节点共用 Postgres `config_store`
+
+#### `k8s_label_selector` 现在是否已经生效
+
+还没有完全生效。
+
+当前运行时 discovery 真正使用的是：
+
+- `service_name`
+- `k8s_namespace`
+
+所以当前不要把 `k8s_label_selector` 当作主要发现手段。
+
+### 7.5.2 Kubernetes Service 推荐拆分
+
+推荐拆成两个 Service：
+
+- `bifrost-peer`
+  只给集群节点间发现和内部同步使用，必须是 Headless Service
+- `bifrost-public`
+  只给外部流量、Ingress 或网关入口使用，可以是普通 `ClusterIP` / `LoadBalancer`
+
+最小示例：
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: bifrost-peer
+  namespace: ai-gateway
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app: bifrost
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bifrost-public
+  namespace: ai-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: bifrost
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+```
+
+对应的 cluster 配置建议：
+
+```json
+{
+  "cluster_config": {
+    "enabled": true,
+    "auth_token": "env.BIFROST_CLUSTER_AUTH_TOKEN",
+    "discovery": {
+      "enabled": true,
+      "type": "kubernetes",
+      "service_name": "bifrost-peer",
+      "k8s_namespace": "ai-gateway"
+    }
+  }
+}
+```
+
+推荐做法：
+
+- `APP_HOST=0.0.0.0`
+- 不额外设置 `cluster_config.peers`
+- 不把 Ingress、LB 地址写进 `cluster_config.peers`
+- 不把 `gossip.port` / `discovery.bind_port` 配成和实际 HTTP 监听端口不同的值
+
 ## 7.6 Docker Compose / VM 静态 peers 示例
 
 外层用 HAProxy 或 Nginx，节点间配置静态 peers。
@@ -643,6 +780,12 @@ K8s 侧建议：
 - `haproxy -> bifrost-2:8080`
 - `haproxy -> bifrost-3:8080`
 - 每个节点 `cluster_config.peers` 都列出另外几个节点的内网地址
+
+静态 peers 的特点：
+
+- 适合固定 3 节点或 VM 场景
+- 新增节点时，通常需要把新节点地址加入旧节点配置后再做滚动重启，才能让旧节点主动向它传播集群变更
+- 因此在 K8s 场景里，不建议长期依赖静态 peers 维护扩缩容
 
 HAProxy 最小示例：
 
