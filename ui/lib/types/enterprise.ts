@@ -22,6 +22,7 @@ export interface ClusterConfigSyncStatus {
 
 export interface ClusterPeerStatus {
 	address: string;
+	seed_address?: string;
 	healthy: boolean;
 	reported_healthy?: boolean;
 	node_id?: string;

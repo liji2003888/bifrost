@@ -52,6 +52,20 @@ var enterprisePlugins = []string{
 	"datadog",
 }
 
+func clusterNodeIdentifier(host, port string) string {
+	normalizedHost := strings.TrimSpace(host)
+	switch normalizedHost {
+	case "", "0.0.0.0", "::", "[::]", "localhost", "127.0.0.1", "::1", "[::1]":
+		if hostname, err := os.Hostname(); err == nil {
+			hostname = strings.TrimSpace(hostname)
+			if hostname != "" {
+				return net.JoinHostPort(hostname, port)
+			}
+		}
+	}
+	return net.JoinHostPort(host, port)
+}
+
 // ServerCallbacks is a interface that defines the callbacks for the server.
 type ServerCallbacks interface {
 	// Plugins callbacks
@@ -1202,7 +1216,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		integrations.RegisterKVDecoders(s.Config.KVStore)
 	}
 	if s.Config.ClusterConfig != nil && s.Config.ClusterConfig.Enabled {
-		s.ClusterService, err = enterprisecfg.NewClusterService(s.Config.ClusterConfig, s.Config.KVStore, net.JoinHostPort(s.Host, s.Port), logger)
+		s.ClusterService, err = enterprisecfg.NewClusterService(s.Config.ClusterConfig, s.Config.KVStore, clusterNodeIdentifier(s.Host, s.Port), logger)
 		if err != nil {
 			return fmt.Errorf("failed to initialize cluster service: %v", err)
 		}

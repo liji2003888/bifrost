@@ -31,8 +31,8 @@ func (s *BifrostHTTPServer) PropagateClusterConfigChange(ctx context.Context, ch
 		return nil
 	}
 
-	peers := s.ClusterService.PeerStatuses()
-	if len(peers) == 0 {
+	addresses := s.ClusterService.FanoutAddresses(ctx)
+	if len(addresses) == 0 {
 		return nil
 	}
 
@@ -42,10 +42,7 @@ func (s *BifrostHTTPServer) PropagateClusterConfigChange(ctx context.Context, ch
 		errs  []error
 	)
 
-	for _, peer := range peers {
-		if peer.Address == "" {
-			continue
-		}
+	for _, address := range addresses {
 		wg.Add(1)
 		go func(address string) {
 			defer wg.Done()
@@ -62,7 +59,7 @@ func (s *BifrostHTTPServer) PropagateClusterConfigChange(ctx context.Context, ch
 				errs = append(errs, fmt.Errorf("%s: %w", address, err))
 				errMu.Unlock()
 			}
-		}(peer.Address)
+		}(address)
 	}
 
 	wg.Wait()

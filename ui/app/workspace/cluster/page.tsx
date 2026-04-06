@@ -89,7 +89,7 @@ export default function ClusterPage() {
 			},
 			{
 				label: "Managed Secrets",
-				value: vaultStatus ? vaultStatus.managed_secrets.toLocaleString() : vaultServiceDisabled ? "Disabled" : "-",
+				value: vaultStatus ? vaultStatus.managed_secrets.toLocaleString() : vaultServiceDisabled ? "Not configured" : "-",
 				icon: KeyRound,
 			},
 		];
@@ -191,7 +191,7 @@ export default function ClusterPage() {
 					<div className="grid gap-4 lg:grid-cols-[1.6fr_1fr]">
 						<Card className="shadow-none">
 							<CardHeader className="pb-3">
-								<CardTitle className="text-base">Node Overview</CardTitle>
+								<CardTitle className="text-base">Local Node Overview</CardTitle>
 							</CardHeader>
 							<CardContent className="grid gap-4 sm:grid-cols-2">
 								<InfoPair label="Node ID" value={clusterStatus.node_id} mono />
@@ -246,8 +246,8 @@ export default function ClusterPage() {
 									</div>
 								) : vaultServiceDisabled ? (
 									<div className="space-y-1">
-										<p className="text-sm font-medium">Disabled</p>
-										<p className="text-muted-foreground text-sm">Vault sync has not been enabled for this deployment yet.</p>
+										<p className="text-sm font-medium">Not configured</p>
+										<p className="text-muted-foreground text-sm">Vault runtime sync has not been enabled for this deployment.</p>
 									</div>
 								) : vaultStatus ? (
 									<div className="space-y-3">
@@ -277,6 +277,7 @@ export default function ClusterPage() {
 								<TableHeader>
 									<TableRow>
 										<TableHead>Address</TableHead>
+										<TableHead>Resolved From</TableHead>
 										<TableHead>Status</TableHead>
 										<TableHead>Config Sync</TableHead>
 										<TableHead>Last Seen</TableHead>
@@ -288,7 +289,7 @@ export default function ClusterPage() {
 								<TableBody>
 									{clusterStatus.peers.length === 0 ? (
 										<TableRow>
-											<TableCell colSpan={7} className="h-24 text-center">
+											<TableCell colSpan={8} className="h-24 text-center">
 												<span className="text-muted-foreground text-sm">No peers are registered for this node yet.</span>
 											</TableCell>
 										</TableRow>
@@ -300,6 +301,9 @@ export default function ClusterPage() {
 														<span className="font-mono text-xs">{peer.address}</span>
 														<span className="text-muted-foreground text-xs">{peer.node_id || "node id unavailable"}</span>
 													</div>
+												</TableCell>
+												<TableCell>
+													<span className="font-mono text-xs">{peer.seed_address || "-"}</span>
 												</TableCell>
 												<TableCell>
 													<div className="flex flex-col gap-1">

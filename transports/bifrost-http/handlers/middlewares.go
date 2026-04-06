@@ -21,7 +21,7 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-var loggingSkipPaths = []string{"/health", "/_next", "/api/dev"}
+var loggingSkipPaths = []string{"/health", "/_next", "/api/dev", "/_cluster"}
 
 // SecurityHeadersMiddleware sets security-related HTTP headers on every response.
 // This should wrap the outermost handler so all responses (API, UI, errors) include these headers.

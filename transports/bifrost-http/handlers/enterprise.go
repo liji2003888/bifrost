@@ -243,9 +243,16 @@ func (h *EnterpriseHandler) applyClusterConfigReload(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("invalid cluster config reload payload: %v", err))
 		return
 	}
+	summary := clusterConfigChangeSummary(&change)
 	if err := h.config.ApplyClusterConfigChange(clusterRequestContext(), &change); err != nil {
+		if logger != nil {
+			logger.Warn("failed to apply cluster config reload from %s: %s: %v", ctx.RemoteAddr().String(), summary, err)
+		}
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to apply cluster config reload: %v", err))
 		return
+	}
+	if logger != nil {
+		logger.Info("applied cluster config reload from %s: %s", ctx.RemoteAddr().String(), summary)
 	}
 	SendJSON(ctx, map[string]any{"ok": true})
 }
@@ -930,6 +937,84 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func clusterConfigChangeSummary(change *ClusterConfigChange) string {
+	if change == nil {
+		return "scope=unknown"
+	}
+
+	parts := []string{fmt.Sprintf("scope=%s", change.Scope)}
+	switch change.Scope {
+	case ClusterConfigScopeProvider:
+		if change.Provider != "" {
+			parts = append(parts, fmt.Sprintf("provider=%s", change.Provider))
+		}
+	case ClusterConfigScopeVirtualKey:
+		if change.VirtualKeyID != "" {
+			parts = append(parts, fmt.Sprintf("virtual_key_id=%s", change.VirtualKeyID))
+		}
+	case ClusterConfigScopeCustomer:
+		if change.CustomerID != "" {
+			parts = append(parts, fmt.Sprintf("customer_id=%s", change.CustomerID))
+		}
+	case ClusterConfigScopeTeam:
+		if change.TeamID != "" {
+			parts = append(parts, fmt.Sprintf("team_id=%s", change.TeamID))
+		}
+	case ClusterConfigScopeRoutingRule:
+		if change.RoutingRuleID != "" {
+			parts = append(parts, fmt.Sprintf("routing_rule_id=%s", change.RoutingRuleID))
+		}
+	case ClusterConfigScopeModelConfig:
+		if change.ModelConfigID != "" {
+			parts = append(parts, fmt.Sprintf("model_config_id=%s", change.ModelConfigID))
+		}
+	case ClusterConfigScopeMCPClient:
+		if change.MCPClientID != "" {
+			parts = append(parts, fmt.Sprintf("mcp_client_id=%s", change.MCPClientID))
+		}
+	case ClusterConfigScopePlugin:
+		if change.PluginName != "" {
+			parts = append(parts, fmt.Sprintf("plugin=%s", change.PluginName))
+		}
+	case ClusterConfigScopePrompt:
+		if change.PromptID != "" {
+			parts = append(parts, fmt.Sprintf("prompt_id=%s", change.PromptID))
+		}
+	case ClusterConfigScopeFolder:
+		if change.FolderID != "" {
+			parts = append(parts, fmt.Sprintf("folder_id=%s", change.FolderID))
+		}
+	case ClusterConfigScopePromptVersion:
+		if change.PromptVersionID != 0 {
+			parts = append(parts, fmt.Sprintf("prompt_version_id=%d", change.PromptVersionID))
+		}
+	case ClusterConfigScopePromptSession:
+		if change.PromptSessionID != 0 {
+			parts = append(parts, fmt.Sprintf("prompt_session_id=%d", change.PromptSessionID))
+		}
+	case ClusterConfigScopeOAuthConfig:
+		if change.OAuthConfigID != "" {
+			parts = append(parts, fmt.Sprintf("oauth_config_id=%s", change.OAuthConfigID))
+		}
+	case ClusterConfigScopeOAuthToken:
+		if change.OAuthTokenID != "" {
+			parts = append(parts, fmt.Sprintf("oauth_token_id=%s", change.OAuthTokenID))
+		}
+	case ClusterConfigScopeSession:
+		if change.SessionToken != "" {
+			parts = append(parts, "session=updated")
+		}
+	}
+
+	if change.Delete {
+		parts = append(parts, "delete=true")
+	}
+	if change.FlushSessions {
+		parts = append(parts, "flush_sessions=true")
+	}
+	return strings.Join(parts, " ")
 }
 
 func sanitizeAttachmentName(name string) string {

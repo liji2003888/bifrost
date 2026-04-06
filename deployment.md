@@ -640,6 +640,7 @@ K8s 侧建议：
 - 对外流量再走另一个普通 Service / Ingress，比如 `bifrost-public`
 - `k8s_label_selector` 字段目前还没有参与运行时 discovery 解析，当前真正生效的是 `service_name + k8s_namespace`
 - discovery 默认会周期刷新，不需要因为新增 Pod 而重启全部旧 Pod；当前默认刷新周期通常是 5 秒
+- 当前版本在配置传播和 KV 广播链路里，已经可以把 `cluster_config.peers` 中的 DNS / Headless Service 主机名展开成全部解析到的 Pod IP；因此即使 `peers` 中写的是 Headless Service，也不会只向单个 Pod 传播
 
 ### 7.5.1 Kubernetes 常见问题
 
@@ -655,6 +656,12 @@ K8s 侧建议：
 - 通过 `cluster_config.discovery` 自动发现 peer
 
 这意味着你不需要把每个 Pod 的 IP 写进环境变量，也不需要因为扩容去改应用代码。
+
+如果你已经在线上使用了：
+
+- `cluster_config.peers = ["http://bifrost-peer.ai-gateway.svc:8080"]`
+
+那么当前版本也可以工作，因为传播时会把这个 Headless Service 解析为所有 Pod IP 再逐个 fanout。
 
 #### 当前 Pod 会不会把自己也当成 peer
 
@@ -786,6 +793,7 @@ spec:
 - 适合固定 3 节点或 VM 场景
 - 新增节点时，通常需要把新节点地址加入旧节点配置后再做滚动重启，才能让旧节点主动向它传播集群变更
 - 因此在 K8s 场景里，不建议长期依赖静态 peers 维护扩缩容
+- 如果 `peers` 中填的是 Headless Service 域名，当前版本在传播链路里会展开成全部 Pod IP，但从可观测性和长期运维角度，仍然更推荐直接使用 `discovery`
 
 HAProxy 最小示例：
 

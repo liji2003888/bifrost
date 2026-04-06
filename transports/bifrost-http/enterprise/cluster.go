@@ -44,6 +44,7 @@ type ClusterMutation struct {
 
 type ClusterPeerStatus struct {
 	Address              string                   `json:"address"`
+	SeedAddress          string                   `json:"seed_address,omitempty"`
 	Healthy              bool                     `json:"healthy"`
 	ReportedHealthy      *bool                    `json:"reported_healthy,omitempty"`
 	NodeID               string                   `json:"node_id,omitempty"`
@@ -104,6 +105,7 @@ type clusterEvent struct {
 
 type peerState struct {
 	address              string
+	seedAddress          string
 	healthy              bool
 	reportedHealthy      *bool
 	nodeID               string
@@ -127,6 +129,7 @@ type ClusterService struct {
 	client  *http.Client
 	auth    string
 	self    map[string]struct{}
+	lookup  func(ctx context.Context, host string) ([]string, error)
 
 	startedAt          time.Time
 	queue              chan clusterEvent
@@ -138,6 +141,7 @@ type ClusterService struct {
 
 	mu                   sync.RWMutex
 	peers                map[string]*peerState
+	targets              map[string]*peerState
 	discoveryLastRefresh *time.Time
 	discoveryLastError   string
 }
@@ -151,6 +155,11 @@ func newClusterService(cfg *ClusterConfig, store *kvstore.Store, nodeID string, 
 		return nil, nil
 	}
 
+	lookupHost := net.DefaultResolver.LookupHost
+	if dnsResolver, ok := resolver.(*dnsClusterDiscoveryResolver); ok && dnsResolver != nil && dnsResolver.lookupHost != nil {
+		lookupHost = dnsResolver.lookupHost
+	}
+
 	service := &ClusterService{
 		cfg:       cfg,
 		logger:    logger,
@@ -162,8 +171,10 @@ func newClusterService(cfg *ClusterConfig, store *kvstore.Store, nodeID string, 
 		queue:     make(chan clusterEvent, 512),
 		stopCh:    make(chan struct{}),
 		peers:     make(map[string]*peerState),
+		targets:   make(map[string]*peerState),
 		resolver:  resolver,
 		self:      clusterSelfAddresses(nodeID, cfg),
+		lookup:    lookupHost,
 	}
 
 	for _, peer := range cfg.Peers {
@@ -173,6 +184,7 @@ func newClusterService(cfg *ClusterConfig, store *kvstore.Store, nodeID string, 
 	if clusterDiscoveryEnabled(cfg) {
 		service.refreshDiscoveredPeers(context.Background())
 	}
+	service.syncTargetPeers(context.Background())
 
 	store.SetDelegate(service)
 	service.start()
@@ -283,9 +295,9 @@ func (s *ClusterService) Status() ClusterStatus {
 	}
 
 	s.mu.RLock()
-	peers := make([]ClusterPeerStatus, 0, len(s.peers))
+	peers := make([]ClusterPeerStatus, 0, len(s.targets))
 	discoveredPeers := 0
-	for _, peer := range s.peers {
+	for _, peer := range s.targets {
 		var lastSeen *time.Time
 		if peer.lastSeen != nil {
 			t := *peer.lastSeen
@@ -303,6 +315,7 @@ func (s *ClusterService) Status() ClusterStatus {
 		}
 		peers = append(peers, ClusterPeerStatus{
 			Address:              peer.address,
+			SeedAddress:          peer.seedAddress,
 			Healthy:              peer.healthy,
 			ReportedHealthy:      reportedHealthy,
 			NodeID:               peer.nodeID,
@@ -375,12 +388,7 @@ func (s *ClusterService) broadcast(event clusterEvent) {
 		return
 	}
 
-	s.mu.RLock()
-	peers := make([]string, 0, len(s.peers))
-	for address := range s.peers {
-		peers = append(peers, address)
-	}
-	s.mu.RUnlock()
+	peers := s.FanoutAddresses(context.Background())
 
 	for _, peer := range peers {
 		req, err := http.NewRequest(http.MethodPost, peer+event.path, bytes.NewReader(payload))
@@ -434,7 +442,7 @@ func (s *ClusterService) discoveryLoop() {
 }
 
 func (s *ClusterService) checkPeers() {
-	for _, peer := range s.peerAddresses() {
+	for _, peer := range s.FanoutAddresses(context.Background()) {
 		req, err := http.NewRequest(http.MethodGet, peer+clusterStatusEndpoint, nil)
 		if err != nil {
 			s.markPeerFailure(peer, err)
@@ -534,6 +542,8 @@ func (s *ClusterService) syncDiscoveredPeers(addresses []string) {
 		}
 		delete(s.peers, address)
 	}
+
+	s.rebuildTargetPeersLocked(context.Background())
 }
 
 func (s *ClusterService) markPeerSuccess(address string, status *ClusterStatus) {
@@ -543,7 +553,10 @@ func (s *ClusterService) markPeerSuccess(address string, status *ClusterStatus) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	peer, ok := s.peers[address]
+	peer, ok := s.targets[address]
+	if !ok {
+		peer, ok = s.peers[address]
+	}
 	if !ok {
 		return
 	}
@@ -580,7 +593,10 @@ func (s *ClusterService) markPeerFailure(address string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	peer, ok := s.peers[address]
+	peer, ok := s.targets[address]
+	if !ok {
+		peer, ok = s.peers[address]
+	}
 	if !ok {
 		return
 	}
@@ -634,10 +650,93 @@ func (s *ClusterService) peerAddresses() []string {
 	return peers
 }
 
+func (s *ClusterService) targetAddresses() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	targets := make([]string, 0, len(s.targets))
+	for address := range s.targets {
+		targets = append(targets, address)
+	}
+	return targets
+}
+
+func (s *ClusterService) FanoutAddresses(ctx context.Context) []string {
+	if s == nil {
+		return nil
+	}
+
+	s.syncTargetPeers(ctx)
+	return s.targetAddresses()
+}
+
+func (s *ClusterService) expandPeerAddress(ctx context.Context, address string) []string {
+	normalized := normalizeClusterAddress(address)
+	if normalized == "" {
+		return nil
+	}
+
+	parsed, err := url.Parse(normalized)
+	if err != nil || parsed == nil || parsed.Hostname() == "" {
+		return []string{normalized}
+	}
+
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" || net.ParseIP(host) != nil {
+		return []string{normalized}
+	}
+
+	port := strings.TrimSpace(parsed.Port())
+	if port == "" {
+		return []string{normalized}
+	}
+
+	lookup := s.lookup
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupHost
+	}
+
+	resolvedHosts, err := lookup(ctx, host)
+	if err != nil || len(resolvedHosts) == 0 {
+		return []string{normalized}
+	}
+
+	scheme := strings.TrimSpace(parsed.Scheme)
+	if scheme == "" {
+		scheme = "http"
+	}
+
+	resolved := make([]string, 0, len(resolvedHosts))
+	seen := make(map[string]struct{}, len(resolvedHosts))
+	for _, resolvedHost := range resolvedHosts {
+		ip := net.ParseIP(strings.TrimSpace(resolvedHost))
+		if ip == nil {
+			continue
+		}
+		target := normalizeClusterAddress(scheme + "://" + net.JoinHostPort(ip.String(), port))
+		if target == "" {
+			continue
+		}
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		resolved = append(resolved, target)
+	}
+
+	if len(resolved) == 0 {
+		return []string{normalized}
+	}
+	return resolved
+}
+
 func (s *ClusterService) upsertPeer(address string, isStatic bool, isDiscovered bool) {
 	if s == nil || address == "" || s.isSelfAddress(address) {
 		return
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	peer, ok := s.peers[address]
 	if !ok {
@@ -646,10 +745,54 @@ func (s *ClusterService) upsertPeer(address string, isStatic bool, isDiscovered 
 			static:     isStatic,
 			discovered: isDiscovered,
 		}
+		s.rebuildTargetPeersLocked(context.Background())
 		return
 	}
 	peer.static = peer.static || isStatic
 	peer.discovered = peer.discovered || isDiscovered
+	s.rebuildTargetPeersLocked(context.Background())
+}
+
+func (s *ClusterService) syncTargetPeers(ctx context.Context) {
+	if s == nil {
+		return
+	}
+
+	requestCtx := ctx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rebuildTargetPeersLocked(requestCtx)
+}
+
+func (s *ClusterService) rebuildTargetPeersLocked(ctx context.Context) {
+	nextTargets := make(map[string]*peerState, len(s.peers))
+	for seedAddress, seed := range s.peers {
+		expanded := s.expandPeerAddress(ctx, seedAddress)
+		if len(expanded) == 0 {
+			expanded = []string{seedAddress}
+		}
+		for _, target := range expanded {
+			normalized := normalizeClusterAddress(target)
+			if normalized == "" || s.isSelfAddress(normalized) {
+				continue
+			}
+
+			targetState, ok := s.targets[normalized]
+			if !ok {
+				targetState = &peerState{address: normalized}
+			}
+			targetState.address = normalized
+			targetState.seedAddress = seedAddress
+			targetState.static = seed.static
+			targetState.discovered = seed.discovered
+			nextTargets[normalized] = targetState
+		}
+	}
+	s.targets = nextTargets
 }
 
 func (s *ClusterService) isSelfAddress(address string) bool {

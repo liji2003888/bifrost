@@ -177,6 +177,55 @@ func TestClusterServiceRefreshesDiscoveredPeers(t *testing.T) {
 	}
 }
 
+func TestClusterServiceFanoutAddressesExpandDNSBackedPeers(t *testing.T) {
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	resolver := &dnsClusterDiscoveryResolver{
+		lookupHost: func(_ context.Context, host string) ([]string, error) {
+			if host != "bifrost-peer.ai-gateway.svc" {
+				t.Fatalf("unexpected lookup host: %s", host)
+			}
+			return []string{"10.2.0.11", "10.2.0.12", "127.0.0.1", "10.2.0.11"}, nil
+		},
+	}
+
+	service, err := newClusterService(&ClusterConfig{
+		Enabled: true,
+		Peers:   []string{"http://bifrost-peer.ai-gateway.svc:8080"},
+	}, store, "127.0.0.1:8080", bifrost.NewNoOpLogger(), resolver)
+	if err != nil {
+		t.Fatalf("newClusterService() error = %v", err)
+	}
+	defer service.Close()
+
+	targets := service.FanoutAddresses(context.Background())
+	if len(targets) != 2 {
+		t.Fatalf("expected two expanded fanout targets, got %+v", targets)
+	}
+	targetSet := map[string]bool{}
+	for _, target := range targets {
+		targetSet[target] = true
+	}
+	if !targetSet["http://10.2.0.11:8080"] || !targetSet["http://10.2.0.12:8080"] {
+		t.Fatalf("unexpected expanded fanout targets: %+v", targets)
+	}
+
+	service.markPeerSuccess("http://10.2.0.11:8080", &ClusterStatus{NodeID: "bifrost-0:8080", Healthy: true})
+	service.markPeerSuccess("http://10.2.0.12:8080", &ClusterStatus{NodeID: "bifrost-1:8080", Healthy: true})
+
+	status := service.Status()
+	if len(status.Peers) != 2 {
+		t.Fatalf("expected status to expose expanded peer targets, got %+v", status.Peers)
+	}
+	if status.Peers[0].SeedAddress != "http://bifrost-peer.ai-gateway.svc:8080" || status.Peers[1].SeedAddress != "http://bifrost-peer.ai-gateway.svc:8080" {
+		t.Fatalf("expected seed address to be preserved on expanded peers, got %+v", status.Peers)
+	}
+}
+
 func TestClusterStatusIncludesLocalConfigSyncStatus(t *testing.T) {
 	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
 	if err != nil {
