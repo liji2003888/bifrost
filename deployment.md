@@ -336,7 +336,7 @@ Bifrost 支持在 `config.json` 中直接写：
   "encryption_key": "env.BIFROST_ENCRYPTION_KEY",
   "client": {
     "enable_logging": true,
-    "disable_content_logging": true,
+    "disable_content_logging": false,
     "log_retention_days": 30,
     "allowed_origins": ["*"],
     "max_request_body_size_mb": 100
@@ -483,7 +483,7 @@ curl http://127.0.0.1:8080/api/providers
   "encryption_key": "env.BIFROST_ENCRYPTION_KEY",
   "client": {
     "enable_logging": true,
-    "disable_content_logging": true,
+    "disable_content_logging": false,
     "log_retention_days": 30,
     "allowed_origins": [
       "https://gateway.company.com"
@@ -566,6 +566,12 @@ curl http://127.0.0.1:8080/api/providers
   }
 }
 ```
+
+说明：
+
+- `client.disable_content_logging: false` 才会在 `LLM Logs` 里保存输入和输出内容。
+- 如果该值为 `true`，系统仍会记录请求元数据、token、延迟、成本和错误信息，但不会保存输入/输出正文。
+- 如果你的部署是按本文档旧版本示例落的配置，需要把该值改回 `false`，然后让节点重新加载 `client config`。
 
 ## 7.5 Kubernetes 集群配置示例
 
