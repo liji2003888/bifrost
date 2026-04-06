@@ -38,6 +38,7 @@ const (
 
 type ClusterConfigChange struct {
 	Scope              ClusterConfigScope                      `json:"scope"`
+	SourceNodeID       string                                  `json:"source_node_id,omitempty"`
 	CustomerID         string                                  `json:"customer_id,omitempty"`
 	CustomerConfig     *configstoreTables.TableCustomer        `json:"customer_config,omitempty"`
 	FolderID           string                                  `json:"folder_id,omitempty"`

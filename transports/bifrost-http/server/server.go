@@ -66,6 +66,30 @@ func clusterNodeIdentifier(host, port string) string {
 	return net.JoinHostPort(host, port)
 }
 
+func (s *BifrostHTTPServer) ensureModelCatalog(ctx context.Context) error {
+	if s == nil || s.Config == nil {
+		return fmt.Errorf("server config not initialized")
+	}
+	if s.Config.ModelCatalog != nil {
+		return nil
+	}
+	if s.Config.FrameworkConfig == nil || s.Config.FrameworkConfig.Pricing == nil {
+		return nil
+	}
+
+	modelCatalog, err := modelcatalog.Init(ctx, s.Config.FrameworkConfig.Pricing, s.Config.ConfigStore, nil, logger)
+	if err != nil {
+		return fmt.Errorf("failed to initialize pricing manager: %w", err)
+	}
+	s.Config.ModelCatalog = modelCatalog
+	for provider, providerConfig := range s.Config.Providers {
+		if err := s.Config.ModelCatalog.SetProviderPricingOverrides(provider, providerConfig.PricingOverrides); err != nil {
+			logger.Warn("failed to seed pricing overrides for provider %s: %v", provider, err)
+		}
+	}
+	return nil
+}
+
 // ServerCallbacks is a interface that defines the callbacks for the server.
 type ServerCallbacks interface {
 	// Plugins callbacks
@@ -137,6 +161,9 @@ type BifrostHTTPServer struct {
 	LogExportService *enterprisecfg.LogExportService
 	AlertManager     *enterprisecfg.AlertManager
 	VaultService     *enterprisecfg.VaultService
+
+	clusterConfigReporter   *clusterConfigSyncReporter
+	clusterConfigSelfHealer *clusterConfigSelfHealer
 
 	Server *fasthttp.Server
 	Router *router.Router
@@ -483,11 +510,11 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 	if s.Config == nil || s.Config.ConfigStore == nil {
 		return nil, fmt.Errorf("config store not found")
 	}
-	if s.Config.ModelCatalog == nil {
-		return nil, fmt.Errorf("pricing manager not found")
-	}
 	if s.Client == nil {
 		return nil, fmt.Errorf("bifrost client not found")
+	}
+	if err := s.ensureModelCatalog(ctx); err != nil {
+		logger.Warn("failed to initialize pricing manager during provider reload for %s: %v", provider, err)
 	}
 
 	// Load provider from DB
@@ -533,8 +560,10 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 	}
 
 	// Syncing models (this part always runs regardless of governance)
-	if err := s.Config.ModelCatalog.SetProviderPricingOverrides(provider, providerInfo.PricingOverrides); err != nil {
-		logger.Warn("failed to refresh pricing overrides for provider %s: %v", provider, err)
+	if s.Config.ModelCatalog != nil {
+		if err := s.Config.ModelCatalog.SetProviderPricingOverrides(provider, providerInfo.PricingOverrides); err != nil {
+			logger.Warn("failed to refresh pricing overrides for provider %s: %v", provider, err)
+		}
 	}
 
 	bfCtx := schemas.NewBifrostContext(ctx, time.Now().Add(15*time.Second))
@@ -559,36 +588,38 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 			Data: make([]schemas.Model, 0),
 		}
 	}
-	// Getting allowed models from all provider keys
-	providerKeys, err := s.Config.ConfigStore.GetKeysByProvider(ctx, string(provider))
-	if err != nil {
-		return nil, fmt.Errorf("failed to update provider model catalog: failed to get keys by provider: %s", err)
-	}
-	allowedInKeys := make([]schemas.Model, 0)
-	deniedInKeys := make([]schemas.Model, 0)
-	for _, key := range providerKeys {
-		for _, model := range key.Models {
-			if !slices.Contains(key.BlacklistedModels, model) {
-				allowedInKeys = append(allowedInKeys, schemas.Model{
+	if s.Config.ModelCatalog != nil {
+		// Getting allowed models from all provider keys
+		providerKeys, err := s.Config.ConfigStore.GetKeysByProvider(ctx, string(provider))
+		if err != nil {
+			return nil, fmt.Errorf("failed to update provider model catalog: failed to get keys by provider: %s", err)
+		}
+		allowedInKeys := make([]schemas.Model, 0)
+		deniedInKeys := make([]schemas.Model, 0)
+		for _, key := range providerKeys {
+			for _, model := range key.Models {
+				if !slices.Contains(key.BlacklistedModels, model) {
+					allowedInKeys = append(allowedInKeys, schemas.Model{
+						ID: string(provider) + "/" + model,
+					})
+				}
+			}
+			for _, model := range key.BlacklistedModels {
+				deniedInKeys = append(deniedInKeys, schemas.Model{
 					ID: string(provider) + "/" + model,
 				})
 			}
 		}
-		for _, model := range key.BlacklistedModels {
-			deniedInKeys = append(deniedInKeys, schemas.Model{
-				ID: string(provider) + "/" + model,
-			})
+		s.Config.ModelCatalog.UpsertModelDataForProvider(provider, allModels, allowedInKeys, deniedInKeys)
+		unfilteredModelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
+			Provider:   provider,
+			Unfiltered: true,
+		})
+		if listModelsErr != nil {
+			logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
+		} else {
+			s.Config.ModelCatalog.UpsertUnfilteredModelDataForProvider(provider, unfilteredModelData)
 		}
-	}
-	s.Config.ModelCatalog.UpsertModelDataForProvider(provider, allModels, allowedInKeys, deniedInKeys)
-	unfilteredModelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
-		Provider:   provider,
-		Unfiltered: true,
-	})
-	if listModelsErr != nil {
-		logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
-	} else {
-		s.Config.ModelCatalog.UpsertUnfilteredModelDataForProvider(provider, unfilteredModelData)
 	}
 	return updatedProvider, nil
 }
@@ -601,7 +632,7 @@ func (s *BifrostHTTPServer) RemoveProvider(ctx context.Context, provider schemas
 		return err
 	}
 	err = s.Config.RemoveProvider(ctx, provider)
-	if err != nil && !errors.Is(err, lib.ErrNotFound) {
+	if err != nil && !errors.Is(err, lib.ErrNotFound) && !errors.Is(err, configstore.ErrNotFound) {
 		logger.Error("failed to remove provider from config: %v. Client and config may be out of sync, please restart bifrost", err)
 		return fmt.Errorf("failed to remove provider from config: %w. Client and config may be out of sync, please restart bifrost", err)
 	}
@@ -611,7 +642,7 @@ func (s *BifrostHTTPServer) RemoveProvider(ctx context.Context, provider schemas
 	}
 	governancePlugin.GetGovernanceStore().DeleteProviderInMemory(string(provider))
 	if s.Config == nil || s.Config.ModelCatalog == nil {
-		return fmt.Errorf("pricing manager not found")
+		return nil
 	}
 	s.Config.ModelCatalog.DeleteModelDataForProvider(provider)
 	s.Config.ModelCatalog.DeleteProviderPricingOverrides(provider)
@@ -765,7 +796,13 @@ func (s *BifrostHTTPServer) reloadObservabilityPlugins() {
 
 // ReloadPricingManager reloads the pricing manager
 func (s *BifrostHTTPServer) ReloadPricingManager(ctx context.Context) error {
-	if s.Config == nil || s.Config.ModelCatalog == nil {
+	if s.Config == nil {
+		return fmt.Errorf("pricing manager not found")
+	}
+	if err := s.ensureModelCatalog(ctx); err != nil {
+		return err
+	}
+	if s.Config.ModelCatalog == nil {
 		return fmt.Errorf("pricing manager not found")
 	}
 	if s.Config.FrameworkConfig == nil || s.Config.FrameworkConfig.Pricing == nil {
@@ -780,19 +817,11 @@ func (s *BifrostHTTPServer) ForceReloadPricing(ctx context.Context) error {
 		return fmt.Errorf("server config not initialized")
 	}
 	if s.Config.ModelCatalog == nil {
-		if s.Config.FrameworkConfig == nil || s.Config.FrameworkConfig.Pricing == nil {
+		if err := s.ensureModelCatalog(ctx); err != nil {
+			return err
+		}
+		if s.Config.ModelCatalog == nil {
 			return fmt.Errorf("framework pricing config not initialized")
-		}
-		// Create a new model catalog
-		modelCatalog, err := modelcatalog.Init(ctx, s.Config.FrameworkConfig.Pricing, s.Config.ConfigStore, nil, logger)
-		if err != nil {
-			return fmt.Errorf("failed to initialize new model catalog: %w", err)
-		}
-		s.Config.ModelCatalog = modelCatalog
-		for provider, providerConfig := range s.Config.Providers {
-			if err := s.Config.ModelCatalog.SetProviderPricingOverrides(provider, providerConfig.PricingOverrides); err != nil {
-				logger.Warn("failed to seed pricing overrides for provider %s: %v", provider, err)
-			}
 		}
 	} else {
 		if err := s.Config.ModelCatalog.ForceReloadPricing(ctx); err != nil {
@@ -1220,7 +1249,8 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to initialize cluster service: %v", err)
 		}
-		s.ClusterService.SetConfigSyncReporter(newClusterConfigSyncReporter(s).Status)
+		s.clusterConfigReporter = newClusterConfigSyncReporter(s)
+		s.ClusterService.SetConfigSyncReporter(s.clusterConfigReporter.Status)
 	}
 	// Initialize WebSocket handler early so plugins can wire event broadcasters during Init.
 	// Log callbacks are registered later in RegisterAPIRoutes when logging plugin is available.
@@ -1451,6 +1481,12 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		Handler:            handlers.SecurityHeadersMiddleware()(handlers.CorsMiddleware(s.Config)(handlers.RequestDecompressionMiddleware(s.Config)(s.Router.Handler))),
 		MaxRequestBodySize: s.Config.ClientConfig.MaxRequestBodySizeMB * 1024 * 1024,
 		ReadBufferSize:     1024 * 64, // 64kb
+	}
+	if s.clusterConfigReporter != nil {
+		s.clusterConfigSelfHealer = newClusterConfigSelfHealer(s, s.clusterConfigReporter)
+		if s.clusterConfigSelfHealer != nil {
+			s.clusterConfigSelfHealer.Start(s.Ctx)
+		}
 	}
 	return nil
 }

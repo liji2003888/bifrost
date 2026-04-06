@@ -79,6 +79,9 @@ func TestPropagateClusterConfigChangeBroadcastsPayloadToPeers(t *testing.T) {
 		if got.Scope != handlers.ClusterConfigScopeProxy {
 			t.Fatalf("expected proxy scope, got %+v", got)
 		}
+		if got.SourceNodeID != "local-node" {
+			t.Fatalf("expected source node id to be propagated, got %+v", got)
+		}
 		if got.ProxyConfig == nil || got.ProxyConfig.URL != "http://proxy.internal:8080" || !got.ProxyConfig.Enabled {
 			t.Fatalf("expected proxy config payload to be preserved, got %+v", got.ProxyConfig)
 		}

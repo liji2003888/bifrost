@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { getErrorMessage, useGetClusterStatusQuery, useGetVaultStatusQuery } from "@/lib/store";
+import type { ClusterConfigSyncStatus } from "@/lib/types/enterprise";
 import { formatRelativeTimestamp, formatTimestamp, isServiceDisabledError } from "@/lib/utils/enterprise";
 import { AlertCircle, Database, GitBranch, KeyRound, RefreshCw, Server, ShieldCheck } from "lucide-react";
 import type { ReactNode } from "react";
@@ -42,6 +43,8 @@ export default function ClusterPage() {
 	const clusterServiceDisabled = isServiceDisabledError(clusterError);
 	const vaultServiceDisabled = isServiceDisabledError(vaultError);
 	const localConfigSync = clusterStatus?.config_sync;
+	const localRuntimeDrift = Boolean(localConfigSync?.store_connected && localConfigSync.in_sync === false);
+	const totalNodeCount = clusterStatus ? clusterStatus.peers.length + 1 : 0;
 
 	const peerRuntimeDriftCount = useMemo(() => {
 		if (!clusterStatus?.peers?.length || !localConfigSync?.runtime_hash) {
@@ -57,6 +60,21 @@ export default function ClusterPage() {
 		return clusterStatus.peers.filter((peer) => peer.config_sync?.store_connected && peer.config_sync?.in_sync === false).length;
 	}, [clusterStatus?.peers]);
 
+	const driftedPeerCount = useMemo(() => {
+		if (!clusterStatus?.peers?.length) {
+			return 0;
+		}
+		return clusterStatus.peers.filter((peer) => {
+			if (peer.config_sync?.store_connected && peer.config_sync.in_sync === false) {
+				return true;
+			}
+			if (!peer.config_sync?.runtime_hash || !localConfigSync?.runtime_hash) {
+				return false;
+			}
+			return peer.config_sync.runtime_hash !== localConfigSync.runtime_hash;
+		}).length;
+	}, [clusterStatus?.peers, localConfigSync?.runtime_hash]);
+
 	const summaryCards = useMemo(() => {
 		if (!clusterStatus) {
 			return [];
@@ -68,7 +86,12 @@ export default function ClusterPage() {
 				icon: ShieldCheck,
 			},
 			{
-				label: "Peers",
+				label: "Cluster Nodes",
+				value: totalNodeCount.toLocaleString(),
+				icon: Server,
+			},
+			{
+				label: "Remote Peers",
 				value: clusterStatus.peers.length.toLocaleString(),
 				icon: Server,
 			},
@@ -78,13 +101,13 @@ export default function ClusterPage() {
 				icon: Database,
 			},
 			{
-				label: "Discovered Peers",
+				label: "Dynamic Peers",
 				value: (clusterStatus.discovery?.peer_count ?? 0).toLocaleString(),
 				icon: GitBranch,
 			},
 			{
-				label: "Runtime Drift",
-				value: peerRuntimeDriftCount.toLocaleString(),
+				label: "Drifted Nodes",
+				value: (driftedPeerCount + (localRuntimeDrift ? 1 : 0)).toLocaleString(),
 				icon: RefreshCw,
 			},
 			{
@@ -93,7 +116,7 @@ export default function ClusterPage() {
 				icon: KeyRound,
 			},
 		];
-	}, [clusterStatus, peerRuntimeDriftCount, vaultStatus, vaultServiceDisabled]);
+	}, [clusterStatus, driftedPeerCount, localRuntimeDrift, totalNodeCount, vaultStatus, vaultServiceDisabled]);
 
 	if (clusterLoading && !clusterStatus) {
 		return <FullPageLoader />;
@@ -145,9 +168,8 @@ export default function ClusterPage() {
 								<AlertCircle />
 								<AlertTitle>Current node runtime is behind ConfigStore</AlertTitle>
 								<AlertDescription>
-									This node is still serving a different runtime config than the persisted ConfigStore state. Cluster sync now hot-reloads the core
-									config domains and selected governance resources, so drift here usually means a peer missed a reload or is reading a different
-									ConfigStore snapshot.
+									This node&apos;s in-memory runtime config does not match the latest persisted ConfigStore snapshot yet. In practice this usually
+									means a hot reload failed or has not completed, rather than a simple page refresh delay.
 								</AlertDescription>
 							</Alert>
 						)}
@@ -157,8 +179,8 @@ export default function ClusterPage() {
 							<AlertCircle />
 							<AlertTitle>Runtime drift detected across the cluster</AlertTitle>
 							<AlertDescription>
-								{peerRuntimeDriftCount} peer node{peerRuntimeDriftCount === 1 ? "" : "s"} currently expose a different runtime config fingerprint than this
-								node.
+								{peerRuntimeDriftCount} remote node{peerRuntimeDriftCount === 1 ? "" : "s"} currently expose a different in-memory runtime fingerprint than
+								this node.
 							</AlertDescription>
 						</Alert>
 					)}
@@ -168,13 +190,13 @@ export default function ClusterPage() {
 							<AlertCircle />
 							<AlertTitle>Some peer nodes are not reloaded from ConfigStore</AlertTitle>
 							<AlertDescription>
-								{peersOutOfSyncWithStoreCount} peer node{peersOutOfSyncWithStoreCount === 1 ? "" : "s"} report runtime drift from their own
-								ConfigStore snapshot.
+								{peersOutOfSyncWithStoreCount} remote node{peersOutOfSyncWithStoreCount === 1 ? "" : "s"} report that their own in-memory runtime still
+								differs from the ConfigStore snapshot they read from.
 							</AlertDescription>
 						</Alert>
 					)}
 
-					<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+					<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-7">
 						{summaryCards.map((card) => (
 							<Card key={card.label} className="shadow-none">
 								<CardContent className="flex items-start justify-between px-4 py-4">
@@ -207,6 +229,7 @@ export default function ClusterPage() {
 												: "In sync"
 									}
 								/>
+								<InfoPair label="Cluster Nodes" value={totalNodeCount.toLocaleString()} />
 								<InfoPair
 									label="Discovery"
 									value={
@@ -268,9 +291,35 @@ export default function ClusterPage() {
 						</Card>
 					</div>
 
+					<div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+						<NodeStatusCard
+							title="Local Node"
+							subtitle={clusterStatus.node_id}
+							healthy={clusterStatus.healthy}
+							configSync={localConfigSync}
+							startedAt={clusterStatus.started_at}
+							localRuntimeHash={localConfigSync?.runtime_hash}
+						/>
+						{clusterStatus.peers.map((peer) => (
+							<NodeStatusCard
+								key={peer.address}
+								title={peer.node_id || peer.address}
+								subtitle={peer.address}
+								healthy={peer.healthy}
+								reportedHealthy={peer.reported_healthy}
+								configSync={peer.config_sync}
+								startedAt={peer.started_at}
+								lastSeen={peer.last_seen}
+								localRuntimeHash={localConfigSync?.runtime_hash}
+								resolvedFrom={peer.seed_address}
+								lastError={peer.last_error}
+							/>
+						))}
+					</div>
+
 					<Card className="shadow-none">
 						<CardHeader className="pb-3">
-							<CardTitle className="text-base">Peer Status</CardTitle>
+							<CardTitle className="text-base">Remote Peer Status</CardTitle>
 						</CardHeader>
 						<CardContent>
 							<Table containerClassName="max-h-[32rem]" data-testid="cluster-peers-table">
@@ -374,4 +423,76 @@ function InfoPair({ label, value, mono = false }: { label: string; value: ReactN
 			<div className={mono ? "font-mono text-sm" : "text-sm"}>{value}</div>
 		</div>
 	);
+}
+
+function NodeStatusCard({
+	title,
+	subtitle,
+	healthy,
+	reportedHealthy,
+	configSync,
+	startedAt,
+	lastSeen,
+	localRuntimeHash,
+	resolvedFrom,
+	lastError,
+}: {
+	title: string;
+	subtitle: string;
+	healthy: boolean;
+	reportedHealthy?: boolean;
+	configSync?: ClusterConfigSyncStatus;
+	startedAt?: string;
+	lastSeen?: string;
+	localRuntimeHash?: string;
+	resolvedFrom?: string;
+	lastError?: string;
+}) {
+	return (
+		<Card className="shadow-none">
+			<CardHeader className="pb-3">
+				<CardTitle className="text-base">{title}</CardTitle>
+				<p className="text-muted-foreground font-mono text-xs">{subtitle}</p>
+			</CardHeader>
+			<CardContent className="space-y-3">
+				<div className="flex flex-wrap items-center gap-2">
+					<HealthBadge healthy={healthy} />
+					{reportedHealthy !== undefined && (
+						<Badge variant={reportedHealthy ? "secondary" : "destructive"}>
+							Remote cluster {reportedHealthy ? "healthy" : "degraded"}
+						</Badge>
+					)}
+				</div>
+				<InfoPair label="Started" value={formatTimestamp(startedAt)} />
+				{lastSeen ? <InfoPair label="Last Seen" value={formatRelativeTimestamp(lastSeen)} /> : null}
+				<InfoPair label="Config Sync" value={getConfigSyncLabel(configSync)} />
+				<InfoPair label="Runtime Match" value={getRuntimeComparisonLabel(configSync, localRuntimeHash)} />
+				{resolvedFrom && <InfoPair label="Resolved From" value={<span className="font-mono text-xs">{resolvedFrom}</span>} />}
+				{configSync?.drift_domains?.length ? <InfoPair label="Drift Domains" value={configSync.drift_domains.join(", ")} /> : null}
+				{lastError ? (
+					<Alert variant="destructive" className="py-2">
+						<AlertCircle />
+						<AlertDescription className="break-all">{lastError}</AlertDescription>
+					</Alert>
+				) : null}
+			</CardContent>
+		</Card>
+	);
+}
+
+function getConfigSyncLabel(configSync?: ClusterConfigSyncStatus) {
+	if (!configSync?.store_connected) {
+		return "No ConfigStore";
+	}
+	if (configSync.in_sync === false) {
+		return "Runtime drift";
+	}
+	return "In sync";
+}
+
+function getRuntimeComparisonLabel(configSync?: ClusterConfigSyncStatus, localRuntimeHash?: string) {
+	if (!configSync?.runtime_hash || !localRuntimeHash) {
+		return "Runtime match unavailable";
+	}
+	return configSync.runtime_hash === localRuntimeHash ? "Matches local runtime" : "Differs from local runtime";
 }

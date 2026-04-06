@@ -434,3 +434,80 @@ Current cluster auto-sync scope now includes:
 - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
 - `npm exec next build -- --no-lint`
 - `npm exec tsc -- --noEmit`
+
+### 2026-04-06 15:11:18 CST | Base Commit 512c6c6c0 | 集群同步稳定性、Cluster 视图语义与 Virtual Key 交互修复
+
+- 修复了集群 `provider` 热同步在 peer 节点上的关键稳定性问题。
+  - 之前 peer 节点在应用 `provider` 配置时，如果本地 `ModelCatalog / PricingManager` 尚未初始化，会直接报 `pricing manager not found`，导致共享 `ConfigStore` 已更新但运行时未热生效，进而在 Cluster 页里持续表现为 `Runtime Drift`。
+  - 现在 `ReloadProvider` 会先尝试按当前 `framework.pricing` 配置懒初始化 `ModelCatalog`；如果部署本身没有启用 pricing/model catalog，也不会因为缺少 pricing manager 而让 provider 热加载失败。
+  - `RemoveProvider` 也不再因为没有 `ModelCatalog` 而中断删除链路，避免 peer 已经删掉 provider 但清理 pricing 缓存时反向报错。
+
+- 修复了共享 `ConfigStore` 场景下 provider 删除的幂等性问题。
+  - 之前一个节点先删掉 provider 后，其他节点收到 cluster reload 再去删同一条数据库记录时，会因为 `DeleteProvider -> not found` 被当成错误，出现“Client and config may be out of sync”的误导日志。
+  - 现在 provider 删除对 `configstore.ErrNotFound` 做了幂等处理，peer 节点会把“数据库里已经不存在”视为合法状态，只继续清理本地运行时缓存。
+
+- 补强了 cluster reload 的来源可观测性。
+  - `ClusterConfigChange` 现在会携带 `source_node_id`。
+  - peer 节点在接收并应用 `/_cluster/config/reload` 时，日志会带上 `source_node=<pod-or-node-id>`，不再只能看到对端连接的临时 `ip:port`。
+  - 这能更快定位到底是哪一个节点发出的 provider / virtual key / governance 变更。
+
+- 调整了 Cluster 页的统计语义和展示结构，避免误判。
+  - 原来的 `Peers` 实际只统计“远端 peer”，不包含当前访问节点，所以 3 个 Pod 的集群会显示成 2；现在汇总卡片新增并优先展示 `Cluster Nodes` 总数，同时保留 `Remote Peers`。
+  - `Discovered Peers` 改成更明确的 `Dynamic Peers` 语义，避免静态 `peers + headless service` 场景下看到 0 产生误解。
+  - 新增按 Pod 维度的 `Node Cards` 视图，直接展示本地节点和每个远端节点的 `node id / started time / config sync / runtime match / resolved from / last error`，不再只能依赖下方表格判断状态。
+  - `Remote Peer Status` 表格保留，用于继续查看成功次数、失败次数、最近错误等细节。
+
+- 优化了 Cluster 页里 `Runtime Drift` 的解释文案。
+  - 现在页面会明确说明：`Runtime Drift` 不是单纯的页面刷新延迟，而是“某个节点当前正在服务的内存运行时配置，与最新 ConfigStore 快照或其他节点的运行时指纹不一致”。
+  - 这类提示通常意味着热加载失败、未完成，或者某个节点运行时没有正确刷新，而不只是同步稍慢。
+
+- 修复了 `Virtual Key` 列表页“点击复制 key 报 failed copy”的问题。
+  - 之前复制逻辑只依赖 `navigator.clipboard.writeText`，在某些浏览器权限、非安全上下文或特定嵌入环境下会直接失败。
+  - 现在增加了 `textarea + document.execCommand("copy")` 的兼容性兜底，并确保点击复制/显示按钮时不会误触发行点击。
+
+本轮验证通过：
+
+- `go test ./transports/bifrost-http/server ./transports/bifrost-http/handlers ./transports/bifrost-http/enterprise`
+- `go test ./transports/bifrost-http/lib -run 'TestRemoveProvider_(Success|NotFound|DBError_DoesNotRemoveFromMemory|DBNotFound_IsIdempotent|NilConfigStore_RemovesFromMemoryOnly|SkipDBUpdate)$'`
+- `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+- `npm exec next build -- --no-lint`
+- `npm exec tsc -- --noEmit`
+
+### 2026-04-06 15:37:28 CST | Base Commit 512c6c6c0 | 受控低频 ConfigStore 自愈 reload
+
+- 补上了一个“只在检测到 drift 时触发、低频、带冷却去重”的 ConfigStore 自愈机制。
+  - 不引入高频数据库 watcher。
+  - 仅在本节点 `runtime hash != store hash` 且存在可安全处理的漂移域时，才会启动自愈。
+  - 自愈 worker 会对同一份 `store_hash + drift_domains` 做冷却去重，避免在同一批未恢复的漂移上反复刷 reload。
+
+- 当前纳入自愈范围的是最稳妥的核心配置域：
+  - `client`
+  - `auth`
+  - `framework`
+  - `proxy`
+  - `providers`
+  - `governance`
+  - 这意味着当某个节点因为 cluster fanout 丢失、临时热加载失败、或运行时缓存未及时刷新而落后于共享 `ConfigStore` 时，会在后续低频检查中自动从 `ConfigStore` 拉取并补齐本地 runtime。
+
+- 自愈 reload 采用“只读 ConfigStore、只改本节点 runtime”的方式，确保幂等且不会反向污染共享存储。
+  - `auth` 现在支持直接从 `ConfigStore` 重新加载到 `AuthMiddleware` 和 runtime snapshot，不会再次写回数据库，也不会误触发 session flush。
+  - `client` 自愈会同时刷新 `client config / header filter / MCP tool manager runtime`，保持和正常配置更新后的行为一致。
+  - `providers` 自愈会对比 store/runtime 的 provider 指纹，仅对真正漂移的 provider 做本地 add/update/remove，并通过 `skip DB update` 上下文保证不会重复写库。
+  - `governance` 自愈会按对象粒度对 `customer / team / virtual key / model config / routing rule / provider governance` 做本地 reload 或清理，避免为了恢复一个对象就粗暴重建整套治理插件。
+
+- 自愈完成后会向本节点前端页面广播 `store_update` 标签。
+  - Cluster、Providers、Virtual Keys、Governance 等页面在本节点被动恢复 runtime 后，也能及时刷新展示，不需要手动 reload 页面。
+
+- 这轮也把相关幂等与去重测试补上了。
+  - 校验同一份 drift signature 在冷却窗口内不会重复触发自愈。
+  - 校验 runtime 已经 in-sync 时不会误触发自愈。
+  - 校验 `auth` 自愈 reload 只刷新 runtime，不会向 `ConfigStore` 再次写入，并且重复执行仍然保持幂等。
+
+本轮验证通过：
+
+- `go test ./transports/bifrost-http/server`
+- `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/enterprise ./transports/bifrost-http/server`
+- `go test ./transports/bifrost-http/...`
+- `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+- `npm exec next build -- --no-lint`
+- `npm exec tsc -- --noEmit`

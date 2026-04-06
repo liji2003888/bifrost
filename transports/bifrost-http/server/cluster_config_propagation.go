@@ -26,6 +26,9 @@ func (s *BifrostHTTPServer) PropagateClusterConfigChange(ctx context.Context, ch
 	if s == nil || change == nil {
 		return nil
 	}
+	if change.SourceNodeID == "" && s.ClusterService != nil {
+		change.SourceNodeID = s.ClusterService.NodeID()
+	}
 	s.broadcastClusterConfigStoreUpdates(change)
 	if s.ClusterService == nil {
 		return nil

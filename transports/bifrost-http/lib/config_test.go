@@ -16488,6 +16488,28 @@ func TestRemoveProvider_DBError_DoesNotRemoveFromMemory(t *testing.T) {
 	}
 }
 
+func TestRemoveProvider_DBNotFound_IsIdempotent(t *testing.T) {
+	initTestLogger()
+	mockStore := &mockConfigStoreDeleteProvider{
+		MockConfigStore:   *NewMockConfigStore(),
+		deleteProviderErr: configstore.ErrNotFound,
+	}
+	cfg := &Config{
+		Providers: map[schemas.ModelProvider]configstore.ProviderConfig{
+			"test-provider": {Keys: []schemas.Key{{Value: *schemas.NewEnvVar("test-key")}}},
+		},
+		ConfigStore: mockStore,
+	}
+
+	err := cfg.RemoveProvider(context.Background(), "test-provider")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if _, exists := cfg.Providers["test-provider"]; exists {
+		t.Fatal("provider should be removed from memory when DB already deleted it")
+	}
+}
+
 func TestRemoveProvider_NilConfigStore_RemovesFromMemoryOnly(t *testing.T) {
 	initTestLogger()
 	cfg := &Config{

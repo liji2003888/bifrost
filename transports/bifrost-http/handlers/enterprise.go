@@ -945,6 +945,9 @@ func clusterConfigChangeSummary(change *ClusterConfigChange) string {
 	}
 
 	parts := []string{fmt.Sprintf("scope=%s", change.Scope)}
+	if change.SourceNodeID != "" {
+		parts = append(parts, fmt.Sprintf("source_node=%s", change.SourceNodeID))
+	}
 	switch change.Scope {
 	case ClusterConfigScopeProvider:
 		if change.Provider != "" {

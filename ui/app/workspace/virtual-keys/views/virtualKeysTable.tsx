@@ -490,7 +490,10 @@ export default function VirtualKeysTable({
 													<Button
 														variant="ghost"
 														size="sm"
-														onClick={() => toggleKeyVisibility(vk.id)}
+														onClick={(e) => {
+															e.stopPropagation()
+															toggleKeyVisibility(vk.id)
+														}}
 														data-testid={`vk-visibility-btn-${vk.name}`}
 													>
 														{isRevealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -498,7 +501,10 @@ export default function VirtualKeysTable({
 													<Button
 														variant="ghost"
 														size="sm"
-														onClick={() => copyToClipboard(vk.value)}
+														onClick={(e) => {
+															e.stopPropagation()
+															void copyToClipboard(vk.value)
+														}}
 														data-testid={`vk-copy-btn-${vk.name}`}
 													>
 														<Copy className="h-4 w-4" />
