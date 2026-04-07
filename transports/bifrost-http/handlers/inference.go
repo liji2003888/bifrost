@@ -436,6 +436,57 @@ type RerankRequest struct {
 	*schemas.RerankParameters
 }
 
+// UnmarshalJSON implements custom JSON unmarshalling for RerankRequest.
+// It accepts both the canonical Bifrost document shape:
+//   [{"text":"..."},{"text":"...","id":"doc-2"}]
+// and the common reranker shorthand used by vLLM/Cohere-style clients:
+//   ["doc 1", "doc 2"]
+func (rr *RerankRequest) UnmarshalJSON(data []byte) error {
+	type bifrostAlias BifrostParams
+	var bp bifrostAlias
+	if err := sonic.Unmarshal(data, &bp); err != nil {
+		return err
+	}
+	rr.BifrostParams = BifrostParams(bp)
+
+	var raw struct {
+		Query     string        `json:"query"`
+		Documents []interface{} `json:"documents"`
+	}
+	if err := sonic.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	rr.Query = raw.Query
+	rr.Documents = make([]schemas.RerankDocument, 0, len(raw.Documents))
+	for _, item := range raw.Documents {
+		switch doc := item.(type) {
+		case string:
+			rr.Documents = append(rr.Documents, schemas.RerankDocument{Text: doc})
+		case map[string]interface{}:
+			payload, err := sonic.Marshal(doc)
+			if err != nil {
+				return err
+			}
+			var normalized schemas.RerankDocument
+			if err := sonic.Unmarshal(payload, &normalized); err != nil {
+				return err
+			}
+			rr.Documents = append(rr.Documents, normalized)
+		default:
+			return fmt.Errorf("invalid rerank document type %T", item)
+		}
+	}
+
+	if rr.RerankParameters == nil {
+		rr.RerankParameters = &schemas.RerankParameters{}
+	}
+	if err := sonic.Unmarshal(data, rr.RerankParameters); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 type SpeechRequest struct {
 	*schemas.SpeechInput
 	BifrostParams
