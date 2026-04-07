@@ -622,6 +622,8 @@ func (p *LoggerPlugin) applyNonStreamingOutputToEntry(entry *logstore.Log, resul
 		usage = result.ResponsesResponse.Usage.ToBifrostLLMUsage()
 	case result.EmbeddingResponse != nil && result.EmbeddingResponse.Usage != nil:
 		usage = result.EmbeddingResponse.Usage
+	case result.RerankResponse != nil && result.RerankResponse.Usage != nil:
+		usage = result.RerankResponse.Usage
 	case result.TranscriptionResponse != nil && result.TranscriptionResponse.Usage != nil:
 		usage = &schemas.BifrostLLMUsage{}
 		if result.TranscriptionResponse.Usage.InputTokens != nil {
@@ -696,6 +698,9 @@ func (p *LoggerPlugin) applyNonStreamingOutputToEntry(entry *logstore.Log, resul
 		}
 		if result.EmbeddingResponse != nil && len(result.EmbeddingResponse.Data) > 0 {
 			entry.EmbeddingOutputParsed = result.EmbeddingResponse.Data
+		}
+		if result.RerankResponse != nil && len(result.RerankResponse.Results) > 0 {
+			entry.RerankOutputParsed = result.RerankResponse.Results
 		}
 		if result.SpeechResponse != nil {
 			entry.SpeechOutputParsed = result.SpeechResponse
@@ -1073,18 +1078,18 @@ func buildResponseForRequestType(requestType schemas.RequestType, usage *schemas
 					CachedWriteTokens: usage.PromptTokensDetails.CachedWriteTokens,
 				}
 			}
-		if usage.CompletionTokensDetails != nil {
-			respUsage.OutputTokensDetails = &schemas.ResponsesResponseOutputTokens{
-				TextTokens:               usage.CompletionTokensDetails.TextTokens,
-				AcceptedPredictionTokens: usage.CompletionTokensDetails.AcceptedPredictionTokens,
-				AudioTokens:              usage.CompletionTokensDetails.AudioTokens,
-				ImageTokens:              usage.CompletionTokensDetails.ImageTokens,
-				ReasoningTokens:          usage.CompletionTokensDetails.ReasoningTokens,
-				RejectedPredictionTokens: usage.CompletionTokensDetails.RejectedPredictionTokens,
-				CitationTokens:           usage.CompletionTokensDetails.CitationTokens,
-				NumSearchQueries:         usage.CompletionTokensDetails.NumSearchQueries,
+			if usage.CompletionTokensDetails != nil {
+				respUsage.OutputTokensDetails = &schemas.ResponsesResponseOutputTokens{
+					TextTokens:               usage.CompletionTokensDetails.TextTokens,
+					AcceptedPredictionTokens: usage.CompletionTokensDetails.AcceptedPredictionTokens,
+					AudioTokens:              usage.CompletionTokensDetails.AudioTokens,
+					ImageTokens:              usage.CompletionTokensDetails.ImageTokens,
+					ReasoningTokens:          usage.CompletionTokensDetails.ReasoningTokens,
+					RejectedPredictionTokens: usage.CompletionTokensDetails.RejectedPredictionTokens,
+					CitationTokens:           usage.CompletionTokensDetails.CitationTokens,
+					NumSearchQueries:         usage.CompletionTokensDetails.NumSearchQueries,
+				}
 			}
-		}
 		}
 		return &schemas.BifrostResponse{
 			ResponsesResponse: &schemas.BifrostResponsesResponse{
