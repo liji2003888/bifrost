@@ -166,6 +166,9 @@ func startMatViewRefresher(ctx context.Context, db *gorm.DB, interval time.Durat
 func canUseMatView(f SearchFilters) bool {
 	return f.ContentSearch == "" &&
 		len(f.MetadataFilters) == 0 &&
+		len(f.TeamIDs) == 0 &&
+		len(f.CustomerIDs) == 0 &&
+		len(f.UserIDs) == 0 &&
 		len(f.RoutingEngineUsed) == 0 &&
 		f.MinLatency == nil && f.MaxLatency == nil &&
 		f.MinTokens == nil && f.MaxTokens == nil &&

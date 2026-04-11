@@ -63,6 +63,7 @@ import { useWebSocket } from "@/hooks/useWebSocket";
 import { IS_ENTERPRISE, TRIAL_EXPIRY } from "@/lib/constants/config";
 import { useGetCoreConfigQuery, useGetLatestReleaseQuery, useGetVersionQuery, useLogoutMutation } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { BrandMark } from "@/components/brandMark";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import type { UserInfo } from "@enterprise/lib/store/utils/tokenManager";
 import { getUserInfo } from "@enterprise/lib/store/utils/tokenManager";
@@ -70,7 +71,6 @@ import { BooksIcon, DiscordLogoIcon, GithubLogoIcon } from "@phosphor-icons/reac
 import { ChevronRight } from "lucide-react";
 import moment from "moment";
 import { useTheme } from "next-themes";
-import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -954,10 +954,6 @@ export default function AppSidebar() {
 		return false;
 	};
 
-	// Always render the light theme version for SSR to avoid hydration mismatch
-	const logoSrc = mounted && resolvedTheme === "dark" ? "/bifrost-logo-dark.png" : "/bifrost-logo.png";
-	const iconSrc = mounted && resolvedTheme === "dark" ? "/bifrost-icon-dark.png" : "/bifrost-icon.png";
-
 	const { isConnected: isWebSocketConnected } = useWebSocket();
 
 	// New release image - based on theme
@@ -1063,7 +1059,7 @@ export default function AppSidebar() {
 				{/* Expanded state: horizontal layout */}
 				<div className="flex h-10 w-full items-center justify-between px-1.5 group-data-[collapsible=icon]:hidden">
 					<Link href="/workspace/logs" className="group flex items-center gap-2 pl-2">
-						<Image className="h-[22px] w-auto" src={logoSrc} alt="Bifrost" width={70} height={70} />
+						<BrandMark className="text-[18px] leading-none" />
 					</Link>
 					<button
 						onClick={toggleSidebar}
@@ -1078,7 +1074,7 @@ export default function AppSidebar() {
 					className="hidden w-full cursor-pointer flex-col items-center gap-2 py-2 group-data-[collapsible=icon]:flex"
 					onClick={toggleSidebar}
 				>
-					<Image className="h-[22px] w-auto" src={iconSrc} alt="Bifrost" width={22} height={22} />
+					<BrandMark compact className="min-h-8" />
 				</div>
 			</SidebarHeader>
 			<div className="mx-2 pb-1 group-data-[collapsible=icon]:hidden">

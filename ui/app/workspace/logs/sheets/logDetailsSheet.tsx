@@ -352,6 +352,35 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete, onNaviga
 									.map(([key, value]) => <LogEntryDetailsView key={key} className="w-full" label={key} value={value} />)}
 						</div>
 					</div>
+					{(displayLog.user_id || displayLog.team_id || displayLog.customer_id) && (
+						<>
+							<DottedSeparator />
+							<div className="space-y-4">
+								<BlockHeader title="Governance Context" />
+								<div className="grid w-full grid-cols-3 items-start justify-between gap-4">
+									{displayLog.user_id && <LogEntryDetailsView className="w-full" label="User ID" value={displayLog.user_id} />}
+									{displayLog.team_id && (
+										<LogEntryDetailsView
+											className="w-full"
+											label="Team"
+											value={displayLog.team_name ? `${displayLog.team_name} (${displayLog.team_id})` : displayLog.team_id}
+										/>
+									)}
+									{displayLog.customer_id && (
+										<LogEntryDetailsView
+											className="w-full"
+											label="Customer"
+											value={
+												displayLog.customer_name
+													? `${displayLog.customer_name} (${displayLog.customer_id})`
+													: displayLog.customer_id
+											}
+										/>
+									)}
+								</div>
+							</div>
+						</>
+					)}
 					{displayLog.status === "success" && !isContainer && !isPassthrough && (
 						<>
 							<DottedSeparator />

@@ -398,3 +398,88 @@ func TestApplyNonStreamingOutputToEntryKeepsRerankUsageWhenContentLoggingDisable
 		t.Fatalf("expected rerank output to be suppressed when content logging is disabled, got %+v", entry.RerankOutputParsed)
 	}
 }
+
+func TestRerankLogsPersistThroughPreAndPostHooks(t *testing.T) {
+	store := newTestStore(t)
+	plugin, err := Init(context.Background(), &Config{}, testLogger{}, store, nil, nil)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	defer func() {
+		if cleanupErr := plugin.Cleanup(); cleanupErr != nil {
+			t.Fatalf("Cleanup() error = %v", cleanupErr)
+		}
+	}()
+
+	requestID := "req-rerank-hooks"
+	bifrostCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	bifrostCtx.SetValue(schemas.BifrostContextKeyRequestID, requestID)
+
+	topN := 3
+	req := &schemas.BifrostRequest{
+		RequestType: schemas.RerankRequest,
+		RerankRequest: &schemas.BifrostRerankRequest{
+			Provider: schemas.VLLM,
+			Model:    "qwen3-8b-reranker",
+			Query:    "什么是深度学习？",
+			Documents: []schemas.RerankDocument{
+				{Text: "深度学习是机器学习的一个子集，基于人工神经网络。"},
+				{Text: "今天中午吃红烧肉。"},
+				{Text: "苹果是一种水果，富含维生素。"},
+			},
+			Params: &schemas.RerankParameters{
+				TopN: &topN,
+			},
+		},
+	}
+
+	if _, _, err := plugin.PreLLMHook(bifrostCtx, req); err != nil {
+		t.Fatalf("PreLLMHook() error = %v", err)
+	}
+
+	result := &schemas.BifrostResponse{
+		RerankResponse: &schemas.BifrostRerankResponse{
+			Model: "qwen3-8b-reranker",
+			Usage: &schemas.BifrostLLMUsage{
+				TotalTokens: 43,
+			},
+			Results: []schemas.RerankResult{
+				{Index: 0, RelevanceScore: 0.9678807854652405},
+				{Index: 2, RelevanceScore: 0.9021470546722412},
+				{Index: 1, RelevanceScore: 0.8326528072357178},
+			},
+			ExtraFields: schemas.BifrostResponseExtraFields{
+				RequestType: schemas.RerankRequest,
+				Provider:    schemas.VLLM,
+				Latency:     130,
+			},
+		},
+	}
+
+	if _, _, err := plugin.PostLLMHook(bifrostCtx, result, nil); err != nil {
+		t.Fatalf("PostLLMHook() error = %v", err)
+	}
+
+	var logEntry *logstore.Log
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		logEntry, err = store.FindByID(context.Background(), requestID)
+		if err == nil {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("FindByID() error = %v", err)
+	}
+
+	if logEntry.TokenUsageParsed == nil || logEntry.TokenUsageParsed.TotalTokens != 43 {
+		t.Fatalf("expected rerank total tokens to persist through hooks, got %+v", logEntry.TokenUsageParsed)
+	}
+	if len(logEntry.RerankOutputParsed) != 3 {
+		t.Fatalf("expected rerank output to persist through hooks, got %+v", logEntry.RerankOutputParsed)
+	}
+	if logEntry.Object != string(schemas.RerankRequest) {
+		t.Fatalf("expected object %q, got %q", schemas.RerankRequest, logEntry.Object)
+	}
+}

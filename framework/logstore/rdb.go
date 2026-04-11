@@ -94,6 +94,15 @@ func (s *RDBLogStore) applyFilters(baseQuery *gorm.DB, filters SearchFilters) *g
 	if len(filters.RoutingRuleIDs) > 0 {
 		baseQuery = baseQuery.Where("routing_rule_id IN ?", filters.RoutingRuleIDs)
 	}
+	if len(filters.TeamIDs) > 0 {
+		baseQuery = baseQuery.Where("team_id IN ?", filters.TeamIDs)
+	}
+	if len(filters.CustomerIDs) > 0 {
+		baseQuery = baseQuery.Where("customer_id IN ?", filters.CustomerIDs)
+	}
+	if len(filters.UserIDs) > 0 {
+		baseQuery = baseQuery.Where("user_id IN ?", filters.UserIDs)
+	}
 	if len(filters.RoutingEngineUsed) > 0 {
 		// Query routing engines (comma-separated values) - find logs containing ANY of the specified engines
 		dialect := s.db.Dialector.Name()

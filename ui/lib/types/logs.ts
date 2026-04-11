@@ -435,6 +435,11 @@ export interface LogEntry {
 	fallback_index: number;
 	selected_key_id: string;
 	virtual_key_id?: string;
+	user_id?: string;
+	team_id?: string;
+	team_name?: string;
+	customer_id?: string;
+	customer_name?: string;
 	routing_engines_used?: string[];
 	routing_rule_id?: string;
 	routing_engine_logs?: string; // Human-readable routing decision logs
@@ -485,6 +490,9 @@ export interface LogFilters {
 	models?: string[];
 	selected_key_ids?: string[];
 	virtual_key_ids?: string[];
+	user_ids?: string[];
+	team_ids?: string[];
+	customer_ids?: string[];
 	routing_rule_ids?: string[];
 	routing_engine_used?: string[]; // For filtering by routing engine (routing-rule, governance, loadbalancing)
 	status?: string[];

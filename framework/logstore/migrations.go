@@ -203,6 +203,9 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationAddLogsAndDashboardPerformanceIndexes(ctx, db); err != nil {
 		return err
 	}
+	if err := migrationAddGovernanceTrackingColumns(ctx, db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -2063,5 +2066,76 @@ func ensurePerformanceIndexes(ctx context.Context, conn *sql.Conn) error {
 		}
 	}
 
+	return nil
+}
+
+// migrationAddGovernanceTrackingColumns adds governance tracking identifiers to the logs table.
+func migrationAddGovernanceTrackingColumns(ctx context.Context, db *gorm.DB) error {
+	opts := *migrator.DefaultOptions
+	opts.UseTransaction = true
+	m := migrator.New(db, &opts, []*migrator.Migration{{
+		ID: "logs_add_governance_tracking_columns",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			type columnSpec struct {
+				fieldName string
+				indexName string
+			}
+
+			for _, spec := range []columnSpec{
+				{fieldName: "UserID", indexName: "idx_logs_user_id"},
+				{fieldName: "TeamID", indexName: "idx_logs_team_id"},
+				{fieldName: "TeamName"},
+				{fieldName: "CustomerID", indexName: "idx_logs_customer_id"},
+				{fieldName: "CustomerName"},
+			} {
+				if !migrator.HasColumn(&Log{}, spec.fieldName) {
+					if err := migrator.AddColumn(&Log{}, spec.fieldName); err != nil {
+						return fmt.Errorf("failed to add %s column: %w", spec.fieldName, err)
+					}
+				}
+				if spec.indexName != "" && !migrator.HasIndex(&Log{}, spec.indexName) {
+					if err := migrator.CreateIndex(&Log{}, spec.indexName); err != nil {
+						return fmt.Errorf("failed to create index %s: %w", spec.indexName, err)
+					}
+				}
+			}
+
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			for _, spec := range []struct {
+				fieldName string
+				indexName string
+			}{
+				{fieldName: "CustomerName"},
+				{fieldName: "CustomerID", indexName: "idx_logs_customer_id"},
+				{fieldName: "TeamName"},
+				{fieldName: "TeamID", indexName: "idx_logs_team_id"},
+				{fieldName: "UserID", indexName: "idx_logs_user_id"},
+			} {
+				if spec.indexName != "" && migrator.HasIndex(&Log{}, spec.indexName) {
+					if err := migrator.DropIndex(&Log{}, spec.indexName); err != nil {
+						return fmt.Errorf("failed to drop index %s: %w", spec.indexName, err)
+					}
+				}
+				if migrator.HasColumn(&Log{}, spec.fieldName) {
+					if err := migrator.DropColumn(&Log{}, spec.fieldName); err != nil {
+						return fmt.Errorf("failed to drop %s column: %w", spec.fieldName, err)
+					}
+				}
+			}
+
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while adding governance tracking columns: %w", err)
+	}
 	return nil
 }

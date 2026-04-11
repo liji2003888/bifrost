@@ -40,6 +40,15 @@ function buildFilterParams(filters: LogFilters): Record<string, string | number>
 	if (filters.virtual_key_ids && filters.virtual_key_ids.length > 0) {
 		params.virtual_key_ids = filters.virtual_key_ids.join(",");
 	}
+	if (filters.user_ids && filters.user_ids.length > 0) {
+		params.user_ids = filters.user_ids.join(",");
+	}
+	if (filters.team_ids && filters.team_ids.length > 0) {
+		params.team_ids = filters.team_ids.join(",");
+	}
+	if (filters.customer_ids && filters.customer_ids.length > 0) {
+		params.customer_ids = filters.customer_ids.join(",");
+	}
 	if (filters.routing_rule_ids && filters.routing_rule_ids.length > 0) {
 		params.routing_rule_ids = filters.routing_rule_ids.join(",");
 	}
@@ -84,46 +93,8 @@ export const logsApi = baseApi.injectEndpoints({
 					offset: pagination.offset,
 					sort_by: pagination.sort_by,
 					order: pagination.order,
+					...buildFilterParams(filters),
 				};
-
-				// Add filters to params if they exist
-				if (filters.providers && filters.providers.length > 0) {
-					params.providers = filters.providers.join(",");
-				}
-				if (filters.models && filters.models.length > 0) {
-					params.models = filters.models.join(",");
-				}
-				if (filters.status && filters.status.length > 0) {
-					params.status = filters.status.join(",");
-				}
-				if (filters.objects && filters.objects.length > 0) {
-					params.objects = filters.objects.join(",");
-				}
-				if (filters.selected_key_ids && filters.selected_key_ids.length > 0) {
-					params.selected_key_ids = filters.selected_key_ids.join(",");
-				}
-				if (filters.virtual_key_ids && filters.virtual_key_ids.length > 0) {
-					params.virtual_key_ids = filters.virtual_key_ids.join(",");
-				}
-				if (filters.routing_rule_ids && filters.routing_rule_ids.length > 0) {
-					params.routing_rule_ids = filters.routing_rule_ids.join(",");
-				}
-				if (filters.routing_engine_used && filters.routing_engine_used.length > 0) {
-					params.routing_engine_used = filters.routing_engine_used.join(",");
-				}
-				if (filters.start_time) params.start_time = filters.start_time;
-				if (filters.end_time) params.end_time = filters.end_time;
-				if (filters.min_latency !== undefined) params.min_latency = filters.min_latency;
-				if (filters.max_latency !== undefined) params.max_latency = filters.max_latency;
-				if (filters.min_tokens !== undefined) params.min_tokens = filters.min_tokens;
-				if (filters.max_tokens !== undefined) params.max_tokens = filters.max_tokens;
-				if (filters.missing_cost_only) params.missing_cost_only = "true";
-				if (filters.content_search) params.content_search = filters.content_search;
-				if (filters.metadata_filters) {
-					for (const [key, value] of Object.entries(filters.metadata_filters)) {
-						params[`metadata_${key}`] = value;
-					}
-				}
 
 				return {
 					url: "/logs",
@@ -141,50 +112,9 @@ export const logsApi = baseApi.injectEndpoints({
 			}
 		>({
 			query: ({ filters }) => {
-				const params: Record<string, string | number> = {};
-
-				// Add filters to params if they exist
-				if (filters.providers && filters.providers.length > 0) {
-					params.providers = filters.providers.join(",");
-				}
-				if (filters.models && filters.models.length > 0) {
-					params.models = filters.models.join(",");
-				}
-				if (filters.status && filters.status.length > 0) {
-					params.status = filters.status.join(",");
-				}
-				if (filters.objects && filters.objects.length > 0) {
-					params.objects = filters.objects.join(",");
-				}
-				if (filters.selected_key_ids && filters.selected_key_ids.length > 0) {
-					params.selected_key_ids = filters.selected_key_ids.join(",");
-				}
-				if (filters.virtual_key_ids && filters.virtual_key_ids.length > 0) {
-					params.virtual_key_ids = filters.virtual_key_ids.join(",");
-				}
-				if (filters.routing_rule_ids && filters.routing_rule_ids.length > 0) {
-					params.routing_rule_ids = filters.routing_rule_ids.join(",");
-				}
-				if (filters.routing_engine_used && filters.routing_engine_used.length > 0) {
-					params.routing_engine_used = filters.routing_engine_used.join(",");
-				}
-				if (filters.start_time) params.start_time = filters.start_time;
-				if (filters.end_time) params.end_time = filters.end_time;
-				if (filters.min_latency !== undefined) params.min_latency = filters.min_latency;
-				if (filters.max_latency !== undefined) params.max_latency = filters.max_latency;
-				if (filters.min_tokens !== undefined) params.min_tokens = filters.min_tokens;
-				if (filters.max_tokens !== undefined) params.max_tokens = filters.max_tokens;
-				if (filters.missing_cost_only) params.missing_cost_only = "true";
-				if (filters.content_search) params.content_search = filters.content_search;
-				if (filters.metadata_filters) {
-					for (const [key, value] of Object.entries(filters.metadata_filters)) {
-						params[`metadata_${key}`] = value;
-					}
-				}
-
 				return {
 					url: "/logs/stats",
-					params,
+					params: buildFilterParams(filters),
 				};
 			},
 			providesTags: ["Logs"],

@@ -1,13 +1,12 @@
 "use client";
 
+import { BrandMark } from "@/components/brandMark";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { getErrorMessage, useIsAuthEnabledQuery, useLoginMutation } from "@/lib/store/apis";
 import { BooksIcon, DiscordLogoIcon, GithubLogoIcon } from "@phosphor-icons/react";
 import { Eye, EyeOff } from "lucide-react";
-import { useTheme } from "next-themes";
-import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -31,8 +30,6 @@ const externalLinks = [
 ];
 
 export default function LoginView() {
-	const { resolvedTheme } = useTheme();
-	const [mounted, setMounted] = useState(false);
 	const [username, setUsername] = useState("");
 	const [password, setPassword] = useState("");
 	const [showPassword, setShowPassword] = useState(false);
@@ -44,10 +41,6 @@ export default function LoginView() {
 	const isAuthEnabled = isAuthEnabledData?.is_auth_enabled || false;
 	const hasValidToken = isAuthEnabledData?.has_valid_token || false;
 	const [login, { isLoading: isLoggingIn }] = useLoginMutation();
-
-	useEffect(() => {
-		setMounted(true);
-	}, []);
 
 	// Check auth status on component mount
 	useEffect(() => {
@@ -82,9 +75,6 @@ export default function LoginView() {
 		}
 	};
 
-	// Use light logo for SSR to avoid hydration mismatch
-	const logoSrc = mounted && resolvedTheme === "dark" ? "/bifrost-logo-dark.png" : "/bifrost-logo.png";
-
 	// Show loading state while checking auth
 	if (isCheckingAuth || isLoadingIsAuthEnabled) {
 		return (
@@ -92,7 +82,7 @@ export default function LoginView() {
 				<div className="w-full max-w-md">
 					<div className="border-border bg-card w-full space-y-6 rounded-sm border p-8 ">
 						<div className="flex items-center justify-center">
-							<Image src={logoSrc} alt="Bifrost" width={160} height={26} priority className="" />
+							<BrandMark className="text-[28px] leading-none" />
 						</div>
 						<div className="flex items-center justify-center py-8">
 							<div className="text-muted-foreground text-sm">Checking authentication...</div>
@@ -109,7 +99,7 @@ export default function LoginView() {
 				<div className="border-border bg-card w-full space-y-6 rounded-sm border p-8 ">
 					{/* Logo */}
 					<div className="flex items-center justify-center">
-						<Image src={logoSrc} alt="Bifrost" width={160} height={26} priority className="" />
+						<BrandMark className="text-[28px] leading-none" />
 					</div>
 
 					<div className="space-y-2 text-center">

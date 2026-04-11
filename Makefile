@@ -68,8 +68,24 @@ install-ui: cleanup-enterprise
 	@echo "$(GREEN)UI deps are in sync$(NC)"
 
 install-air: ## Install air for hot reloading (if not already installed)
-	@which air > /dev/null || (echo "$(YELLOW)Installing air for hot reloading...$(NC)" && go install github.com/air-verse/air@latest)
-	@echo "$(GREEN)Air is ready$(NC)"
+	@AIR_BIN="$$(command -v air 2>/dev/null || true)"; \
+	if [ -z "$$AIR_BIN" ] && [ -x "$$(go env GOPATH)/bin/air" ]; then \
+		AIR_BIN="$$(go env GOPATH)/bin/air"; \
+	fi; \
+	if [ -z "$$AIR_BIN" ]; then \
+		echo "$(YELLOW)Installing air for hot reloading...$(NC)"; \
+		go install github.com/air-verse/air@latest; \
+		AIR_BIN="$$(go env GOPATH)/bin/air"; \
+	fi; \
+	if [ ! -x "$$AIR_BIN" ]; then \
+		echo "$(RED)Error: air was not found after installation.$(NC)"; \
+		echo "$(YELLOW)Expected location: $$(go env GOPATH)/bin/air$(NC)"; \
+		exit 1; \
+	fi; \
+	if ! printf '%s\n' "$$PATH" | tr ':' '\n' | grep -qx "$$(go env GOPATH)/bin"; then \
+		echo "$(YELLOW)Note: $$(go env GOPATH)/bin is not in PATH. make dev will use $$AIR_BIN directly.$(NC)"; \
+	fi; \
+	echo "$(GREEN)Air is ready: $$AIR_BIN$(NC)"
 
 install-delve: ## Install delve for debugging (if not already installed)
 	@which dlv > /dev/null || (echo "$(YELLOW)Installing delve for debugging...$(NC)" && go install github.com/go-delve/delve/cmd/dlv@latest)
@@ -126,10 +142,19 @@ dev: install-ui install-air setup-workspace $(if $(DEBUG),install-delve) ## Star
 		echo "$(YELLOW)Loading environment variables from .env...$(NC)"; \
 		set -a; . ./.env; set +a; \
 	fi; \
+	AIR_BIN="$$(command -v air 2>/dev/null || true)"; \
+	if [ -z "$$AIR_BIN" ] && [ -x "$$(go env GOPATH)/bin/air" ]; then \
+		AIR_BIN="$$(go env GOPATH)/bin/air"; \
+	fi; \
+	if [ -z "$$AIR_BIN" ]; then \
+		echo "$(RED)Error: air is not available.$(NC)"; \
+		echo "$(YELLOW)Run 'make install-air' or add $$(go env GOPATH)/bin to PATH.$(NC)"; \
+		exit 1; \
+	fi; \
 	if [ -n "$(DEBUG)" ]; then \
 		echo "$(CYAN)Starting with air + delve debugger on port 2345...$(NC)"; \
 		echo "$(YELLOW)Attach your debugger to localhost:2345$(NC)"; \
-		cd transports/bifrost-http && BIFROST_UI_DEV=true air -c .air.debug.toml -- \
+		cd transports/bifrost-http && BIFROST_UI_DEV=true "$$AIR_BIN" -c .air.debug.toml -- \
 			-host "$(HOST)" \
 			-port "$(PORT)" \
 			-log-style "$(LOG_STYLE)" \
@@ -137,7 +162,7 @@ dev: install-ui install-air setup-workspace $(if $(DEBUG),install-delve) ## Star
 			$(if $(PROMETHEUS_LABELS),-prometheus-labels "$(PROMETHEUS_LABELS)") \
 			$(if $(APP_DIR),-app-dir "$(APP_DIR)"); \
 	else \
-		cd transports/bifrost-http && BIFROST_UI_DEV=true air -c .air.toml -- \
+		cd transports/bifrost-http && BIFROST_UI_DEV=true "$$AIR_BIN" -c .air.toml -- \
 			-host "$(HOST)" \
 			-port "$(PORT)" \
 			-log-style "$(LOG_STYLE)" \

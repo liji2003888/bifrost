@@ -562,3 +562,60 @@ Current cluster auto-sync scope now includes:
 
 - `go test ./transports/bifrost-http/...` 和 `go test ./transports/bifrost-http/lib ./transports/bifrost-http/loadbalancer ./transports/bifrost-http/websocket` 在当前环境里依旧出现过长时间无输出的现象，因此这轮采用了关键子包拆分验证，不拿挂起中的总命令去冒充完整通过。
 - `npm exec tsc -- --noEmit` 在当前仓库环境里仍然会因为 `.next/types` 产物引用不完整而失败，这属于已有的前端类型产物问题；本轮 `next build` 已通过，说明前端构建链路没有被这次修复打坏。
+
+### 2026-04-12 00:48:25 CST | Base Commit 90fbe5f7c | 社区版本对齐与品牌更新
+
+- 本轮重新检索并对比了最近几个社区版本：
+  - `transports/v1.4.20`
+  - `transports/v1.4.21`
+  - `transports/v1.4.22`
+  - `transports/v1.5.0-prerelease1`
+  - `transports/v1.5.0-prerelease2`
+
+- 对比结果分成三类处理：
+  - 已经在当前 fork 中具备或等价覆盖的能力，不重复硬并：
+    - Realtime 支持
+    - Fireworks provider
+    - Prompt Repo / Prompt Session 相关能力
+    - Server bootstrap timer
+    - 路由白名单 / 安全路径控制
+  - 与当前企业定制主链路耦合较深、直接迁入风险较高的能力，暂不贸然合并：
+    - Access Profiles
+    - Per-user OAuth consent 的整套权限面
+    - 依赖更完整治理模型的 business unit 相关扩展
+  - 本轮选择性合入、并且已经完成兼容验证的社区更新：
+    - 日志治理追踪字段
+    - 相关持久化、查询和详情展示能力
+
+- 本轮实际合入的社区更新内容：
+  - 将日志链路对齐到社区近期版本里更完整的治理上下文追踪能力。
+    - LLM Logs 现在会持久化并返回：
+      - `user_id`
+      - `team_id`
+      - `team_name`
+      - `customer_id`
+      - `customer_name`
+    - 这些字段来自现有 governance context，不改变既有 virtual key / team / customer 解析逻辑。
+  - `logstore` 已补充对应数据库列和索引，并通过显式 migration 落库。
+    - 新增字段不会破坏旧日志读取。
+    - 在 SQLite / Postgres 场景下都保持向下兼容。
+  - `logstore` 查询侧已经支持按 `user/team/customer` 三类标识过滤。
+    - 同时为了保证统计正确性，materialized view 路径在带这些治理过滤条件时会自动回退到原始 logs 表，不会拿不完整的聚合视图做错误统计。
+  - 日志详情页已补充 `Governance Context` 展示块。
+    - 可以直接看到当前请求关联的 `User ID / Team / Customer`。
+
+- 本轮同时做了品牌位调整：
+  - Sidebar 与登录页原有 logo 区域已改为文本品牌 `TCL华星`。
+  - 不再依赖原始 Bifrost logo 图片。
+
+- 本轮社区对齐后的最新参考版本号：
+  - `transports/v1.5.0-prerelease2`
+  - 说明：这里采用的是“选择性安全合并”策略，不是整 tag 生硬覆盖，以保证此前已经完成的企业级 cluster / governance / vault / audit / export 定制逻辑不被回滚或打乱。
+
+- 本轮验证通过：
+  - `go test ./framework/logstore`
+  - `go test ./plugins/logging`
+  - `go test ./transports/bifrost-http/handlers -run TestDoesNotExist`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
