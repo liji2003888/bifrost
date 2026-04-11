@@ -1350,6 +1350,10 @@ func (h *ProviderHandler) attemptModelDiscovery(ctx *fasthttp.RequestCtx, provid
 	shouldDiscoverModels := customProviderConfig == nil ||
 		!customProviderConfig.IsKeyLess
 
+	if customProviderConfig != nil && !customProviderConfig.IsOperationAllowed(schemas.ListModelsRequest) {
+		return nil
+	}
+
 	if !shouldDiscoverModels {
 		return nil
 	}

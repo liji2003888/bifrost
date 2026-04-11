@@ -575,22 +575,36 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 	bfCtx.SetValue(schemas.BifrostContextKeyValidateKeys, true) // Validate keys during provider add/update
 	defer bfCtx.Cancel()
 
-	allModels, bifrostErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
-		Provider: provider,
-	})
-	if allModels != nil && len(allModels.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
-		s.updateKeyStatus(ctx, allModels.KeyStatuses)
-	}
-	if bifrostErr != nil {
-		if len(bifrostErr.ExtraFields.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
-			s.updateKeyStatus(ctx, bifrostErr.ExtraFields.KeyStatuses)
+	discoveryConfig := modelDiscoveryConfigFromTableProvider(providerInfo)
+	useStaticModelCatalogFallback := shouldSkipActiveModelDiscovery(discoveryConfig)
+	allModels := &schemas.BifrostListModelsResponse{Data: make([]schemas.Model, 0)}
+	if !useStaticModelCatalogFallback {
+		var bifrostErr *schemas.BifrostError
+		allModels, bifrostErr = s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
+			Provider: provider,
+		})
+		if allModels != nil && len(allModels.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
+			s.updateKeyStatus(ctx, allModels.KeyStatuses)
 		}
+		if bifrostErr != nil {
+			if s.handleStaticModelCatalogFallback(ctx, provider, discoveryConfig, bifrostErr) {
+				useStaticModelCatalogFallback = true
+				allModels = &schemas.BifrostListModelsResponse{Data: make([]schemas.Model, 0)}
+			} else {
+				if len(bifrostErr.ExtraFields.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
+					s.updateKeyStatus(ctx, bifrostErr.ExtraFields.KeyStatuses)
+				}
 
-		logger.Warn("failed to update provider model catalog: failed to list all models: %s. We are falling back onto the static datasheet", bifrost.GetErrorMessage(bifrostErr))
-		// In case of error, we return an empty list of models, and fallback onto the static datasheet
-		allModels = &schemas.BifrostListModelsResponse{
-			Data: make([]schemas.Model, 0),
+				logger.Warn("failed to update provider model catalog: failed to list all models: %s. We are falling back onto the static datasheet", bifrost.GetErrorMessage(bifrostErr))
+				// In case of error, we return an empty list of models, and fallback onto the static datasheet
+				allModels = &schemas.BifrostListModelsResponse{
+					Data: make([]schemas.Model, 0),
+				}
+			}
 		}
+	} else {
+		s.clearModelDiscoveryStatus(ctx, provider)
+		logger.Info("skipping active model discovery for provider %s because list_models is disabled in custom provider config", provider)
 	}
 	if s.Config.ModelCatalog != nil {
 		// Getting allowed models from all provider keys
@@ -615,14 +629,18 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 			}
 		}
 		s.Config.ModelCatalog.UpsertModelDataForProvider(provider, allModels, allowedInKeys, deniedInKeys)
-		unfilteredModelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
-			Provider:   provider,
-			Unfiltered: true,
-		})
-		if listModelsErr != nil {
-			logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
-		} else {
-			s.Config.ModelCatalog.UpsertUnfilteredModelDataForProvider(provider, unfilteredModelData)
+		if !useStaticModelCatalogFallback {
+			unfilteredModelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
+				Provider:   provider,
+				Unfiltered: true,
+			})
+			if listModelsErr != nil {
+				if !s.handleStaticModelCatalogFallback(ctx, provider, discoveryConfig, listModelsErr) {
+					logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
+				}
+			} else {
+				s.Config.ModelCatalog.UpsertUnfilteredModelDataForProvider(provider, unfilteredModelData)
+			}
 		}
 	}
 	return updatedProvider, nil
@@ -1397,18 +1415,31 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		for provider, providerConfig := range s.Config.Providers {
 			bfCtx := schemas.NewBifrostContext(ctx, time.Now().Add(15*time.Second))
 			bfCtx.SetValue(schemas.BifrostContextKeySkipPluginPipeline, true)
-
-			modelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
-				Provider: provider,
-			})
-			if modelData != nil && len(modelData.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
-				s.updateKeyStatus(ctx, modelData.KeyStatuses)
-			}
-			if listModelsErr != nil {
-				if len(listModelsErr.ExtraFields.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
-					s.updateKeyStatus(ctx, listModelsErr.ExtraFields.KeyStatuses)
+			discoveryConfig := modelDiscoveryConfigFromProviderConfig(providerConfig)
+			useStaticModelCatalogFallback := shouldSkipActiveModelDiscovery(discoveryConfig)
+			modelData := &schemas.BifrostListModelsResponse{Data: make([]schemas.Model, 0)}
+			if !useStaticModelCatalogFallback {
+				var listModelsErr *schemas.BifrostError
+				modelData, listModelsErr = s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
+					Provider: provider,
+				})
+				if modelData != nil && len(modelData.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
+					s.updateKeyStatus(ctx, modelData.KeyStatuses)
 				}
-				logger.Error("failed to list models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
+				if listModelsErr != nil {
+					if s.handleStaticModelCatalogFallback(ctx, provider, discoveryConfig, listModelsErr) {
+						useStaticModelCatalogFallback = true
+						modelData = &schemas.BifrostListModelsResponse{Data: make([]schemas.Model, 0)}
+					} else {
+						if len(listModelsErr.ExtraFields.KeyStatuses) > 0 && s.Config.ConfigStore != nil {
+							s.updateKeyStatus(ctx, listModelsErr.ExtraFields.KeyStatuses)
+						}
+						logger.Error("failed to list models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
+					}
+				}
+			} else {
+				s.clearModelDiscoveryStatus(ctx, provider)
+				logger.Info("skipping startup model discovery for provider %s because list_models is disabled in custom provider config", provider)
 			}
 			allowedModels := make([]schemas.Model, 0)
 			deniedModels := make([]schemas.Model, 0)
@@ -1427,14 +1458,18 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 				}
 			}
 			s.Config.ModelCatalog.UpsertModelDataForProvider(provider, modelData, allowedModels, deniedModels)
-			unfilteredModelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
-				Provider:   provider,
-				Unfiltered: true,
-			})
-			if listModelsErr != nil {
-				logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
-			} else {
-				s.Config.ModelCatalog.UpsertUnfilteredModelDataForProvider(provider, unfilteredModelData)
+			if !useStaticModelCatalogFallback {
+				unfilteredModelData, listModelsErr := s.Client.ListModelsRequest(bfCtx, &schemas.BifrostListModelsRequest{
+					Provider:   provider,
+					Unfiltered: true,
+				})
+				if listModelsErr != nil {
+					if !s.handleStaticModelCatalogFallback(ctx, provider, discoveryConfig, listModelsErr) {
+						logger.Error("failed to list unfiltered models for provider %s: %v: falling back onto the static datasheet", provider, bifrost.GetErrorMessage(listModelsErr))
+					}
+				} else {
+					s.Config.ModelCatalog.UpsertUnfilteredModelDataForProvider(provider, unfilteredModelData)
+				}
 			}
 			bfCtx.Cancel()
 		}
