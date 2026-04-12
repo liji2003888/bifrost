@@ -31,10 +31,10 @@ func (p *Plugin) BindRoutingSources(catalog modelsCatalog, lookup providerConfig
 }
 
 func (p *Plugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest) (*schemas.HTTPResponse, error) {
-	policy := p.policySnapshot()
-	if p == nil || p.catalog == nil || p.providerLookup == nil || req == nil || len(req.Body) == 0 || !policy.enabled {
+	if p == nil || p.catalog == nil || p.providerLookup == nil || req == nil || len(req.Body) == 0 {
 		return nil, nil
 	}
+	policy := p.policySnapshot()
 
 	contentType := strings.ToLower(req.CaseInsensitiveHeaderLookup("Content-Type"))
 	isMultipart := strings.HasPrefix(contentType, "multipart/form-data")
@@ -59,15 +59,41 @@ func (p *Plugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req *schemas.
 	if !ok || modelValue == "" {
 		return nil, nil
 	}
-	if !policy.shouldUseDirectionRouting(ctx, modelValue) {
+
+	provider, modelName := schemas.ParseModelString(modelValue, "")
+	if modelName == "" {
 		return nil, nil
 	}
 
-	provider, modelName := schemas.ParseModelString(modelValue, "")
-	if provider != "" || modelName == "" {
+	requestPolicy, scoped := requestPolicyFromContext(ctx)
+	if scoped {
+		if provider != "" {
+			if applyRuleFallbacks(payload, requestPolicy.additionalFallbacks) {
+				if err := network.SerializePayloadToRequest(req, payload, isMultipart, contentType); err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
+		}
+		if !requestPolicy.shouldUseDirectionRouting() || hasExplicitFallbacks(payload["fallbacks"]) {
+			return nil, nil
+		}
+
+		selectedModel, fallbacks, changed := p.selectProviderAndFallbacksForRequestPolicy(ctx, requestPolicy, modelName)
+		if !changed {
+			return nil, nil
+		}
+		payload["model"] = selectedModel
+		if len(fallbacks) > 0 {
+			payload["fallbacks"] = fallbacks
+		}
+		if err := network.SerializePayloadToRequest(req, payload, isMultipart, contentType); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
-	if hasExplicitFallbacks(payload["fallbacks"]) {
+
+	if provider != "" || !policy.shouldUseDirectionRouting(ctx, modelValue) || hasExplicitFallbacks(payload["fallbacks"]) {
 		return nil, nil
 	}
 
@@ -102,12 +128,22 @@ type directionCandidate struct {
 
 func (p *Plugin) selectProviderAndFallbacks(ctx *schemas.BifrostContext, policy runtimePolicy, model string) (string, []string, bool) {
 	candidates := p.directionCandidates(policy, model)
+	return p.selectProviderAndFallbacksFromCandidates(ctx, model, candidates, nil)
+}
+
+func (p *Plugin) selectProviderAndFallbacksForRequestPolicy(ctx *schemas.BifrostContext, policy requestPolicy, model string) (string, []string, bool) {
+	candidates := p.directionCandidatesForRequestPolicy(policy, model)
+	return p.selectProviderAndFallbacksFromCandidates(ctx, model, candidates, policy.additionalFallbacks)
+}
+
+func (p *Plugin) selectProviderAndFallbacksFromCandidates(ctx *schemas.BifrostContext, model string, candidates []directionCandidate, additionalFallbacks []string) (string, []string, bool) {
 	if len(candidates) == 0 {
 		return "", nil, false
 	}
 	if len(candidates) == 1 {
 		selected := fmt.Sprintf("%s/%s", candidates[0].Provider, candidates[0].Model)
-		return selected, nil, selected != model
+		fallbacks := mergeAdaptiveFallbacks(selected, nil, additionalFallbacks)
+		return selected, fallbacks, selected != model || len(fallbacks) > 0
 	}
 	tracker := p.currentTracker()
 	if tracker == nil {
@@ -146,6 +182,7 @@ func (p *Plugin) selectProviderAndFallbacks(ctx *schemas.BifrostContext, policy 
 	for _, candidate := range remaining {
 		fallbacks = append(fallbacks, fmt.Sprintf("%s/%s", candidate.Provider, candidate.Model))
 	}
+	fallbacks = mergeAdaptiveFallbacks(fmt.Sprintf("%s/%s", selected.Provider, selected.Model), fallbacks, additionalFallbacks)
 
 	if ctx != nil {
 		ctx.AppendRoutingEngineLog(
@@ -211,6 +248,117 @@ func (p *Plugin) directionCandidates(policy runtimePolicy, model string) []direc
 		})
 	}
 	return candidates
+}
+
+func (p *Plugin) directionCandidatesForRequestPolicy(policy requestPolicy, model string) []directionCandidate {
+	if p == nil || p.providerLookup == nil {
+		return nil
+	}
+	cfg := p.currentTrackerConfig()
+	tracker := p.currentTracker()
+	if tracker == nil {
+		return nil
+	}
+
+	candidates := make([]directionCandidate, 0, len(policy.directionTargets))
+	seen := make(map[string]struct{}, len(policy.directionTargets))
+	for _, target := range policy.directionTargets {
+		provider := schemas.ModelProvider(strings.TrimSpace(string(target.Provider)))
+		if provider == "" {
+			continue
+		}
+
+		candidateModel := strings.TrimSpace(target.Model)
+		if candidateModel == "" {
+			candidateModel = model
+		}
+		if candidateModel == "" {
+			continue
+		}
+
+		refinedModel, ok := p.resolveCandidateModel(provider, candidateModel)
+		if !ok {
+			continue
+		}
+
+		config, ok := p.providerLookup(provider)
+		if !ok || !providerHasEligibleKey(provider, refinedModel, config, p.catalog) {
+			continue
+		}
+
+		key := fmt.Sprintf("%s/%s", provider, refinedModel)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		profile, ok := tracker.directionProfile(directionKey{provider: provider, model: refinedModel})
+		if !ok {
+			profile = directionProfile{
+				State:  HealthStateHealthy,
+				Score:  0.5,
+				Weight: (cfg.weightFloor + cfg.weightCeiling) / 2,
+			}
+		}
+		candidates = append(candidates, directionCandidate{
+			Provider: provider,
+			Model:    refinedModel,
+			Profile:  profile,
+		})
+	}
+	return candidates
+}
+
+func (p *Plugin) resolveCandidateModel(provider schemas.ModelProvider, model string) (string, bool) {
+	if strings.TrimSpace(model) == "" {
+		return "", false
+	}
+	if p == nil || p.catalog == nil {
+		return model, true
+	}
+	refinedModel, err := p.catalog.RefineModelForProvider(provider, model)
+	if err == nil && strings.TrimSpace(refinedModel) != "" {
+		return refinedModel, true
+	}
+	return model, true
+}
+
+func mergeAdaptiveFallbacks(selected string, preferred []string, additional []string) []string {
+	if len(preferred) == 0 && len(additional) == 0 {
+		return nil
+	}
+
+	fallbacks := make([]string, 0, len(preferred)+len(additional))
+	seen := make(map[string]struct{}, len(preferred)+len(additional)+1)
+	if selected != "" {
+		seen[selected] = struct{}{}
+	}
+
+	appendUnique := func(values []string) {
+		for _, value := range values {
+			trimmed := strings.TrimSpace(value)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			fallbacks = append(fallbacks, trimmed)
+		}
+	}
+
+	appendUnique(preferred)
+	appendUnique(additional)
+	return fallbacks
+}
+
+func applyRuleFallbacks(payload map[string]any, fallbacks []string) bool {
+	if len(fallbacks) == 0 || payload == nil || hasExplicitFallbacks(payload["fallbacks"]) {
+		return false
+	}
+	payload["fallbacks"] = append([]string(nil), fallbacks...)
+	return true
 }
 
 func (p *Plugin) chooseDirectionCandidate(candidates []directionCandidate, cfg trackerConfig, exploration bool) int {

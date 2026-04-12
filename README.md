@@ -1099,3 +1099,80 @@ Current cluster auto-sync scope now includes:
   - `go test ./bifrost-http/handlers` ✓
   - `go test ./bifrost-http/loadbalancer` ✓
   - `npx tsc --noEmit` ✓
+
+### 2026-04-12 | Working Tree | Adaptive Load Balancing 二次纠偏：回归 Provider Routing Rules，并补齐集群统计同步
+
+> **说明**：这一轮对上面 `Commit 628940d` 的 Adaptive 架构做了纠偏。实践中发现将 Adaptive 完全做成“全局配置入口”会带来明显的语义混乱，和官网 `Adaptive Load Balancing / Provider Routing` 的两层设计也不一致。因此本轮将 **策略入口重新收回到 Provider Routing Rules**，而全局 `load_balancer_config` 仅保留为 **算法默认值 / engine defaults**。
+
+- **架构纠偏**
+
+  - 恢复 `Routing Rule` 的 `rule_type = direct | adaptive`
+  - 恢复 `adaptive_config` 到 routing rule 数据模型，并重新打通：
+    - DB 表结构
+    - migration 修复
+    - governance handler 的 CRUD
+    - governance routing engine 的匹配输出
+    - cluster routing rule 同步载荷
+  - `direct` 与 `adaptive` 的职责重新分离：
+    - `direct`：显式 target provider/model/key + 静态权重/fallback
+    - `adaptive`：声明候选 provider/model 集合，由 direction-level adaptive 选择 provider，再由 route-level adaptive 选择 key
+  - `adaptive` 规则下不再允许 `key_id` 绑定，避免把 provider-level 和 key-level 两层策略混在一起
+
+- **Adaptive 运行时逻辑修正**
+
+  - Governance 命中 `adaptive` 规则后，不再直接把请求改写成固定 provider/model
+  - 改为把规则级 adaptive 策略写入上下文：
+    - `BifrostContextKeyGovernanceAdaptiveRoutingConfig`
+    - `BifrostContextKeyGovernanceAdaptiveRoutingTargets`
+    - `BifrostContextKeyGovernanceAdaptiveRoutingFallbacks`
+  - HTTP transport adaptive plugin 读取这些上下文信息后执行：
+    - **Direction-level 选择**：在规则声明的候选 provider/model 集合中选择最佳方向
+    - **Route-level 选择**：在已选 provider 的 key 池内继续做自适应 key 选择
+  - 这样 `Provider Allowlist / Model Allowlist` 不再承担“业务规则配置”的职责，只保留全局默认行为过滤的意义
+
+- **集群 Adaptive 真正生效**
+
+  - 新增 `transports/bifrost-http/server/load_balancer_cluster_sync.go`
+  - 每 5 秒通过 `/_cluster/adaptive-routing/status` 拉取 peer 的 **local-only 原始 adaptive 快照**
+  - 本节点 tracker 合并 remote route/direction snapshots，并在异步预计算阶段统一计算权重
+  - 这样 cluster 下 direction / route 的 score、weight、traffic share 不再是“各节点各算各的”
+  - 同时保留双视角：
+    - **public status**：返回 cluster-aware merged 视图
+    - **internal peer endpoint**：只返回 local-only 原始快照，避免双重累计
+
+- **Adaptive Dashboard 收口**
+
+  - `Adaptive Routing` 页面现在回归为 **纯状态观测页**
+  - 不再直接在状态页上编辑 Adaptive 配置
+  - 页面结构重新对齐官方 dashboard 思路：
+    - Live Metrics
+    - Active Alerts
+    - Total Traffic Distribution
+    - Direction Weights & Performance
+    - Route Weights & Performance
+  - 页面默认读取本节点的 cluster-aware merged 状态，不再通过 `cluster=true` 简单拼表
+  - 策略配置入口回到 `Routing Rules` 页面：
+    - 新增 `Direct Rule / Adaptive Load Balancing` 规则类型切换
+    - `Adaptive Policy` 表单块
+    - `Adaptive Candidates` 候选 provider/model 配置
+    - Routing Rules 表格新增 `Type` 展示
+
+- **集群与状态接口稳定性**
+
+  - internal adaptive status 接口改为使用 `ListLocalSnapshots / ListLocalDirectionSnapshots`
+  - public adaptive status 接口使用 merged cluster-aware status
+  - 增加 remote snapshot TTL 和 peer prune 逻辑，避免节点退出后旧统计长期滞留
+
+- **本轮验证**
+
+  - `go test ./transports/bifrost-http/loadbalancer ./transports/bifrost-http/handlers ./transports/bifrost-http/server ./plugins/governance`
+  - `go test ./framework/configstore/...`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+- **新增回归重点**
+
+  - `adaptive` rule 命中后返回 rule-scoped adaptive decision，而不是直接 target rewrite
+  - remote adaptive snapshots 会合并到 cluster-aware status，但不会污染 local-only internal peer status
+  - internal `/_cluster/adaptive-routing/status` 永远只暴露本节点原始快照

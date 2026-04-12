@@ -36,8 +36,11 @@ type RoutingDecision struct {
 	Model           string   // Model to use (or empty to use original)
 	KeyID           string   // Optional: pin a specific API key by UUID ("" = no pin)
 	Fallbacks       []string // Fallback chain: ["provider/model", ...]
+	RuleType        string   // direct | adaptive
 	MatchedRuleID   string   // ID of the rule that matched
 	MatchedRuleName string   // Name of the rule that matched
+	AdaptiveTargets []configstoreTables.TableRoutingTarget
+	AdaptiveConfig  map[string]any
 }
 
 // RoutingContext holds all data needed for routing rule evaluation
@@ -141,6 +144,26 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 
 			// If rule matched, select a target probabilistically and return routing decision
 			if matched {
+				if strings.TrimSpace(rule.RuleType) == "adaptive" {
+					decision := &RoutingDecision{
+						Provider:        string(routingCtx.Provider),
+						Model:           routingCtx.Model,
+						Fallbacks:       append([]string(nil), rule.ParsedFallbacks...),
+						RuleType:        "adaptive",
+						MatchedRuleID:   rule.ID,
+						MatchedRuleName: rule.Name,
+						AdaptiveTargets: cloneAdaptiveRoutingTargets(rule.Targets),
+						AdaptiveConfig:  cloneAdaptiveRoutingConfig(rule.ParsedAdaptiveConfig),
+					}
+
+					ctx.SetValue(schemas.BifrostContextKeyGovernanceRoutingRuleID, rule.ID)
+					ctx.SetValue(schemas.BifrostContextKeyGovernanceRoutingRuleName, rule.Name)
+
+					re.logger.Debug("[RoutingEngine] Adaptive rule matched: provider=%s, model=%s, candidates=%d", decision.Provider, decision.Model, len(decision.AdaptiveTargets))
+					ctx.AppendRoutingEngineLog(schemas.RoutingEngineRoutingRule, fmt.Sprintf("Rule '%s' [%s] → matched adaptive rule with %d candidate direction(s)", rule.Name, rule.CelExpression, len(decision.AdaptiveTargets)))
+					return decision, nil
+				}
+
 				target, ok := selectWeightedTarget(rule.Targets)
 				if !ok {
 					re.logger.Debug("[RoutingEngine] Rule %s matched but has no valid targets (empty list or all-negative weights), skipping — note: all-zero weights use uniform selection and would not reach here", rule.Name)
@@ -168,6 +191,7 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 					Model:           model,
 					KeyID:           keyID,
 					Fallbacks:       rule.ParsedFallbacks,
+					RuleType:        "direct",
 					MatchedRuleID:   rule.ID,
 					MatchedRuleName: rule.Name,
 				}
@@ -186,6 +210,41 @@ func (re *RoutingEngine) EvaluateRoutingRules(ctx *schemas.BifrostContext, routi
 	// No rule matched - return nil decision (caller should use default routing)
 	re.logger.Debug("[RoutingEngine] No routing rule matched, using default routing")
 	return nil, nil
+}
+
+func cloneAdaptiveRoutingTargets(targets []configstoreTables.TableRoutingTarget) []configstoreTables.TableRoutingTarget {
+	if len(targets) == 0 {
+		return nil
+	}
+	return append([]configstoreTables.TableRoutingTarget(nil), targets...)
+}
+
+func cloneAdaptiveRoutingConfig(config map[string]any) map[string]any {
+	if config == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(config))
+	for key, value := range config {
+		cloned[key] = cloneAdaptiveRoutingValue(value)
+	}
+	return cloned
+}
+
+func cloneAdaptiveRoutingValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneAdaptiveRoutingConfig(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i := range typed {
+			cloned[i] = cloneAdaptiveRoutingValue(typed[i])
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return typed
+	}
 }
 
 // selectWeightedTarget picks one target from the slice using weighted random selection.

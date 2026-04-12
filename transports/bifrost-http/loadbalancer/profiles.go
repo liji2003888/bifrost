@@ -40,10 +40,29 @@ type directionProfile struct {
 	UpdatedAt            time.Time
 }
 
+type routeProfileInput struct {
+	key      routeKey
+	stats    *routeStats
+	snapshot RouteSnapshot
+}
+
+type directionProfileInput struct {
+	key      directionKey
+	stats    *routeStats
+	snapshot DirectionSnapshot
+}
+
 func newTracker(cfg trackerConfig) *Tracker {
+	remoteTTL := 15 * time.Second
+	if cfg.recomputeInterval > 0 {
+		remoteTTL = maxDuration(cfg.recomputeInterval*3, remoteTTL)
+	}
 	tracker := &Tracker{
-		cfg:    cfg,
-		stopCh: make(chan struct{}),
+		cfg:               cfg,
+		stopCh:            make(chan struct{}),
+		remoteRoutes:      make(map[string]map[routeKey]RouteSnapshot),
+		remoteDirections:  make(map[string]map[directionKey]DirectionSnapshot),
+		remoteSnapshotTTL: remoteTTL,
 	}
 	atomic.StoreUint32(&tracker.dirty, 1)
 	tracker.recomputeProfiles(time.Now(), true)
@@ -174,216 +193,13 @@ func (t *Tracker) recomputeProfiles(now time.Time, force bool) {
 		}
 	}
 
-	routeInputs := make([]struct {
-		key      routeKey
-		stats    *routeStats
-		snapshot RouteSnapshot
-	}, 0)
-	t.routes.Range(func(key, value any) bool {
-		route, ok := key.(routeKey)
-		if !ok {
-			return true
-		}
-		stats, ok := value.(*routeStats)
-		if !ok {
-			return true
-		}
-		stats.mu.RLock()
-		snapshot := RouteSnapshot{
-			Samples:             stats.samples,
-			Successes:           stats.successes,
-			Failures:            stats.failures,
-			ConsecutiveFailures: stats.consecutiveFailures,
-			ErrorEWMA:           stats.errorEWMA,
-			LatencyEWMA:         stats.latencyEWMA,
-			LastUpdated:         stats.lastUpdated,
-		}
-		stats.mu.RUnlock()
-		routeInputs = append(routeInputs, struct {
-			key      routeKey
-			stats    *routeStats
-			snapshot RouteSnapshot
-		}{
-			key:      route,
-			stats:    stats,
-			snapshot: snapshot,
-		})
-		return true
-	})
-
-	directionInputs := make([]struct {
-		key      directionKey
-		stats    *routeStats
-		snapshot DirectionSnapshot
-	}, 0)
-	t.directions.Range(func(key, value any) bool {
-		direction, ok := key.(directionKey)
-		if !ok {
-			return true
-		}
-		stats, ok := value.(*routeStats)
-		if !ok {
-			return true
-		}
-		stats.mu.RLock()
-		snapshot := DirectionSnapshot{
-			Samples:             stats.samples,
-			Successes:           stats.successes,
-			Failures:            stats.failures,
-			ConsecutiveFailures: stats.consecutiveFailures,
-			ErrorEWMA:           stats.errorEWMA,
-			LatencyEWMA:         stats.latencyEWMA,
-			LastUpdated:         stats.lastUpdated,
-		}
-		stats.mu.RUnlock()
-		directionInputs = append(directionInputs, struct {
-			key      directionKey
-			stats    *routeStats
-			snapshot DirectionSnapshot
-		}{
-			key:      direction,
-			stats:    stats,
-			snapshot: snapshot,
-		})
-		return true
-	})
-
-	t.rebuildRouteProfiles(routeInputs, now)
-	t.rebuildDirectionProfiles(directionInputs, now)
+	routeStatuses := t.routeStatusesForInputs(t.mergedRouteInputs(now), now)
+	directionStatuses := t.directionStatusesForInputs(t.mergedDirectionInputs(now), now)
+	t.storeRouteProfiles(routeStatuses)
+	t.storeDirectionProfiles(directionStatuses)
 
 	atomic.StoreUint32(&t.dirty, 0)
 	atomic.StoreInt64(&t.lastRecomputeUnixNs, now.UnixNano())
-}
-
-func (t *Tracker) rebuildRouteProfiles(inputs []struct {
-	key      routeKey
-	stats    *routeStats
-	snapshot RouteSnapshot
-}, now time.Time) {
-	type groupedRoute struct {
-		key      routeKey
-		stats    *routeStats
-		snapshot RouteSnapshot
-	}
-
-	grouped := make(map[string][]groupedRoute)
-	for _, input := range inputs {
-		groupID := fmt.Sprintf("%s/%s", input.key.provider, input.key.model)
-		grouped[groupID] = append(grouped[groupID], groupedRoute{
-			key:      input.key,
-			stats:    input.stats,
-			snapshot: input.snapshot,
-		})
-	}
-
-	for _, routes := range grouped {
-		baselineLatency := 0.0
-		totalSamples := int64(0)
-		for _, route := range routes {
-			totalSamples += route.snapshot.Samples
-			if route.snapshot.LatencyEWMA <= 0 {
-				continue
-			}
-			if baselineLatency == 0 || route.snapshot.LatencyEWMA < baselineLatency {
-				baselineLatency = route.snapshot.LatencyEWMA
-			}
-		}
-
-		precomputed := make([]routeProfile, len(routes))
-		totalWeight := 0
-		for i, route := range routes {
-			precomputed[i] = t.buildRouteProfile(route.stats, route.snapshot, baselineLatency, totalSamples, 0, now)
-			totalWeight += precomputed[i].Weight
-		}
-
-		for i, route := range routes {
-			actualShare := 0.0
-			if totalSamples > 0 {
-				actualShare = float64(route.snapshot.Samples) / float64(totalSamples)
-			}
-			expectedShare := 0.0
-			if totalWeight > 0 {
-				expectedShare = float64(precomputed[i].Weight) / float64(totalWeight)
-			}
-			utilPenalty := t.utilizationPenalty(actualShare, expectedShare)
-			score := clamp(precomputed[i].Score+(utilPenalty*0.05), 0, 1)
-			weight := t.weightForScore(score, precomputed[i].State)
-			profile := routeProfile{
-				State:                precomputed[i].State,
-				Score:                score,
-				Weight:               weight,
-				ExpectedTrafficShare: expectedShare,
-				ActualTrafficShare:   actualShare,
-				UpdatedAt:            now,
-			}
-			t.routeProfiles.Store(route.key, profile)
-		}
-	}
-}
-
-func (t *Tracker) rebuildDirectionProfiles(inputs []struct {
-	key      directionKey
-	stats    *routeStats
-	snapshot DirectionSnapshot
-}, now time.Time) {
-	type groupedDirection struct {
-		key      directionKey
-		stats    *routeStats
-		snapshot DirectionSnapshot
-	}
-
-	grouped := make(map[string][]groupedDirection)
-	for _, input := range inputs {
-		grouped[input.key.model] = append(grouped[input.key.model], groupedDirection{
-			key:      input.key,
-			stats:    input.stats,
-			snapshot: input.snapshot,
-		})
-	}
-
-	for _, directions := range grouped {
-		baselineLatency := 0.0
-		totalSamples := int64(0)
-		for _, direction := range directions {
-			totalSamples += direction.snapshot.Samples
-			if direction.snapshot.LatencyEWMA <= 0 {
-				continue
-			}
-			if baselineLatency == 0 || direction.snapshot.LatencyEWMA < baselineLatency {
-				baselineLatency = direction.snapshot.LatencyEWMA
-			}
-		}
-
-		precomputed := make([]directionProfile, len(directions))
-		totalWeight := 0
-		for i, direction := range directions {
-			precomputed[i] = t.buildDirectionProfile(direction.stats, direction.snapshot, baselineLatency, totalSamples, 0, now)
-			totalWeight += precomputed[i].Weight
-		}
-
-		for i, direction := range directions {
-			actualShare := 0.0
-			if totalSamples > 0 {
-				actualShare = float64(direction.snapshot.Samples) / float64(totalSamples)
-			}
-			expectedShare := 0.0
-			if totalWeight > 0 {
-				expectedShare = float64(precomputed[i].Weight) / float64(totalWeight)
-			}
-			utilPenalty := t.utilizationPenalty(actualShare, expectedShare)
-			score := clamp(precomputed[i].Score+(utilPenalty*0.05), 0, 1)
-			weight := t.weightForScore(score, precomputed[i].State)
-			profile := directionProfile{
-				State:                precomputed[i].State,
-				Score:                score,
-				Weight:               weight,
-				ExpectedTrafficShare: expectedShare,
-				ActualTrafficShare:   actualShare,
-				UpdatedAt:            now,
-			}
-			t.directionProfiles.Store(direction.key, profile)
-		}
-	}
 }
 
 func (t *Tracker) buildRouteProfile(stats *routeStats, snapshot RouteSnapshot, baselineLatency float64, totalSamples int64, utilizationPenalty float64, now time.Time) routeProfile {
@@ -424,6 +240,376 @@ func (t *Tracker) buildDirectionProfile(stats *routeStats, snapshot DirectionSna
 		ActualTrafficShare: actualShare,
 		UpdatedAt:          now,
 	}
+}
+
+func (t *Tracker) localRouteInputs() []routeProfileInput {
+	inputs := make([]routeProfileInput, 0)
+	t.routes.Range(func(key, value any) bool {
+		route, ok := key.(routeKey)
+		if !ok {
+			return true
+		}
+		stats, ok := value.(*routeStats)
+		if !ok {
+			return true
+		}
+		stats.mu.RLock()
+		snapshot := RouteSnapshot{
+			Samples:             stats.samples,
+			Successes:           stats.successes,
+			Failures:            stats.failures,
+			ConsecutiveFailures: stats.consecutiveFailures,
+			ErrorEWMA:           stats.errorEWMA,
+			LatencyEWMA:         stats.latencyEWMA,
+			LastUpdated:         stats.lastUpdated,
+		}
+		stats.mu.RUnlock()
+		inputs = append(inputs, routeProfileInput{
+			key:      route,
+			stats:    stats,
+			snapshot: snapshot,
+		})
+		return true
+	})
+	return inputs
+}
+
+func (t *Tracker) localDirectionInputs() []directionProfileInput {
+	inputs := make([]directionProfileInput, 0)
+	t.directions.Range(func(key, value any) bool {
+		direction, ok := key.(directionKey)
+		if !ok {
+			return true
+		}
+		stats, ok := value.(*routeStats)
+		if !ok {
+			return true
+		}
+		stats.mu.RLock()
+		snapshot := DirectionSnapshot{
+			Samples:             stats.samples,
+			Successes:           stats.successes,
+			Failures:            stats.failures,
+			ConsecutiveFailures: stats.consecutiveFailures,
+			ErrorEWMA:           stats.errorEWMA,
+			LatencyEWMA:         stats.latencyEWMA,
+			LastUpdated:         stats.lastUpdated,
+		}
+		stats.mu.RUnlock()
+		inputs = append(inputs, directionProfileInput{
+			key:      direction,
+			stats:    stats,
+			snapshot: snapshot,
+		})
+		return true
+	})
+	return inputs
+}
+
+func (t *Tracker) mergedRouteInputs(now time.Time) []routeProfileInput {
+	merged := make(map[routeKey]routeProfileInput)
+	for _, input := range t.localRouteInputs() {
+		merged[input.key] = input
+	}
+
+	t.remoteMu.RLock()
+	defer t.remoteMu.RUnlock()
+
+	for _, routes := range t.remoteRoutes {
+		for key, snapshot := range routes {
+			if t.isRemoteSnapshotExpired(now, snapshot.LastUpdated) {
+				continue
+			}
+			current, ok := merged[key]
+			if !ok {
+				merged[key] = routeProfileInput{key: key, snapshot: snapshot}
+				continue
+			}
+			current.snapshot = mergeRouteSnapshots(current.snapshot, snapshot)
+			merged[key] = current
+		}
+	}
+	return mapsValues(merged)
+}
+
+func (t *Tracker) mergedDirectionInputs(now time.Time) []directionProfileInput {
+	merged := make(map[directionKey]directionProfileInput)
+	for _, input := range t.localDirectionInputs() {
+		merged[input.key] = input
+	}
+
+	t.remoteMu.RLock()
+	defer t.remoteMu.RUnlock()
+
+	for _, directions := range t.remoteDirections {
+		for key, snapshot := range directions {
+			if t.isRemoteSnapshotExpired(now, snapshot.LastUpdated) {
+				continue
+			}
+			current, ok := merged[key]
+			if !ok {
+				merged[key] = directionProfileInput{key: key, snapshot: snapshot}
+				continue
+			}
+			current.snapshot = mergeDirectionSnapshots(current.snapshot, snapshot)
+			merged[key] = current
+		}
+	}
+	return mapsValues(merged)
+}
+
+func (t *Tracker) routeStatusesForInputs(inputs []routeProfileInput, now time.Time) []RouteStatus {
+	type groupedRoute struct {
+		key      routeKey
+		stats    *routeStats
+		snapshot RouteSnapshot
+	}
+
+	grouped := make(map[string][]groupedRoute)
+	for _, input := range inputs {
+		groupID := fmt.Sprintf("%s/%s", input.key.provider, input.key.model)
+		grouped[groupID] = append(grouped[groupID], groupedRoute{
+			key:      input.key,
+			stats:    input.stats,
+			snapshot: input.snapshot,
+		})
+	}
+
+	statuses := make([]RouteStatus, 0, len(inputs))
+	for _, routes := range grouped {
+		baselineLatency := 0.0
+		totalSamples := int64(0)
+		for _, route := range routes {
+			totalSamples += route.snapshot.Samples
+			if route.snapshot.LatencyEWMA <= 0 {
+				continue
+			}
+			if baselineLatency == 0 || route.snapshot.LatencyEWMA < baselineLatency {
+				baselineLatency = route.snapshot.LatencyEWMA
+			}
+		}
+
+		precomputed := make([]routeProfile, len(routes))
+		totalWeight := 0
+		for i, route := range routes {
+			precomputed[i] = t.buildRouteProfile(route.stats, route.snapshot, baselineLatency, totalSamples, 0, now)
+			totalWeight += precomputed[i].Weight
+		}
+
+		for i, route := range routes {
+			actualShare := 0.0
+			if totalSamples > 0 {
+				actualShare = float64(route.snapshot.Samples) / float64(totalSamples)
+			}
+			expectedShare := 0.0
+			if totalWeight > 0 {
+				expectedShare = float64(precomputed[i].Weight) / float64(totalWeight)
+			}
+			utilPenalty := t.utilizationPenalty(actualShare, expectedShare)
+			score := clamp(precomputed[i].Score+(utilPenalty*0.05), 0, 1)
+			weight := t.weightForScore(score, precomputed[i].State)
+			statuses = append(statuses, RouteStatus{
+				Provider:             route.key.provider,
+				Model:                route.key.model,
+				KeyID:                route.key.keyID,
+				State:                precomputed[i].State,
+				Score:                score,
+				Weight:               weight,
+				ExpectedTrafficShare: expectedShare,
+				ActualTrafficShare:   actualShare,
+				RouteSnapshot:        route.snapshot,
+			})
+		}
+	}
+	return statuses
+}
+
+func (t *Tracker) directionStatusesForInputs(inputs []directionProfileInput, now time.Time) []DirectionStatus {
+	type groupedDirection struct {
+		key      directionKey
+		stats    *routeStats
+		snapshot DirectionSnapshot
+	}
+
+	grouped := make(map[string][]groupedDirection)
+	for _, input := range inputs {
+		grouped[input.key.model] = append(grouped[input.key.model], groupedDirection{
+			key:      input.key,
+			stats:    input.stats,
+			snapshot: input.snapshot,
+		})
+	}
+
+	statuses := make([]DirectionStatus, 0, len(inputs))
+	for _, directions := range grouped {
+		baselineLatency := 0.0
+		totalSamples := int64(0)
+		for _, direction := range directions {
+			totalSamples += direction.snapshot.Samples
+			if direction.snapshot.LatencyEWMA <= 0 {
+				continue
+			}
+			if baselineLatency == 0 || direction.snapshot.LatencyEWMA < baselineLatency {
+				baselineLatency = direction.snapshot.LatencyEWMA
+			}
+		}
+
+		precomputed := make([]directionProfile, len(directions))
+		totalWeight := 0
+		for i, direction := range directions {
+			precomputed[i] = t.buildDirectionProfile(direction.stats, direction.snapshot, baselineLatency, totalSamples, 0, now)
+			totalWeight += precomputed[i].Weight
+		}
+
+		for i, direction := range directions {
+			actualShare := 0.0
+			if totalSamples > 0 {
+				actualShare = float64(direction.snapshot.Samples) / float64(totalSamples)
+			}
+			expectedShare := 0.0
+			if totalWeight > 0 {
+				expectedShare = float64(precomputed[i].Weight) / float64(totalWeight)
+			}
+			utilPenalty := t.utilizationPenalty(actualShare, expectedShare)
+			score := clamp(precomputed[i].Score+(utilPenalty*0.05), 0, 1)
+			weight := t.weightForScore(score, precomputed[i].State)
+			statuses = append(statuses, DirectionStatus{
+				Provider:             direction.key.provider,
+				Model:                direction.key.model,
+				State:                precomputed[i].State,
+				Score:                score,
+				Weight:               weight,
+				ExpectedTrafficShare: expectedShare,
+				ActualTrafficShare:   actualShare,
+				DirectionSnapshot:    direction.snapshot,
+			})
+		}
+	}
+	return statuses
+}
+
+func (t *Tracker) storeRouteProfiles(statuses []RouteStatus) {
+	seen := make(map[routeKey]struct{}, len(statuses))
+	for _, status := range statuses {
+		key := routeKey{provider: status.Provider, model: status.Model, keyID: status.KeyID}
+		seen[key] = struct{}{}
+		t.routeProfiles.Store(key, routeProfile{
+			State:                status.State,
+			Score:                status.Score,
+			Weight:               status.Weight,
+			ExpectedTrafficShare: status.ExpectedTrafficShare,
+			ActualTrafficShare:   status.ActualTrafficShare,
+			UpdatedAt:            status.LastUpdated,
+		})
+	}
+
+	t.routeProfiles.Range(func(key, _ any) bool {
+		route, ok := key.(routeKey)
+		if !ok {
+			t.routeProfiles.Delete(key)
+			return true
+		}
+		if _, ok := seen[route]; !ok {
+			t.routeProfiles.Delete(route)
+		}
+		return true
+	})
+}
+
+func (t *Tracker) storeDirectionProfiles(statuses []DirectionStatus) {
+	seen := make(map[directionKey]struct{}, len(statuses))
+	for _, status := range statuses {
+		key := directionKey{provider: status.Provider, model: status.Model}
+		seen[key] = struct{}{}
+		t.directionProfiles.Store(key, directionProfile{
+			State:                status.State,
+			Score:                status.Score,
+			Weight:               status.Weight,
+			ExpectedTrafficShare: status.ExpectedTrafficShare,
+			ActualTrafficShare:   status.ActualTrafficShare,
+			UpdatedAt:            status.LastUpdated,
+		})
+	}
+
+	t.directionProfiles.Range(func(key, _ any) bool {
+		direction, ok := key.(directionKey)
+		if !ok {
+			t.directionProfiles.Delete(key)
+			return true
+		}
+		if _, ok := seen[direction]; !ok {
+			t.directionProfiles.Delete(direction)
+		}
+		return true
+	})
+}
+
+func (t *Tracker) isRemoteSnapshotExpired(now, updatedAt time.Time) bool {
+	if t == nil {
+		return true
+	}
+	if updatedAt.IsZero() {
+		return false
+	}
+	if t.remoteSnapshotTTL <= 0 {
+		return false
+	}
+	return now.Sub(updatedAt) > t.remoteSnapshotTTL
+}
+
+func mergeRouteSnapshots(current, incoming RouteSnapshot) RouteSnapshot {
+	currentSamples := maxInt64(current.Samples, 0)
+	incomingSamples := maxInt64(incoming.Samples, 0)
+	mergedSamples := currentSamples + incomingSamples
+	merged := RouteSnapshot{
+		Samples:             mergedSamples,
+		Successes:           maxInt64(current.Successes, 0) + maxInt64(incoming.Successes, 0),
+		Failures:            maxInt64(current.Failures, 0) + maxInt64(incoming.Failures, 0),
+		ConsecutiveFailures: maxInt64(current.ConsecutiveFailures, incoming.ConsecutiveFailures),
+		ErrorEWMA:           weightedMetricAverage(current.ErrorEWMA, currentSamples, incoming.ErrorEWMA, incomingSamples),
+		LatencyEWMA:         weightedMetricAverage(current.LatencyEWMA, currentSamples, incoming.LatencyEWMA, incomingSamples),
+		LastUpdated:         latestTime(current.LastUpdated, incoming.LastUpdated),
+	}
+	return merged
+}
+
+func mergeDirectionSnapshots(current, incoming DirectionSnapshot) DirectionSnapshot {
+	currentSamples := maxInt64(current.Samples, 0)
+	incomingSamples := maxInt64(incoming.Samples, 0)
+	mergedSamples := currentSamples + incomingSamples
+	merged := DirectionSnapshot{
+		Samples:             mergedSamples,
+		Successes:           maxInt64(current.Successes, 0) + maxInt64(incoming.Successes, 0),
+		Failures:            maxInt64(current.Failures, 0) + maxInt64(incoming.Failures, 0),
+		ConsecutiveFailures: maxInt64(current.ConsecutiveFailures, incoming.ConsecutiveFailures),
+		ErrorEWMA:           weightedMetricAverage(current.ErrorEWMA, currentSamples, incoming.ErrorEWMA, incomingSamples),
+		LatencyEWMA:         weightedMetricAverage(current.LatencyEWMA, currentSamples, incoming.LatencyEWMA, incomingSamples),
+		LastUpdated:         latestTime(current.LastUpdated, incoming.LastUpdated),
+	}
+	return merged
+}
+
+func weightedMetricAverage(current float64, currentSamples int64, incoming float64, incomingSamples int64) float64 {
+	switch {
+	case currentSamples <= 0 && incomingSamples <= 0:
+		if incoming > 0 {
+			return incoming
+		}
+		return current
+	case currentSamples <= 0:
+		return incoming
+	case incomingSamples <= 0:
+		return current
+	default:
+		return ((current * float64(currentSamples)) + (incoming * float64(incomingSamples))) / float64(currentSamples+incomingSamples)
+	}
+}
+
+func latestTime(left, right time.Time) time.Time {
+	if right.After(left) {
+		return right
+	}
+	return left
 }
 
 func (t *Tracker) determineHealthState(stats *routeStats, errorEWMA float64, consecutiveFailures int64, latencyRatio float64, now time.Time) HealthState {
@@ -524,52 +710,8 @@ func (t *Tracker) ListSnapshots(provider schemas.ModelProvider, model string) []
 		return nil
 	}
 	t.ensureProfilesFresh(false)
-
-	snapshots := make([]RouteStatus, 0)
-	t.routes.Range(func(key, value any) bool {
-		route, ok := key.(routeKey)
-		if !ok {
-			return true
-		}
-		if provider != "" && route.provider != provider {
-			return true
-		}
-		if model != "" && route.model != model {
-			return true
-		}
-
-		stats, ok := value.(*routeStats)
-		if !ok {
-			return true
-		}
-		stats.mu.RLock()
-		status := RouteStatus{
-			Provider: route.provider,
-			Model:    route.model,
-			KeyID:    route.keyID,
-			RouteSnapshot: RouteSnapshot{
-				Samples:             stats.samples,
-				Successes:           stats.successes,
-				Failures:            stats.failures,
-				ConsecutiveFailures: stats.consecutiveFailures,
-				ErrorEWMA:           stats.errorEWMA,
-				LatencyEWMA:         stats.latencyEWMA,
-				LastUpdated:         stats.lastUpdated,
-			},
-		}
-		stats.mu.RUnlock()
-		if profile, ok := t.routeProfile(route); ok {
-			status.State = profile.State
-			status.Score = profile.Score
-			status.Weight = profile.Weight
-			status.ExpectedTrafficShare = profile.ExpectedTrafficShare
-			status.ActualTrafficShare = profile.ActualTrafficShare
-		}
-		snapshots = append(snapshots, status)
-		return true
-	})
-
-	slices.SortFunc(snapshots, func(a, b RouteStatus) int {
+	statuses := filterRouteStatuses(t.routeStatusesForInputs(t.mergedRouteInputs(time.Now()), time.Now()), provider, model)
+	slices.SortFunc(statuses, func(a, b RouteStatus) int {
 		if cmp := strings.Compare(string(a.Provider), string(b.Provider)); cmp != 0 {
 			return cmp
 		}
@@ -578,7 +720,24 @@ func (t *Tracker) ListSnapshots(provider schemas.ModelProvider, model string) []
 		}
 		return strings.Compare(a.KeyID, b.KeyID)
 	})
-	return snapshots
+	return statuses
+}
+
+func (t *Tracker) ListLocalSnapshots(provider schemas.ModelProvider, model string) []RouteStatus {
+	if t == nil {
+		return nil
+	}
+	statuses := filterRouteStatuses(t.routeStatusesForInputs(t.localRouteInputs(), time.Now()), provider, model)
+	slices.SortFunc(statuses, func(a, b RouteStatus) int {
+		if cmp := strings.Compare(string(a.Provider), string(b.Provider)); cmp != 0 {
+			return cmp
+		}
+		if cmp := strings.Compare(a.Model, b.Model); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.KeyID, b.KeyID)
+	})
+	return statuses
 }
 
 func (t *Tracker) ListDirectionSnapshots(provider schemas.ModelProvider, model string) []DirectionStatus {
@@ -586,50 +745,7 @@ func (t *Tracker) ListDirectionSnapshots(provider schemas.ModelProvider, model s
 		return nil
 	}
 	t.ensureProfilesFresh(false)
-
-	statuses := make([]DirectionStatus, 0)
-	t.directions.Range(func(key, value any) bool {
-		direction, ok := key.(directionKey)
-		if !ok {
-			return true
-		}
-		if provider != "" && direction.provider != provider {
-			return true
-		}
-		if model != "" && direction.model != model {
-			return true
-		}
-
-		stats, ok := value.(*routeStats)
-		if !ok {
-			return true
-		}
-		stats.mu.RLock()
-		status := DirectionStatus{
-			Provider: direction.provider,
-			Model:    direction.model,
-			DirectionSnapshot: DirectionSnapshot{
-				Samples:             stats.samples,
-				Successes:           stats.successes,
-				Failures:            stats.failures,
-				ConsecutiveFailures: stats.consecutiveFailures,
-				ErrorEWMA:           stats.errorEWMA,
-				LatencyEWMA:         stats.latencyEWMA,
-				LastUpdated:         stats.lastUpdated,
-			},
-		}
-		stats.mu.RUnlock()
-		if profile, ok := t.directionProfile(direction); ok {
-			status.State = profile.State
-			status.Score = profile.Score
-			status.Weight = profile.Weight
-			status.ExpectedTrafficShare = profile.ExpectedTrafficShare
-			status.ActualTrafficShare = profile.ActualTrafficShare
-		}
-		statuses = append(statuses, status)
-		return true
-	})
-
+	statuses := filterDirectionStatuses(t.directionStatusesForInputs(t.mergedDirectionInputs(time.Now()), time.Now()), provider, model)
 	slices.SortFunc(statuses, func(a, b DirectionStatus) int {
 		if cmp := strings.Compare(string(a.Provider), string(b.Provider)); cmp != 0 {
 			return cmp
@@ -637,6 +753,72 @@ func (t *Tracker) ListDirectionSnapshots(provider schemas.ModelProvider, model s
 		return strings.Compare(a.Model, b.Model)
 	})
 	return statuses
+}
+
+func (t *Tracker) ListLocalDirectionSnapshots(provider schemas.ModelProvider, model string) []DirectionStatus {
+	if t == nil {
+		return nil
+	}
+	statuses := filterDirectionStatuses(t.directionStatusesForInputs(t.localDirectionInputs(), time.Now()), provider, model)
+	slices.SortFunc(statuses, func(a, b DirectionStatus) int {
+		if cmp := strings.Compare(string(a.Provider), string(b.Provider)); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Model, b.Model)
+	})
+	return statuses
+}
+
+func (t *Tracker) UpdateRemoteSnapshots(nodeID string, routes []RouteStatus, directions []DirectionStatus) {
+	if t == nil {
+		return
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return
+	}
+
+	routeSnapshots := make(map[routeKey]RouteSnapshot, len(routes))
+	for _, route := range routes {
+		key := routeKey{provider: route.Provider, model: route.Model, keyID: route.KeyID}
+		snapshot := route.RouteSnapshot
+		if snapshot.LastUpdated.IsZero() {
+			snapshot.LastUpdated = time.Now().UTC()
+		}
+		routeSnapshots[key] = snapshot
+	}
+
+	directionSnapshots := make(map[directionKey]DirectionSnapshot, len(directions))
+	for _, direction := range directions {
+		key := directionKey{provider: direction.Provider, model: direction.Model}
+		snapshot := direction.DirectionSnapshot
+		if snapshot.LastUpdated.IsZero() {
+			snapshot.LastUpdated = time.Now().UTC()
+		}
+		directionSnapshots[key] = snapshot
+	}
+
+	t.remoteMu.Lock()
+	t.remoteRoutes[nodeID] = routeSnapshots
+	t.remoteDirections[nodeID] = directionSnapshots
+	t.remoteMu.Unlock()
+	atomic.StoreUint32(&t.dirty, 1)
+}
+
+func (t *Tracker) PruneRemoteNode(nodeID string) {
+	if t == nil {
+		return
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return
+	}
+
+	t.remoteMu.Lock()
+	delete(t.remoteRoutes, nodeID)
+	delete(t.remoteDirections, nodeID)
+	t.remoteMu.Unlock()
+	atomic.StoreUint32(&t.dirty, 1)
 }
 
 func (t *Tracker) SelectKey(ctx *schemas.BifrostContext, keys []schemas.Key, providerKey schemas.ModelProvider, model string) (schemas.Key, error) {
@@ -801,4 +983,53 @@ func max[T ~int | ~int64 | ~float64](a, b T) T {
 		return a
 	}
 	return b
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func mapsValues[K comparable, V any](source map[K]V) []V {
+	values := make([]V, 0, len(source))
+	for _, value := range source {
+		values = append(values, value)
+	}
+	return values
+}
+
+func filterRouteStatuses(statuses []RouteStatus, provider schemas.ModelProvider, model string) []RouteStatus {
+	if provider == "" && model == "" {
+		return append([]RouteStatus(nil), statuses...)
+	}
+	filtered := make([]RouteStatus, 0, len(statuses))
+	for _, status := range statuses {
+		if provider != "" && status.Provider != provider {
+			continue
+		}
+		if model != "" && status.Model != model {
+			continue
+		}
+		filtered = append(filtered, status)
+	}
+	return filtered
+}
+
+func filterDirectionStatuses(statuses []DirectionStatus, provider schemas.ModelProvider, model string) []DirectionStatus {
+	if provider == "" && model == "" {
+		return append([]DirectionStatus(nil), statuses...)
+	}
+	filtered := make([]DirectionStatus, 0, len(statuses))
+	for _, status := range statuses {
+		if provider != "" && status.Provider != provider {
+			continue
+		}
+		if model != "" && status.Model != model {
+			continue
+		}
+		filtered = append(filtered, status)
+	}
+	return filtered
 }

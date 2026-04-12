@@ -5,28 +5,18 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
-import { useDebouncedValue } from "@/hooks/useDebounce";
 import { ProviderLabels } from "@/lib/constants/logs";
 import {
 	getErrorMessage,
 	useGetAdaptiveRoutingStatusQuery,
-	useGetAdaptiveRoutingConfigQuery,
-	useUpdateAdaptiveRoutingConfigMutation,
 	useGetAlertsQuery,
 	useGetProvidersQuery,
 } from "@/lib/store";
-import type { AdaptiveRoutingConfig } from "@/lib/types/adaptiveRouting";
-import { DEFAULT_ADAPTIVE_ROUTING_CONFIG } from "@/lib/types/adaptiveRouting";
 import { formatPercentage, formatRelativeTimestamp, isServiceDisabledError } from "@/lib/utils/enterprise";
-import { AlertCircle, CheckCircle2, RefreshCw, Settings2, Wifi } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { toast } from "sonner";
+import { AlertCircle, CheckCircle2, RefreshCw, Wifi } from "lucide-react";
+import { useMemo, useState } from "react";
 
 function stateBadgeVariant(state: "healthy" | "degraded" | "failed" | "recovering"): "default" | "secondary" | "destructive" | "outline" {
 	switch (state) {
@@ -41,197 +31,9 @@ function stateBadgeVariant(state: "healthy" | "degraded" | "failed" | "recoverin
 	}
 }
 
-function AdaptiveRoutingConfigPanel() {
-	const { data: config, isLoading } = useGetAdaptiveRoutingConfigQuery();
-	const [updateConfig, { isLoading: isUpdating }] = useUpdateAdaptiveRoutingConfigMutation();
-	const [localConfig, setLocalConfig] = useState<AdaptiveRoutingConfig>({ ...DEFAULT_ADAPTIVE_ROUTING_CONFIG });
-	const [showAdvanced, setShowAdvanced] = useState(false);
-
-	useEffect(() => {
-		if (config) {
-			setLocalConfig({ ...DEFAULT_ADAPTIVE_ROUTING_CONFIG, ...config });
-		}
-	}, [config]);
-
-	const handleSave = async () => {
-		try {
-			await updateConfig(localConfig).unwrap();
-			toast.success("Adaptive routing configuration updated");
-		} catch (error) {
-			toast.error(getErrorMessage(error));
-		}
-	};
-
-	const isDirty = JSON.stringify(localConfig) !== JSON.stringify(config ?? DEFAULT_ADAPTIVE_ROUTING_CONFIG);
-
-	if (isLoading) {
-		return (
-			<Card className="shadow-none">
-				<CardContent className="flex items-center justify-center py-8">
-					<span className="text-muted-foreground text-sm">Loading configuration...</span>
-				</CardContent>
-			</Card>
-		);
-	}
-
-	return (
-		<Card className="shadow-none">
-			<CardHeader className="flex flex-row items-center justify-between pb-3">
-				<div className="flex items-center gap-2">
-					<Settings2 className="h-4 w-4" />
-					<CardTitle className="text-base">Configuration</CardTitle>
-				</div>
-				<div className="flex items-center gap-2">
-					{isDirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
-					<Button
-						variant="default"
-						size="sm"
-						onClick={handleSave}
-						disabled={!isDirty || isUpdating}
-						isLoading={isUpdating}
-					>
-						Save
-					</Button>
-				</div>
-			</CardHeader>
-			<CardContent className="space-y-6">
-				{/* Main toggles */}
-				<div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-					<div className="flex items-center justify-between rounded-lg border p-3">
-						<div className="space-y-0.5">
-							<p className="text-sm font-medium">Enable</p>
-							<p className="text-muted-foreground text-xs">Master switch</p>
-						</div>
-						<Switch
-							checked={localConfig.enabled}
-							onCheckedChange={(checked) => setLocalConfig((c) => ({ ...c, enabled: checked }))}
-						/>
-					</div>
-					<div className="flex items-center justify-between rounded-lg border p-3">
-						<div className="space-y-0.5">
-							<p className="text-sm font-medium">Key Balancing</p>
-							<p className="text-muted-foreground text-xs">Balance across API keys</p>
-						</div>
-						<Switch
-							checked={localConfig.key_balancing_enabled ?? true}
-							onCheckedChange={(checked) => setLocalConfig((c) => ({ ...c, key_balancing_enabled: checked }))}
-							disabled={!localConfig.enabled}
-						/>
-					</div>
-					<div className="flex items-center justify-between rounded-lg border p-3">
-						<div className="space-y-0.5">
-							<p className="text-sm font-medium">Direction Routing</p>
-							<p className="text-muted-foreground text-xs">Auto-select provider</p>
-						</div>
-						<Switch
-							checked={localConfig.direction_routing_enabled ?? false}
-							onCheckedChange={(checked) => setLocalConfig((c) => ({ ...c, direction_routing_enabled: checked }))}
-							disabled={!localConfig.enabled}
-						/>
-					</div>
-					<div className="flex items-center justify-between rounded-lg border p-3">
-						<div className="space-y-0.5">
-							<p className="text-sm font-medium">VK Direction</p>
-							<p className="text-muted-foreground text-xs">Direction for virtual keys</p>
-						</div>
-						<Switch
-							checked={localConfig.direction_routing_for_virtual_keys ?? false}
-							onCheckedChange={(checked) => setLocalConfig((c) => ({ ...c, direction_routing_for_virtual_keys: checked }))}
-							disabled={!localConfig.enabled || !(localConfig.direction_routing_enabled ?? false)}
-						/>
-					</div>
-				</div>
-
-				{/* Allowlists */}
-				<div className="grid gap-4 md:grid-cols-2">
-					<div className="space-y-2">
-						<Label className="text-xs">Provider Allowlist</Label>
-						<Textarea
-							value={localConfig.provider_allowlist?.join(", ") || ""}
-							onChange={(e) => setLocalConfig((c) => ({
-								...c,
-								provider_allowlist: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
-							}))}
-							rows={2}
-							placeholder="openai, anthropic (empty = all providers)"
-							disabled={!localConfig.enabled}
-						/>
-					</div>
-					<div className="space-y-2">
-						<Label className="text-xs">Model Allowlist</Label>
-						<Textarea
-							value={localConfig.model_allowlist?.join(", ") || ""}
-							onChange={(e) => setLocalConfig((c) => ({
-								...c,
-								model_allowlist: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
-							}))}
-							rows={2}
-							placeholder="gpt-4o, claude-sonnet-4 (empty = all models)"
-							disabled={!localConfig.enabled}
-						/>
-					</div>
-				</div>
-
-				{/* Advanced tracker tuning */}
-				<div>
-					<Button
-						variant="ghost"
-						size="sm"
-						className="text-xs"
-						onClick={() => setShowAdvanced(!showAdvanced)}
-					>
-						{showAdvanced ? "Hide" : "Show"} Advanced Tracker Settings
-					</Button>
-					{showAdvanced && (
-						<div className="mt-3 grid gap-3 md:grid-cols-3 lg:grid-cols-4">
-							{[
-								{ key: "ewma_alpha", label: "EWMA Alpha", placeholder: "0.25" },
-								{ key: "error_penalty", label: "Error Penalty", placeholder: "1.5" },
-								{ key: "latency_penalty", label: "Latency Penalty", placeholder: "0.6" },
-								{ key: "consecutive_failure_penalty", label: "Consecutive Failure Penalty", placeholder: "0.15" },
-								{ key: "minimum_samples", label: "Minimum Samples", placeholder: "10" },
-								{ key: "exploration_ratio", label: "Exploration Ratio", placeholder: "0.25" },
-								{ key: "jitter_ratio", label: "Jitter Ratio", placeholder: "0.05" },
-								{ key: "recompute_interval_seconds", label: "Recompute Interval (s)", placeholder: "5" },
-								{ key: "degraded_error_threshold", label: "Degraded Error Threshold", placeholder: "0.02" },
-								{ key: "failed_error_threshold", label: "Failed Error Threshold", placeholder: "0.05" },
-								{ key: "weight_floor", label: "Weight Floor", placeholder: "1" },
-								{ key: "weight_ceiling", label: "Weight Ceiling", placeholder: "1000" },
-							].map(({ key, label, placeholder }) => (
-								<div key={key} className="space-y-1">
-									<Label className="text-xs">{label}</Label>
-									<Input
-										type="number"
-										step="any"
-										placeholder={placeholder}
-										value={localConfig.tracker_config?.[key as keyof NonNullable<AdaptiveRoutingConfig["tracker_config"]>] ?? ""}
-										onChange={(e) => {
-											const val = e.target.value === "" ? undefined : Number(e.target.value);
-											setLocalConfig((c) => ({
-												...c,
-												tracker_config: {
-													...c.tracker_config,
-													[key]: val,
-												},
-											}));
-										}}
-										disabled={!localConfig.enabled}
-										className="h-8 text-xs"
-									/>
-								</div>
-							))}
-						</div>
-					)}
-				</div>
-			</CardContent>
-		</Card>
-	);
-}
-
 export default function AdaptiveRoutingPage() {
 	const [providerFilter, setProviderFilter] = useState("all");
-	const [modelFilter, setModelFilter] = useState("");
-	const debouncedModelFilter = useDebouncedValue(modelFilter, 250);
+	const [modelFilter, setModelFilter] = useState("all");
 
 	const { data: providers = [] } = useGetProvidersQuery();
 	const {
@@ -242,9 +44,8 @@ export default function AdaptiveRoutingPage() {
 		refetch: refetchRouting,
 	} = useGetAdaptiveRoutingStatusQuery(
 		{
-			cluster: true,
 			provider: providerFilter === "all" ? undefined : providerFilter,
-			model: debouncedModelFilter.trim() || undefined,
+			model: modelFilter === "all" ? undefined : modelFilter,
 		},
 		{
 			pollingInterval: 5000,
@@ -318,6 +119,21 @@ export default function AdaptiveRoutingPage() {
 		return [...values].sort((a, b) => a.localeCompare(b));
 	}, [providers, routingStatus?.routes]);
 
+	const modelOptions = useMemo(() => {
+		const values = new Set<string>();
+		for (const route of routingStatus?.routes ?? []) {
+			if (route.model) {
+				values.add(route.model);
+			}
+		}
+		for (const direction of routingStatus?.directions ?? []) {
+			if (direction.model) {
+				values.add(direction.model);
+			}
+		}
+		return [...values].sort((a, b) => a.localeCompare(b));
+	}, [routingStatus?.directions, routingStatus?.routes]);
+
 	const activeAlerts = alertsResponse?.alerts ?? [];
 
 	if (routingLoading && !routingStatus) {
@@ -333,7 +149,7 @@ export default function AdaptiveRoutingPage() {
 				<div>
 					<h1 className="text-2xl font-semibold tracking-tight">Adaptive Load Balancing</h1>
 					<p className="text-muted-foreground mt-1 text-sm">
-						Global adaptive routing configuration and real-time status dashboard.
+						Cluster-aware live metrics for direction-level provider selection and route-level key balancing.
 					</p>
 				</div>
 				<div className="flex items-center gap-3">
@@ -363,9 +179,6 @@ export default function AdaptiveRoutingPage() {
 				</div>
 			</div>
 
-			{/* Configuration Panel */}
-			<AdaptiveRoutingConfigPanel />
-
 			{Boolean(routingError) && !routingDisabled && (
 				<Alert variant="destructive">
 					<AlertCircle />
@@ -379,7 +192,7 @@ export default function AdaptiveRoutingPage() {
 					<AlertCircle />
 					<AlertTitle>Adaptive routing is not enabled</AlertTitle>
 					<AlertDescription>
-						Enable adaptive routing in the configuration panel above to start real-time traffic monitoring and health scoring.
+						请在 <strong>Provider Routing Rules</strong> 中创建 <strong>Adaptive Load Balancing</strong> 规则。这个页面现在只负责状态观测，不再直接承载策略配置。
 					</AlertDescription>
 				</Alert>
 			)}
@@ -454,13 +267,19 @@ export default function AdaptiveRoutingPage() {
 								))}
 							</SelectContent>
 						</Select>
-						<Input
-							value={modelFilter}
-							onChange={(event) => setModelFilter(event.target.value)}
-							placeholder="Filter model..."
-							className="w-[180px]"
-							data-testid="adaptive-routing-model-filter"
-						/>
+						<Select value={modelFilter} onValueChange={setModelFilter}>
+							<SelectTrigger className="w-[180px]" data-testid="adaptive-routing-model-filter">
+								<SelectValue placeholder="All Models" />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="all">All Models</SelectItem>
+								{modelOptions.map((model) => (
+									<SelectItem key={model} value={model}>
+										{model}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
 					</div>
 
 					{/* Total Traffic Distribution */}

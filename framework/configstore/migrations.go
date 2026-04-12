@@ -336,6 +336,9 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationAddRoutingRuleAdaptiveColumns(ctx, db); err != nil {
 		return err
 	}
+	if err := migrationEnsureRoutingRuleAdaptiveColumns(ctx, db); err != nil {
+		return err
+	}
 	if err := migrationAddGuardrailTables(ctx, db); err != nil {
 		return err
 	}
@@ -5034,6 +5037,57 @@ func migrationAddRoutingRuleAdaptiveColumns(ctx context.Context, db *gorm.DB) er
 	}})
 	if err := m.Migrate(); err != nil {
 		return fmt.Errorf("error running routing_rule_adaptive_columns migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationEnsureRoutingRuleAdaptiveColumns restores the routing_rules.rule_type and
+// routing_rules.adaptive_config columns for per-rule adaptive routing. These columns may
+// be missing on databases created while adaptive routing was temporarily modeled as a
+// global-only feature.
+func migrationEnsureRoutingRuleAdaptiveColumns(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "ensure_routing_rule_adaptive_columns",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+
+			if !mg.HasColumn(&tables.TableRoutingRule{}, "rule_type") {
+				if err := mg.AddColumn(&tables.TableRoutingRule{}, "RuleType"); err != nil {
+					return fmt.Errorf("failed to add rule_type column to routing_rules: %w", err)
+				}
+			}
+			if !mg.HasColumn(&tables.TableRoutingRule{}, "adaptive_config") {
+				if err := mg.AddColumn(&tables.TableRoutingRule{}, "AdaptiveConfig"); err != nil {
+					return fmt.Errorf("failed to add adaptive_config column to routing_rules: %w", err)
+				}
+			}
+
+			if err := tx.Model(&tables.TableRoutingRule{}).
+				Where("COALESCE(rule_type, '') = ''").
+				Update("rule_type", "direct").Error; err != nil {
+				return fmt.Errorf("failed to backfill routing_rules.rule_type: %w", err)
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			if mg.HasColumn(&tables.TableRoutingRule{}, "adaptive_config") {
+				if err := mg.DropColumn(&tables.TableRoutingRule{}, "adaptive_config"); err != nil {
+					return fmt.Errorf("failed to drop adaptive_config column from routing_rules: %w", err)
+				}
+			}
+			if mg.HasColumn(&tables.TableRoutingRule{}, "rule_type") {
+				if err := mg.DropColumn(&tables.TableRoutingRule{}, "rule_type"); err != nil {
+					return fmt.Errorf("failed to drop rule_type column from routing_rules: %w", err)
+				}
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error running ensure_routing_rule_adaptive_columns migration: %s", err.Error())
 	}
 	return nil
 }

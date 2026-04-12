@@ -421,8 +421,8 @@ func (p *GovernancePlugin) HTTPTransportPreHook(ctx *schemas.BifrostContext, req
 		if err != nil {
 			return nil, err
 		}
-		// Mark for marshal if a routing rule matched
-		if routingDecision != nil {
+		// Mark for marshal only when the matched rule rewrites the request body directly.
+		if routingDecision != nil && routingDecision.RuleType != "adaptive" {
 			needsMarshal = true
 		}
 	}
@@ -486,9 +486,14 @@ func (p *GovernancePlugin) governLargePayload(ctx *schemas.BifrostContext, req *
 	// Apply routing rules (read-only: decisions still affect downstream evaluation)
 	if hasRoutingRules {
 		var err error
-		payload, _, err = p.applyRoutingRules(ctx, req, payload, virtualKey)
+		payload, routingDecision, err := p.applyRoutingRules(ctx, req, payload, virtualKey)
 		if err != nil {
 			return nil, err
+		}
+		if routingDecision != nil && routingDecision.RuleType != "adaptive" {
+			if newModel, ok := payload["model"].(string); ok && newModel != originalModel {
+				metadata.Model = newModel
+			}
 		}
 	}
 
@@ -833,6 +838,15 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 	// If a routing rule matched, apply the decision
 	if decision != nil {
 		p.logger.Debug("[Governance] Routing rule matched: %s", decision.MatchedRuleName)
+		schemas.AppendToContextList(ctx, schemas.BifrostContextKeyRoutingEnginesUsed, schemas.RoutingEngineRoutingRule)
+
+		if decision.RuleType == "adaptive" {
+			ctx.SetValue(schemas.BifrostContextKeyGovernanceAdaptiveRoutingConfig, cloneAdaptiveRoutingConfig(decision.AdaptiveConfig))
+			ctx.SetValue(schemas.BifrostContextKeyGovernanceAdaptiveRoutingTargets, cloneAdaptiveRoutingTargets(decision.AdaptiveTargets))
+			ctx.SetValue(schemas.BifrostContextKeyGovernanceAdaptiveRoutingFallbacks, append([]string(nil), decision.Fallbacks...))
+			p.logger.Debug("[Governance] Matched adaptive routing rule: provider=%s, model=%s, targets=%d", decision.Provider, decision.Model, len(decision.AdaptiveTargets))
+			return body, decision, nil
+		}
 
 		// Update model in request body
 		if strings.Contains(req.Path, "/genai") {
@@ -860,9 +874,6 @@ func (p *GovernancePlugin) applyRoutingRules(ctx *schemas.BifrostContext, req *s
 			}
 			body["model"] = newModel
 		}
-		// Append routing-rule to routing engines used
-		schemas.AppendToContextList(ctx, schemas.BifrostContextKeyRoutingEnginesUsed, schemas.RoutingEngineRoutingRule)
-
 		// Add fallbacks if present
 		if len(decision.Fallbacks) > 0 {
 			body["fallbacks"] = decision.Fallbacks

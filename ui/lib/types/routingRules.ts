@@ -12,13 +12,29 @@ export interface RoutingTarget {
 	weight: number;
 }
 
+export type RoutingRuleType = "direct" | "adaptive";
+
+export interface AdaptiveRuleConfig {
+	enabled: boolean;
+	key_balancing_enabled?: boolean;
+	direction_routing_enabled?: boolean;
+}
+
+export const DEFAULT_ADAPTIVE_RULE_CONFIG: AdaptiveRuleConfig = {
+	enabled: true,
+	key_balancing_enabled: true,
+	direction_routing_enabled: true,
+};
+
 export interface RoutingRule {
 	id: string;
 	name: string;
 	description: string;
 	cel_expression: string;
+	rule_type: RoutingRuleType;
 	targets: RoutingTarget[];
 	fallbacks?: string[];
+	adaptive_config?: AdaptiveRuleConfig;
 	scope: "global" | "team" | "customer" | "virtual_key";
 	scope_id?: string;
 	priority: number;
@@ -32,8 +48,10 @@ export interface CreateRoutingRuleRequest {
 	name: string;
 	description?: string;
 	cel_expression?: string;
+	rule_type?: RoutingRuleType;
 	targets: RoutingTarget[];
 	fallbacks?: string[];
+	adaptive_config?: AdaptiveRuleConfig;
 	scope: string;
 	scope_id?: string;
 	priority: number;
@@ -74,8 +92,10 @@ export interface RoutingRuleFormData {
 	name: string;
 	description: string;
 	cel_expression: string;
+	rule_type: RoutingRuleType;
 	targets: RoutingTargetFormData[];
 	fallbacks: string[];
+	adaptive_config?: AdaptiveRuleConfig;
 	scope: string;
 	scope_id: string;
 	priority: number;
@@ -109,6 +129,7 @@ export const DEFAULT_ROUTING_RULE_FORM_DATA: RoutingRuleFormData = {
 	name: "",
 	description: "",
 	cel_expression: "",
+	rule_type: "direct",
 	targets: [DEFAULT_ROUTING_TARGET],
 	fallbacks: [],
 	scope: RoutingRuleScope.Global,

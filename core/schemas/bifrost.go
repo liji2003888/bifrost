@@ -178,6 +178,9 @@ const (
 	BifrostContextKeyGovernanceUserID                    BifrostContextKey = "bifrost-governance-user-id"           // string (to store the user ID (set by enterprise governance plugin - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyGovernanceRoutingRuleID             BifrostContextKey = "bifrost-governance-routing-rule-id"   // string (to store the routing rule ID (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyGovernanceRoutingRuleName           BifrostContextKey = "bifrost-governance-routing-rule-name" // string (to store the routing rule name (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
+	BifrostContextKeyGovernanceAdaptiveRoutingConfig     BifrostContextKey = "bifrost-governance-adaptive-routing-config"    // map[string]any (adaptive rule config captured from a matched routing rule)
+	BifrostContextKeyGovernanceAdaptiveRoutingTargets    BifrostContextKey = "bifrost-governance-adaptive-routing-targets"   // []framework/configstore/tables.TableRoutingTarget (candidate provider/model directions for adaptive rules)
+	BifrostContextKeyGovernanceAdaptiveRoutingFallbacks  BifrostContextKey = "bifrost-governance-adaptive-routing-fallbacks" // []string (additional static fallbacks defined on an adaptive rule)
 	BifrostContextKeyGovernanceIncludeOnlyKeys           BifrostContextKey = "bf-governance-include-only-keys"      // []string (to store the include-only key IDs for provider config routing (set by bifrost governance plugin - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyNumberOfRetries                     BifrostContextKey = "bifrost-number-of-retries"            // int (to store the number of retries (set by bifrost - DO NOT SET THIS MANUALLY))
 	BifrostContextKeyFallbackIndex                       BifrostContextKey = "bifrost-fallback-index"               // int (to store the fallback index (set by bifrost - DO NOT SET THIS MANUALLY)) 0 for primary, 1 for first fallback, etc.

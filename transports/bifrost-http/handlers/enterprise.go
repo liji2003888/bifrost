@@ -23,7 +23,9 @@ import (
 type LoadBalancerStatusProvider interface {
 	Enabled() bool
 	ListSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.RouteStatus
+	ListLocalSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.RouteStatus
 	ListDirectionSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.DirectionStatus
+	ListLocalDirectionSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.DirectionStatus
 }
 
 // LoadBalancerConfigManager provides access to the adaptive routing configuration.
@@ -472,7 +474,30 @@ func (h *EnterpriseHandler) getInternalAdaptiveRoutingStatus(ctx *fasthttp.Reque
 
 	provider := schemas.ModelProvider(strings.TrimSpace(string(ctx.QueryArgs().Peek("provider"))))
 	model := strings.TrimSpace(string(ctx.QueryArgs().Peek("model")))
-	SendJSON(ctx, h.collectAdaptiveRoutingStatus(clusterRequestContext(), provider, model, false))
+	response := adaptiveRoutingStatusResponse{
+		Cluster:    false,
+		NodeID:     h.clusterNodeID(),
+		Routes:     make([]clusterRouteStatus, 0),
+		Directions: make([]clusterDirectionStatus, 0),
+	}
+	localNodeID := h.clusterNodeID()
+	for _, route := range lb.ListLocalSnapshots(provider, model) {
+		response.Routes = append(response.Routes, clusterRouteStatus{
+			RouteStatus: route,
+			NodeID:      localNodeID,
+			Source:      localClusterSource,
+		})
+	}
+	for _, direction := range lb.ListLocalDirectionSnapshots(provider, model) {
+		response.Directions = append(response.Directions, clusterDirectionStatus{
+			DirectionStatus: direction,
+			NodeID:          localNodeID,
+			Source:          localClusterSource,
+		})
+	}
+	sortClusterRoutes(response.Routes)
+	sortClusterDirections(response.Directions)
+	SendJSON(ctx, response)
 }
 
 // getAdaptiveRoutingConfig returns the current adaptive routing (load balancer) configuration.
@@ -731,14 +756,20 @@ func (h *EnterpriseHandler) collectAdaptiveRoutingStatus(ctx context.Context, pr
 
 	localNodeID := h.clusterNodeID()
 	if lb != nil {
-		for _, route := range lb.ListSnapshots(provider, model) {
+		localRoutes := lb.ListSnapshots(provider, model)
+		localDirections := lb.ListDirectionSnapshots(provider, model)
+		if includeCluster {
+			localRoutes = lb.ListLocalSnapshots(provider, model)
+			localDirections = lb.ListLocalDirectionSnapshots(provider, model)
+		}
+		for _, route := range localRoutes {
 			response.Routes = append(response.Routes, clusterRouteStatus{
 				RouteStatus: route,
 				NodeID:      localNodeID,
 				Source:      localClusterSource,
 			})
 		}
-		for _, direction := range lb.ListDirectionSnapshots(provider, model) {
+		for _, direction := range localDirections {
 			response.Directions = append(response.Directions, clusterDirectionStatus{
 				DirectionStatus: direction,
 				NodeID:          localNodeID,

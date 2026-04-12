@@ -266,6 +266,53 @@ func TestEvaluateRoutingRules_GlobalRuleMatches(t *testing.T) {
 	assert.Equal(t, "Global Rule", decision.MatchedRuleName)
 }
 
+func TestEvaluateRoutingRules_AdaptiveRuleReturnsAdaptiveDecision(t *testing.T) {
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	bgCtx := schemas.NewBifrostContext(context.Background(), time.Now())
+
+	engine, err := NewRoutingEngine(store, NewMockLogger())
+	require.NoError(t, err)
+
+	rule := &configstoreTables.TableRoutingRule{
+		ID:            "adaptive-1",
+		Name:          "Adaptive Rule",
+		CelExpression: "model == 'gpt-4o'",
+		RuleType:      "adaptive",
+		Targets: []configstoreTables.TableRoutingTarget{
+			{Provider: bifrost.Ptr("openai"), Model: bifrost.Ptr("gpt-4o"), Weight: 1},
+			{Provider: bifrost.Ptr("anthropic"), Model: bifrost.Ptr("claude-sonnet-4"), Weight: 1},
+		},
+		ParsedAdaptiveConfig: map[string]any{
+			"enabled":                   true,
+			"direction_routing_enabled": true,
+			"key_balancing_enabled":     true,
+		},
+		Enabled:  true,
+		Scope:    "global",
+		Priority: 0,
+	}
+
+	require.NoError(t, store.UpdateRoutingRuleInMemory(rule))
+
+	ctx := &RoutingContext{
+		Provider:    schemas.OpenAI,
+		Model:       "gpt-4o",
+		Headers:     map[string]string{},
+		QueryParams: map[string]string{},
+	}
+
+	decision, err := engine.EvaluateRoutingRules(bgCtx, ctx)
+	require.NoError(t, err)
+	require.NotNil(t, decision)
+	assert.Equal(t, "adaptive", decision.RuleType)
+	assert.Equal(t, "openai", decision.Provider)
+	assert.Equal(t, "gpt-4o", decision.Model)
+	assert.Len(t, decision.AdaptiveTargets, 2)
+	assert.True(t, decision.AdaptiveConfig["direction_routing_enabled"].(bool))
+	assert.Equal(t, "adaptive-1", decision.MatchedRuleID)
+}
+
 // TestEvaluateRoutingRules_MultiTargetDeterministicWithPinnedKey tests weighted target selection
 // with a seeded/stubbed approach: one target carries all the weight (1.0) and the other carries
 // none (0.0). Because selectWeightedTarget accumulates weights and picks the first target whose

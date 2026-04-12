@@ -161,12 +161,12 @@ type BifrostHTTPServer struct {
 	Client *bifrost.Bifrost
 	Config *lib.Config
 
-	ClusterService    *enterprisecfg.ClusterService
-	AuditService      *enterprisecfg.AuditService
-	LogExportService  *enterprisecfg.LogExportService
-	ExportScheduler   *enterprisecfg.ExportScheduler
-	AlertManager      *enterprisecfg.AlertManager
-	VaultService      *enterprisecfg.VaultService
+	ClusterService   *enterprisecfg.ClusterService
+	AuditService     *enterprisecfg.AuditService
+	LogExportService *enterprisecfg.LogExportService
+	ExportScheduler  *enterprisecfg.ExportScheduler
+	AlertManager     *enterprisecfg.AlertManager
+	VaultService     *enterprisecfg.VaultService
 
 	clusterConfigReporter   *clusterConfigSyncReporter
 	clusterConfigSelfHealer *clusterConfigSelfHealer
@@ -1601,6 +1601,9 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		if s.clusterConfigSelfHealer != nil {
 			s.clusterConfigSelfHealer.Start(s.Ctx)
 		}
+	}
+	if clusterAdaptiveRoutingSyncer := newClusterAdaptiveRoutingSyncer(s); clusterAdaptiveRoutingSyncer != nil {
+		clusterAdaptiveRoutingSyncer.Start(s.Ctx)
 	}
 	return nil
 }

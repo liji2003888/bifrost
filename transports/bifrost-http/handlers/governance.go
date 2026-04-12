@@ -144,8 +144,10 @@ type CreateRoutingRuleRequest struct {
 	Description   string          `json:"description,omitempty"`
 	Enabled       *bool           `json:"enabled,omitempty"` // nil = use DB default (true)
 	CelExpression string          `json:"cel_expression"`
+	RuleType      string          `json:"rule_type,omitempty"`
 	Targets       []RoutingTarget `json:"targets"`           // Required; weights must sum to 1
 	Fallbacks     []string        `json:"fallbacks,omitempty"`
+	AdaptiveConfig map[string]any `json:"adaptive_config,omitempty"`
 	Scope         string          `json:"scope,omitempty"` // Defaults to "global" if not provided
 	ScopeID       *string         `json:"scope_id,omitempty"`
 	Query         map[string]any  `json:"query,omitempty"`
@@ -158,8 +160,10 @@ type UpdateRoutingRuleRequest struct {
 	Description   *string         `json:"description,omitempty"`
 	Enabled       *bool           `json:"enabled,omitempty"`
 	CelExpression *string         `json:"cel_expression,omitempty"`
+	RuleType      *string         `json:"rule_type,omitempty"`
 	Targets       []RoutingTarget `json:"targets,omitempty"` // If provided, replaces all existing targets; weights must sum to 1
 	Fallbacks     []string        `json:"fallbacks,omitempty"`
+	AdaptiveConfig map[string]any `json:"adaptive_config,omitempty"`
 	Query         map[string]any  `json:"query,omitempty"`
 	Priority      *int            `json:"priority,omitempty"`
 	Scope         *string         `json:"scope,omitempty"`
@@ -3192,14 +3196,27 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Validate targets
-	if len(req.Targets) == 0 {
-		SendError(ctx, 400, "at least one target is required")
-		return
-	}
-	if err := validateRoutingTargets(req.Targets); err != nil {
+	ruleType := normalizeRoutingRuleType(req.RuleType)
+	if err := validateRoutingRuleType(ruleType); err != nil {
 		SendError(ctx, 400, err.Error())
 		return
+	}
+
+	switch ruleType {
+	case "direct":
+		if len(req.Targets) == 0 {
+			SendError(ctx, 400, "at least one target is required for direct rules")
+			return
+		}
+		if err := validateRoutingTargets(req.Targets); err != nil {
+			SendError(ctx, 400, err.Error())
+			return
+		}
+	case "adaptive":
+		if err := validateAdaptiveRoutingTargets(req.Targets); err != nil {
+			SendError(ctx, 400, err.Error())
+			return
+		}
 	}
 
 	// Set defaults and normalize scope/scope_id
@@ -3246,12 +3263,14 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		Description:     req.Description,
 		Enabled:         enabled,
 		CelExpression:   req.CelExpression,
+		RuleType:        ruleType,
 		Targets:         targets,
 		Scope:           scope,
 		ScopeID:         req.ScopeID,
 		Priority:        req.Priority,
 		ParsedFallbacks: req.Fallbacks,
 		ParsedQuery:     req.Query,
+		ParsedAdaptiveConfig: cloneClusterAdaptiveConfigMap(req.AdaptiveConfig),
 	}
 
 	// Create in database
@@ -3313,14 +3332,31 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 	if req.CelExpression != nil {
 		rule.CelExpression = *req.CelExpression
 	}
-	if req.Targets != nil {
-		if len(req.Targets) == 0 {
-			SendError(ctx, 400, "at least one routing target is required")
-			return
-		}
-		if err := validateRoutingTargets(req.Targets); err != nil {
+	if req.RuleType != nil {
+		ruleType := normalizeRoutingRuleType(*req.RuleType)
+		if err := validateRoutingRuleType(ruleType); err != nil {
 			SendError(ctx, 400, err.Error())
 			return
+		}
+		rule.RuleType = ruleType
+	}
+	if req.Targets != nil {
+		ruleType := normalizeRoutingRuleType(rule.RuleType)
+		switch ruleType {
+		case "direct":
+			if len(req.Targets) == 0 {
+				SendError(ctx, 400, "at least one routing target is required for direct rules")
+				return
+			}
+			if err := validateRoutingTargets(req.Targets); err != nil {
+				SendError(ctx, 400, err.Error())
+				return
+			}
+		case "adaptive":
+			if err := validateAdaptiveRoutingTargets(req.Targets); err != nil {
+				SendError(ctx, 400, err.Error())
+				return
+			}
 		}
 		newTargets := make([]configstoreTables.TableRoutingTarget, 0, len(req.Targets))
 		for _, t := range req.Targets {
@@ -3342,6 +3378,9 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 	if req.Fallbacks != nil {
 		rule.ParsedFallbacks = req.Fallbacks
 	}
+	if req.AdaptiveConfig != nil {
+		rule.ParsedAdaptiveConfig = cloneClusterAdaptiveConfigMap(req.AdaptiveConfig)
+	}
 	if req.Scope != nil && *req.Scope != "" {
 		// Validate scope value before updating
 		if err := validateRoutingScope(*req.Scope); err != nil {
@@ -3359,6 +3398,25 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 		rule.ScopeID = nil
 	} else if rule.ScopeID == nil || *rule.ScopeID == "" {
 		SendError(ctx, 400, "scope_id field is required when scope is not global")
+		return
+	}
+
+	rule.RuleType = normalizeRoutingRuleType(rule.RuleType)
+	if err := validateRoutingRuleType(rule.RuleType); err != nil {
+		SendError(ctx, 400, err.Error())
+		return
+	}
+	if rule.RuleType == "direct" {
+		if len(rule.Targets) == 0 {
+			SendError(ctx, 400, "at least one routing target is required for direct rules")
+			return
+		}
+		if err := validateRoutingTargets(tableRoutingTargetsToRequestTargets(rule.Targets)); err != nil {
+			SendError(ctx, 400, err.Error())
+			return
+		}
+	} else if err := validateAdaptiveRoutingTargets(tableRoutingTargetsToRequestTargets(rule.Targets)); err != nil {
+		SendError(ctx, 400, err.Error())
 		return
 	}
 
@@ -3536,6 +3594,11 @@ func cloneClusterRoutingRule(rule *configstoreTables.TableRoutingRule) *configst
 	} else {
 		clone.ParsedQuery = nil
 	}
+	if rule.ParsedAdaptiveConfig != nil {
+		clone.ParsedAdaptiveConfig = cloneClusterAdaptiveConfigMap(rule.ParsedAdaptiveConfig)
+	} else {
+		clone.ParsedAdaptiveConfig = nil
+	}
 	return &clone
 }
 
@@ -3563,6 +3626,11 @@ var validRoutingScopes = map[string]bool{
 	"virtual_key": true,
 }
 
+var validRoutingRuleTypes = map[string]bool{
+	"direct":   true,
+	"adaptive": true,
+}
+
 // validateRoutingScope validates that the scope value is one of the allowed values
 func validateRoutingScope(scope string) error {
 	if scope == "" {
@@ -3570,6 +3638,21 @@ func validateRoutingScope(scope string) error {
 	}
 	if !validRoutingScopes[scope] {
 		return fmt.Errorf("invalid scope %q: must be one of: global, team, customer, virtual_key", scope)
+	}
+	return nil
+}
+
+func normalizeRoutingRuleType(ruleType string) string {
+	ruleType = strings.TrimSpace(strings.ToLower(ruleType))
+	if ruleType == "" {
+		return "direct"
+	}
+	return ruleType
+}
+
+func validateRoutingRuleType(ruleType string) error {
+	if !validRoutingRuleTypes[ruleType] {
+		return fmt.Errorf("invalid rule_type %q: must be one of: direct, adaptive", ruleType)
 	}
 	return nil
 }
@@ -3613,4 +3696,76 @@ func validateRoutingTargets(targets []RoutingTarget) error {
 		return fmt.Errorf("target weights must sum to 1, got %.4f", total)
 	}
 	return nil
+}
+
+func validateAdaptiveRoutingTargets(targets []RoutingTarget) error {
+	seen := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		if t.Weight < 0 {
+			return fmt.Errorf("adaptive targets cannot have negative weights")
+		}
+		if t.KeyID != nil && strings.TrimSpace(*t.KeyID) != "" {
+			return fmt.Errorf("adaptive routing targets cannot pin key_id; key selection is handled dynamically within the chosen provider")
+		}
+
+		provider := ""
+		if t.Provider != nil {
+			provider = strings.ToLower(strings.TrimSpace(*t.Provider))
+		}
+		model := ""
+		if t.Model != nil {
+			model = strings.TrimSpace(*t.Model)
+		}
+		if provider == "" {
+			return fmt.Errorf("adaptive routing targets must specify a provider")
+		}
+
+		key := provider + "|" + strings.ToLower(model)
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("duplicate adaptive target entry: provider=%q model=%q", provider, model)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func tableRoutingTargetsToRequestTargets(targets []configstoreTables.TableRoutingTarget) []RoutingTarget {
+	converted := make([]RoutingTarget, 0, len(targets))
+	for _, target := range targets {
+		converted = append(converted, RoutingTarget{
+			Provider: target.Provider,
+			Model:    target.Model,
+			KeyID:    target.KeyID,
+			Weight:   target.Weight,
+		})
+	}
+	return converted
+}
+
+func cloneClusterAdaptiveConfigMap(config map[string]any) map[string]any {
+	if config == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(config))
+	for key, value := range config {
+		cloned[key] = cloneClusterAdaptiveConfigValue(value)
+	}
+	return cloned
+}
+
+func cloneClusterAdaptiveConfigValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneClusterAdaptiveConfigMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for i := range typed {
+			cloned[i] = cloneClusterAdaptiveConfigValue(typed[i])
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return typed
+	}
 }

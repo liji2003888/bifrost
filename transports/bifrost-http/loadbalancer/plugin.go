@@ -11,6 +11,7 @@ import (
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 )
 
@@ -39,6 +40,20 @@ type runtimePolicy struct {
 	directionRoutingForVirtualKey bool
 	providerAllowlist             map[schemas.ModelProvider]struct{}
 	modelAllowlist                map[string]struct{}
+}
+
+type directionTarget struct {
+	Provider schemas.ModelProvider
+	Model    string
+}
+
+type requestPolicy struct {
+	source                  string
+	enabled                 bool
+	keyBalancingEnabled     bool
+	directionRoutingEnabled bool
+	directionTargets        []directionTarget
+	additionalFallbacks     []string
 }
 
 type RouteSnapshot struct {
@@ -137,6 +152,10 @@ type Tracker struct {
 	directions          sync.Map
 	routeProfiles       sync.Map
 	directionProfiles   sync.Map
+	remoteMu            sync.RWMutex
+	remoteRoutes        map[string]map[routeKey]RouteSnapshot
+	remoteDirections    map[string]map[directionKey]DirectionSnapshot
+	remoteSnapshotTTL   time.Duration
 	recomputeMu         sync.Mutex
 	lastRecomputeUnixNs int64
 	dirty               uint32
@@ -266,6 +285,14 @@ func (p *Plugin) ListSnapshots(provider schemas.ModelProvider, model string) []R
 	return tracker.ListSnapshots(provider, model)
 }
 
+func (p *Plugin) ListLocalSnapshots(provider schemas.ModelProvider, model string) []RouteStatus {
+	tracker := p.currentTracker()
+	if tracker == nil {
+		return nil
+	}
+	return tracker.ListLocalSnapshots(provider, model)
+}
+
 func (p *Plugin) DirectionSnapshot(provider schemas.ModelProvider, model string) (DirectionSnapshot, bool) {
 	tracker := p.currentTracker()
 	if tracker == nil {
@@ -280,6 +307,30 @@ func (p *Plugin) ListDirectionSnapshots(provider schemas.ModelProvider, model st
 		return nil
 	}
 	return tracker.ListDirectionSnapshots(provider, model)
+}
+
+func (p *Plugin) ListLocalDirectionSnapshots(provider schemas.ModelProvider, model string) []DirectionStatus {
+	tracker := p.currentTracker()
+	if tracker == nil {
+		return nil
+	}
+	return tracker.ListLocalDirectionSnapshots(provider, model)
+}
+
+func (p *Plugin) UpdateRemoteSnapshots(nodeID string, routes []RouteStatus, directions []DirectionStatus) {
+	tracker := p.currentTracker()
+	if tracker == nil {
+		return
+	}
+	tracker.UpdateRemoteSnapshots(nodeID, routes, directions)
+}
+
+func (p *Plugin) PruneRemoteNode(nodeID string) {
+	tracker := p.currentTracker()
+	if tracker == nil {
+		return
+	}
+	tracker.PruneRemoteNode(nodeID)
 }
 
 func (p *Plugin) currentTracker() *Tracker {
@@ -318,8 +369,20 @@ func (p *Plugin) policySnapshot() runtimePolicy {
 }
 
 func (p *Plugin) selectKey(ctx *schemas.BifrostContext, keys []schemas.Key, provider schemas.ModelProvider, model string) (schemas.Key, error) {
-	policy := p.policySnapshot()
-	if !policy.shouldUseKeyBalancing(provider, model) {
+	policy, scoped := p.resolveRequestPolicy(ctx, provider, model)
+	if scoped {
+		if !policy.shouldUseKeyBalancing() {
+			return bifrost.WeightedRandomKeySelector(ctx, keys, provider, model)
+		}
+		tracker := p.currentTracker()
+		if tracker == nil {
+			return bifrost.WeightedRandomKeySelector(ctx, keys, provider, model)
+		}
+		return tracker.SelectKey(ctx, keys, provider, model)
+	}
+
+	legacyPolicy := p.policySnapshot()
+	if !legacyPolicy.shouldUseKeyBalancing(provider, model) {
 		return bifrost.WeightedRandomKeySelector(ctx, keys, provider, model)
 	}
 
@@ -328,6 +391,88 @@ func (p *Plugin) selectKey(ctx *schemas.BifrostContext, keys []schemas.Key, prov
 		return bifrost.WeightedRandomKeySelector(ctx, keys, provider, model)
 	}
 	return tracker.SelectKey(ctx, keys, provider, model)
+}
+
+func (p *Plugin) resolveRequestPolicy(ctx *schemas.BifrostContext, provider schemas.ModelProvider, model string) (requestPolicy, bool) {
+	if scoped, ok := requestPolicyFromContext(ctx); ok {
+		return scoped, true
+	}
+
+	legacy := p.policySnapshot()
+	return requestPolicy{
+		source:                  "global",
+		enabled:                 legacy.enabled && legacy.allowsProvider(provider) && legacy.allowsModel(model),
+		keyBalancingEnabled:     legacy.keyBalancingEnabled,
+		directionRoutingEnabled: legacy.shouldUseDirectionRouting(ctx, model),
+	}, false
+}
+
+func requestPolicyFromContext(ctx *schemas.BifrostContext) (requestPolicy, bool) {
+	if ctx == nil {
+		return requestPolicy{}, false
+	}
+
+	rawConfig, _ := ctx.Value(schemas.BifrostContextKeyGovernanceAdaptiveRoutingConfig).(map[string]any)
+	rawTargets, _ := ctx.Value(schemas.BifrostContextKeyGovernanceAdaptiveRoutingTargets).([]configstoreTables.TableRoutingTarget)
+	rawFallbacks, _ := ctx.Value(schemas.BifrostContextKeyGovernanceAdaptiveRoutingFallbacks).([]string)
+	if rawConfig == nil && len(rawTargets) == 0 && len(rawFallbacks) == 0 {
+		return requestPolicy{}, false
+	}
+
+	policy := requestPolicy{
+		source:                  "routing_rule",
+		enabled:                 true,
+		keyBalancingEnabled:     true,
+		directionRoutingEnabled: len(rawTargets) > 0,
+		additionalFallbacks:     append([]string(nil), rawFallbacks...),
+	}
+	if value, ok := adaptiveConfigBool(rawConfig, "enabled"); ok {
+		policy.enabled = value
+	}
+	if value, ok := adaptiveConfigBool(rawConfig, "key_balancing_enabled"); ok {
+		policy.keyBalancingEnabled = value
+	}
+	if value, ok := adaptiveConfigBool(rawConfig, "direction_routing_enabled"); ok {
+		policy.directionRoutingEnabled = value
+	}
+	for _, target := range rawTargets {
+		policy.directionTargets = append(policy.directionTargets, directionTarget{
+			Provider: schemas.ModelProvider(strings.TrimSpace(derefString(target.Provider))),
+			Model:    strings.TrimSpace(derefString(target.Model)),
+		})
+	}
+	return policy, true
+}
+
+func (p requestPolicy) shouldUseKeyBalancing() bool {
+	return p.enabled && p.keyBalancingEnabled
+}
+
+func (p requestPolicy) shouldUseDirectionRouting() bool {
+	return p.enabled && p.directionRoutingEnabled && len(p.directionTargets) > 0
+}
+
+func adaptiveConfigBool(config map[string]any, key string) (bool, bool) {
+	if len(config) == 0 {
+		return false, false
+	}
+	value, ok := config[key]
+	if !ok {
+		return false, false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	default:
+		return false, false
+	}
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func normalizeRuntimePolicy(cfg *enterprisecfg.LoadBalancerConfig) runtimePolicy {
@@ -907,7 +1052,12 @@ func (p *Plugin) reorderFallbacks(ctx *schemas.BifrostContext, req *schemas.Bifr
 		return
 	}
 	primaryProvider, primaryModel, fallbacks := req.GetRequestFields()
-	if !p.policySnapshot().shouldUseDirectionRouting(ctx, primaryModel) {
+	policy, scoped := p.resolveRequestPolicy(ctx, primaryProvider, primaryModel)
+	if scoped {
+		if !policy.shouldUseDirectionRouting() {
+			return
+		}
+	} else if !p.policySnapshot().shouldUseDirectionRouting(ctx, primaryModel) {
 		return
 	}
 	if len(fallbacks) < 2 {

@@ -29,7 +29,10 @@ import {
 	RoutingTargetFormData,
 	DEFAULT_ROUTING_RULE_FORM_DATA,
 	DEFAULT_ROUTING_TARGET,
+	DEFAULT_ADAPTIVE_RULE_CONFIG,
 	ROUTING_RULE_SCOPES,
+	type RoutingRuleType,
+	type AdaptiveRuleConfig,
 } from "@/lib/types/routingRules";
 import {
 	useCreateRoutingRuleMutation,
@@ -113,6 +116,8 @@ export function RoutingRuleSheet({
 	const scope = watch("scope");
 	const scopeId = watch("scope_id");
 	const fallbacks = watch("fallbacks");
+	const ruleType = watch("rule_type") || "direct";
+	const [adaptiveConfig, setAdaptiveConfig] = useState<AdaptiveRuleConfig>({ ...DEFAULT_ADAPTIVE_RULE_CONFIG });
 
 	// Get available providers from configured providers, plus any provider already
 	// referenced by the current targets, existing rules' targets, or rules' fallbacks
@@ -133,18 +138,20 @@ export function RoutingRuleSheet({
 			setValue("name", editingRule.name);
 			setValue("description", editingRule.description);
 			setValue("cel_expression", editingRule.cel_expression);
+			setValue("rule_type", editingRule.rule_type || "direct");
 			setValue("fallbacks", editingRule.fallbacks || []);
 			setValue("scope", editingRule.scope);
 			setValue("scope_id", editingRule.scope_id || "");
 			setValue("priority", editingRule.priority);
 			setValue("enabled", editingRule.enabled);
+			setAdaptiveConfig({ ...DEFAULT_ADAPTIVE_RULE_CONFIG, ...(editingRule.adaptive_config || {}) });
 			if (editingRule.targets && editingRule.targets.length > 0) {
 				setTargets(editingRule.targets.map((t) => ({
 					...DEFAULT_ROUTING_TARGET,
 					provider: t.provider || "",
 					model: t.model || "",
 					key_id: t.key_id || "",
-					weight: t.weight,
+					weight: t.weight || 1,
 				})));
 			} else {
 				setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
@@ -160,6 +167,7 @@ export function RoutingRuleSheet({
 			reset();
 			setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
 			setQuery(defaultQuery);
+			setAdaptiveConfig({ ...DEFAULT_ADAPTIVE_RULE_CONFIG });
 			setBuilderKey((prev) => prev + 1);
 		}
 	}, [editingRule, open, setValue, reset]);
@@ -188,6 +196,8 @@ export function RoutingRuleSheet({
 	const totalWeight = targets.reduce((sum, t) => sum + (t.weight || 0), 0);
 
 	const onSubmit = (data: RoutingRuleFormData) => {
+		const currentRuleType = data.rule_type || "direct";
+
 		// Validate scope_id is required when scope is not global
 		if (data.scope !== "global" && !data.scope_id?.trim()) {
 			toast.error(`${data.scope === "team" ? "Team" : data.scope === "customer" ? "Customer" : "Virtual Key"} is required`);
@@ -196,18 +206,31 @@ export function RoutingRuleSheet({
 
 		// Validate targets
 		if (targets.length === 0) {
-			toast.error("At least one routing target is required");
+			toast.error(currentRuleType === "adaptive" ? "At least one adaptive candidate provider is required" : "At least one routing target is required");
 			return;
 		}
-		for (const t of targets) {
-			if (t.weight <= 0) {
-				toast.error("Each target weight must be greater than 0");
+		if (currentRuleType === "direct") {
+			for (const t of targets) {
+				if (t.weight <= 0) {
+					toast.error("Each direct target weight must be greater than 0");
+					return;
+				}
+			}
+			if (Math.abs(totalWeight - 1) > 0.001) {
+				toast.error(`Target weights must sum to 1, current total: ${totalWeight.toFixed(4)}`);
 				return;
 			}
-		}
-		if (Math.abs(totalWeight - 1) > 0.001) {
-			toast.error(`Target weights must sum to 1, current total: ${totalWeight.toFixed(4)}`);
-			return;
+		} else {
+			for (const t of targets) {
+				if (!t.provider.trim()) {
+					toast.error("Adaptive candidates must choose a provider");
+					return;
+				}
+				if (t.key_id.trim()) {
+					toast.error("Adaptive candidates cannot pin a specific key");
+					return;
+				}
+			}
 		}
 
 		// Validate regex patterns in routing rules
@@ -230,17 +253,20 @@ export function RoutingRuleSheet({
 			return provider && provider.length > 0;
 		});
 
-		const mappedTargets = targets.map(({ provider, model, key_id, weight }) => ({
-			provider: provider || undefined,
-			model: model || undefined,
-			key_id: key_id || undefined,
-			weight,
-		}));
+		const mappedTargets = targets
+			.filter(({ provider, model }) => currentRuleType === "direct" || provider.trim() !== "" || model.trim() !== "")
+			.map(({ provider, model, key_id, weight }) => ({
+				provider: provider || undefined,
+				model: model || undefined,
+				key_id: currentRuleType === "direct" ? (key_id || undefined) : undefined,
+				weight: currentRuleType === "direct" ? weight : 1,
+			}));
 
 		const payload = {
 			name: data.name,
 			description: data.description,
 			cel_expression: data.cel_expression,
+			rule_type: currentRuleType,
 			targets: mappedTargets,
 			fallbacks: validFallbacks,
 			scope: data.scope,
@@ -248,6 +274,7 @@ export function RoutingRuleSheet({
 			priority: data.priority,
 			enabled: data.enabled,
 			query: query,
+			adaptive_config: currentRuleType === "adaptive" ? adaptiveConfig : undefined,
 		};
 
 		const submitPromise = isEditing && editingRule
@@ -267,6 +294,7 @@ export function RoutingRuleSheet({
 				reset();
 				setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
 				setQuery(defaultQuery);
+				setAdaptiveConfig({ ...DEFAULT_ADAPTIVE_RULE_CONFIG });
 				setBuilderKey((prev) => prev + 1);
 				onOpenChange(false);
 				onSuccess?.();
@@ -280,6 +308,7 @@ export function RoutingRuleSheet({
 		reset();
 		setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
 		setQuery(defaultQuery);
+		setAdaptiveConfig({ ...DEFAULT_ADAPTIVE_RULE_CONFIG });
 		setBuilderKey((prev) => prev + 1);
 		onOpenChange(false);
 	};
@@ -335,6 +364,69 @@ export function RoutingRuleSheet({
 							onCheckedChange={(checked) => setValue("enabled", checked)}
 						/>
 					</div>
+
+					<div className="space-y-3">
+						<Label>Rule Type</Label>
+						<Select value={ruleType} onValueChange={(value) => setValue("rule_type", value as RoutingRuleType)}>
+							<SelectTrigger className="w-full">
+								<SelectValue placeholder="Select rule type..." />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="direct">Direct Rule</SelectItem>
+								<SelectItem value="adaptive">Adaptive Load Balancing</SelectItem>
+							</SelectContent>
+						</Select>
+						<p className="text-muted-foreground text-xs">
+							{ruleType === "adaptive"
+								? "Adaptive rules choose the best provider direction first, then let key-level balancing pick the healthiest key inside that provider."
+								: "Direct rules statically route matched traffic to one or more weighted provider/model targets."}
+						</p>
+					</div>
+
+					{ruleType === "adaptive" && (
+						<div className="space-y-4 rounded-lg border p-4">
+							<div>
+								<Label>Adaptive Policy</Label>
+								<p className="text-muted-foreground mt-1 text-xs">
+									This policy only applies to traffic matched by this routing rule. Algorithm thresholds and scoring defaults still come from the system-level adaptive engine.
+								</p>
+							</div>
+							<div className="grid gap-3 lg:grid-cols-3">
+								<div className="flex items-center justify-between rounded-lg border p-3">
+									<div className="space-y-0.5">
+										<p className="text-sm font-medium">Rule Enabled</p>
+										<p className="text-muted-foreground text-xs">Allow this rule to use adaptive selection</p>
+									</div>
+									<Switch
+										checked={adaptiveConfig.enabled}
+										onCheckedChange={(checked) => setAdaptiveConfig((current) => ({ ...current, enabled: checked }))}
+									/>
+								</div>
+								<div className="flex items-center justify-between rounded-lg border p-3">
+									<div className="space-y-0.5">
+										<p className="text-sm font-medium">Direction Routing</p>
+										<p className="text-muted-foreground text-xs">Choose provider from the candidate list below</p>
+									</div>
+									<Switch
+										checked={adaptiveConfig.direction_routing_enabled ?? true}
+										onCheckedChange={(checked) => setAdaptiveConfig((current) => ({ ...current, direction_routing_enabled: checked }))}
+										disabled={!adaptiveConfig.enabled}
+									/>
+								</div>
+								<div className="flex items-center justify-between rounded-lg border p-3">
+									<div className="space-y-0.5">
+										<p className="text-sm font-medium">Key Balancing</p>
+										<p className="text-muted-foreground text-xs">Balance keys inside the selected provider</p>
+									</div>
+									<Switch
+										checked={adaptiveConfig.key_balancing_enabled ?? true}
+										onCheckedChange={(checked) => setAdaptiveConfig((current) => ({ ...current, key_balancing_enabled: checked }))}
+										disabled={!adaptiveConfig.enabled}
+									/>
+								</div>
+							</div>
+						</div>
+					)}
 
 
 					{/* Scope and Priority - Side by Side */}
@@ -465,9 +557,11 @@ export function RoutingRuleSheet({
 					<div className="space-y-3">
 						<div className="flex items-center justify-between">
 							<div>
-								<Label>Routing Targets</Label>
+								<Label>{ruleType === "adaptive" ? "Adaptive Candidates" : "Routing Targets"}</Label>
 								<p className="text-muted-foreground text-xs mt-0.5">
-									Weights must sum to 1. Leave provider or model empty to use the incoming request value.
+									{ruleType === "adaptive"
+										? "Define the candidate provider directions for matched traffic. Provider is required, model is optional, and key pinning is intentionally disabled."
+										: "Weights must sum to 1. Leave provider or model empty to use the incoming request value."}
 								</p>
 							</div>
 							<Button
@@ -491,6 +585,7 @@ export function RoutingRuleSheet({
 									index={index}
 									availableProviders={availableProviders}
 									providersData={providersData}
+									ruleType={ruleType}
 									showRemove={targets.length > 1}
 									onUpdate={updateTarget}
 									onRemove={removeTarget}
@@ -499,12 +594,18 @@ export function RoutingRuleSheet({
 						</div>
 
 						{/* Weight sum indicator */}
-						<div className={`flex items-center justify-end gap-2 text-xs font-medium ${Math.abs(totalWeight - 1) > 0.001 ? "text-destructive" : "text-muted-foreground"}`}>
-							Total weight: {totalWeight.toFixed(4)}
-							{Math.abs(totalWeight - 1) > 0.001 && (
-								<span className="text-destructive">(must equal 1)</span>
-							)}
-						</div>
+						{ruleType === "direct" ? (
+							<div className={`flex items-center justify-end gap-2 text-xs font-medium ${Math.abs(totalWeight - 1) > 0.001 ? "text-destructive" : "text-muted-foreground"}`}>
+								Total weight: {totalWeight.toFixed(4)}
+								{Math.abs(totalWeight - 1) > 0.001 && (
+									<span className="text-destructive">(must equal 1)</span>
+								)}
+							</div>
+						) : (
+							<p className="text-muted-foreground text-xs">
+								Adaptive candidates do not use static weights. Real-time provider health and latency determine traffic share automatically.
+							</p>
+						)}
 					</div>
 
 					{/* Fallbacks */}
@@ -602,7 +703,11 @@ export function RoutingRuleSheet({
 								})
 							)}
 						</div>
-						<p className="text-muted-foreground text-xs">Fallbacks will be used in the order they are defined</p>
+						<p className="text-muted-foreground text-xs">
+							{ruleType === "adaptive"
+								? "Fallbacks are optional static escape hatches that run after adaptive candidate selection."
+								: "Fallbacks will be used in the order they are defined."}
+						</p>
 					</div>
 
 					{/* Action Buttons */}
@@ -627,12 +732,13 @@ interface TargetRowProps {
 	index: number;
 	availableProviders: string[];
 	providersData: Array<{ name: string; keys: Array<{ id: string; name: string }> }>;
+	ruleType: RoutingRuleType;
 	showRemove: boolean;
 	onUpdate: (index: number, field: keyof RoutingTargetFormData, value: string | number) => void;
 	onRemove: (index: number) => void;
 }
 
-function TargetRow({ target, index, availableProviders, providersData, showRemove, onUpdate, onRemove }: TargetRowProps) {
+function TargetRow({ target, index, availableProviders, providersData, ruleType, showRemove, onUpdate, onRemove }: TargetRowProps) {
 	const availableKeys = target.provider
 		? (providersData.find((p) => p.name === target.provider)?.keys ?? [])
 		: [];
@@ -640,22 +746,26 @@ function TargetRow({ target, index, availableProviders, providersData, showRemov
 	return (
 		<div className="rounded-lg border p-3 space-y-3" data-testid={`routing-target-${index}`}>
 			<div className="flex items-center justify-between">
-				<span className="text-sm font-medium text-muted-foreground">Target {index + 1}</span>
+				<span className="text-sm font-medium text-muted-foreground">
+					{ruleType === "adaptive" ? `Candidate ${index + 1}` : `Target ${index + 1}`}
+				</span>
 				<div className="flex items-center gap-2">
-					<div className="flex items-center gap-1.5">
-						<Label htmlFor={`routing-target-${index}-weight-input`} className="text-xs text-muted-foreground shrink-0">Weight</Label>
-						<Input
-							id={`routing-target-${index}-weight-input`}
-							type="number"
-							min={0.001}
-							max={1}
-							step={0.001}
-							value={target.weight}
-							onChange={(e) => onUpdate(index, "weight", parseFloat(e.target.value) || 0)}
-							className="h-8 w-24 text-sm"
-							data-testid={`routing-target-${index}-weight-input`}
-						/>
-					</div>
+					{ruleType === "direct" && (
+						<div className="flex items-center gap-1.5">
+							<Label htmlFor={`routing-target-${index}-weight-input`} className="text-xs text-muted-foreground shrink-0">Weight</Label>
+							<Input
+								id={`routing-target-${index}-weight-input`}
+								type="number"
+								min={0.001}
+								max={1}
+								step={0.001}
+								value={target.weight}
+								onChange={(e) => onUpdate(index, "weight", parseFloat(e.target.value) || 0)}
+								className="h-8 w-24 text-sm"
+								data-testid={`routing-target-${index}-weight-input`}
+							/>
+						</div>
+					)}
 					{showRemove && (
 						<Button
 							type="button"
@@ -690,7 +800,7 @@ function TargetRow({ target, index, availableProviders, providersData, showRemov
 								className="flex-1 h-9 text-sm"
 								data-testid={`routing-target-${index}-provider-select`}
 							>
-								<SelectValue placeholder="Incoming (optional)" />
+								<SelectValue placeholder={ruleType === "adaptive" ? "Select provider..." : "Incoming (optional)"} />
 							</SelectTrigger>
 							<SelectContent>
 								{availableProviders.map((prov) => (
@@ -756,7 +866,7 @@ function TargetRow({ target, index, availableProviders, providersData, showRemov
 				</div>
 			</div>
 
-			{target.provider && (availableKeys.length > 0 || target.key_id) && (
+			{ruleType === "direct" && target.provider && (availableKeys.length > 0 || target.key_id) && (
 				<div className="space-y-1.5">
 					<Label id={`routing-target-${index}-apikey-label`} className="text-xs">API Key <span className="text-muted-foreground">(optional — leave unset for load-balanced selection)</span></Label>
 					<div className="flex gap-1.5">

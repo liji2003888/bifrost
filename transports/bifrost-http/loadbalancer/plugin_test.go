@@ -442,3 +442,79 @@ func TestUpdateConfigPreservesMetricsAndDisablesDirectionRoutingInPlace(t *testi
 		t.Fatalf("expected no adaptive fallback generation when direction routing is disabled, got %#v", mutated["fallbacks"])
 	}
 }
+
+func TestRemoteSnapshotsMergeIntoClusterAwareStatusWithoutAffectingLocalStatus(t *testing.T) {
+	plugin, err := Init(&enterprisecfg.LoadBalancerConfig{
+		Enabled: true,
+		TrackerConfig: &enterprisecfg.LoadBalancerTrackerConfig{
+			MinimumSamples:   1,
+			ExplorationRatio: 0,
+			JitterRatio:      0,
+		},
+	}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
+
+	plugin.tracker.Observe(schemas.OpenAI, "gpt-4o", "key-a", 120, true)
+	plugin.tracker.ObserveDirection(schemas.OpenAI, "gpt-4o", 120, true)
+
+	remoteUpdatedAt := time.Now().UTC()
+	plugin.UpdateRemoteSnapshots("peer-a", []RouteStatus{
+		{
+			Provider: schemas.OpenAI,
+			Model:    "gpt-4o",
+			KeyID:    "key-a",
+			RouteSnapshot: RouteSnapshot{
+				Samples:             4,
+				Successes:           3,
+				Failures:            1,
+				ConsecutiveFailures: 1,
+				ErrorEWMA:           0.2,
+				LatencyEWMA:         240,
+				LastUpdated:         remoteUpdatedAt,
+			},
+		},
+	}, []DirectionStatus{
+		{
+			Provider: schemas.OpenAI,
+			Model:    "gpt-4o",
+			DirectionSnapshot: DirectionSnapshot{
+				Samples:             4,
+				Successes:           3,
+				Failures:            1,
+				ConsecutiveFailures: 1,
+				ErrorEWMA:           0.2,
+				LatencyEWMA:         240,
+				LastUpdated:         remoteUpdatedAt,
+			},
+		},
+	})
+
+	localRoutes := plugin.ListLocalSnapshots(schemas.OpenAI, "gpt-4o")
+	if len(localRoutes) != 1 || localRoutes[0].Samples != 1 {
+		t.Fatalf("expected local-only route status to stay at 1 sample, got %+v", localRoutes)
+	}
+
+	mergedRoutes := plugin.ListSnapshots(schemas.OpenAI, "gpt-4o")
+	if len(mergedRoutes) != 1 || mergedRoutes[0].Samples != 5 || mergedRoutes[0].Failures != 1 {
+		t.Fatalf("expected merged route status to include remote snapshots, got %+v", mergedRoutes)
+	}
+
+	localDirections := plugin.ListLocalDirectionSnapshots(schemas.OpenAI, "gpt-4o")
+	if len(localDirections) != 1 || localDirections[0].Samples != 1 {
+		t.Fatalf("expected local-only direction status to stay at 1 sample, got %+v", localDirections)
+	}
+
+	mergedDirections := plugin.ListDirectionSnapshots(schemas.OpenAI, "gpt-4o")
+	if len(mergedDirections) != 1 || mergedDirections[0].Samples != 5 || mergedDirections[0].Failures != 1 {
+		t.Fatalf("expected merged direction status to include remote snapshots, got %+v", mergedDirections)
+	}
+
+	plugin.PruneRemoteNode("peer-a")
+	postPrune := plugin.ListSnapshots(schemas.OpenAI, "gpt-4o")
+	if len(postPrune) != 1 || postPrune[0].Samples != 1 {
+		t.Fatalf("expected pruning remote node to restore local-only aggregate, got %+v", postPrune)
+	}
+}

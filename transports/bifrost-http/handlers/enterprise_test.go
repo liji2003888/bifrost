@@ -24,9 +24,11 @@ import (
 )
 
 type fakeLoadBalancerStatusProvider struct {
-	routes     []loadbalancer.RouteStatus
-	directions []loadbalancer.DirectionStatus
-	enabled    bool
+	routes          []loadbalancer.RouteStatus
+	localRoutes     []loadbalancer.RouteStatus
+	directions      []loadbalancer.DirectionStatus
+	localDirections []loadbalancer.DirectionStatus
+	enabled         bool
 }
 
 type fakeClusterConfigApplier struct {
@@ -59,9 +61,43 @@ func (f *fakeLoadBalancerStatusProvider) ListSnapshots(provider schemas.ModelPro
 	return result
 }
 
+func (f *fakeLoadBalancerStatusProvider) ListLocalSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.RouteStatus {
+	if len(f.localRoutes) == 0 {
+		return f.ListSnapshots(provider, model)
+	}
+	result := make([]loadbalancer.RouteStatus, 0, len(f.localRoutes))
+	for _, route := range f.localRoutes {
+		if provider != "" && route.Provider != provider {
+			continue
+		}
+		if model != "" && route.Model != model {
+			continue
+		}
+		result = append(result, route)
+	}
+	return result
+}
+
 func (f *fakeLoadBalancerStatusProvider) ListDirectionSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.DirectionStatus {
 	result := make([]loadbalancer.DirectionStatus, 0, len(f.directions))
 	for _, direction := range f.directions {
+		if provider != "" && direction.Provider != provider {
+			continue
+		}
+		if model != "" && direction.Model != model {
+			continue
+		}
+		result = append(result, direction)
+	}
+	return result
+}
+
+func (f *fakeLoadBalancerStatusProvider) ListLocalDirectionSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.DirectionStatus {
+	if len(f.localDirections) == 0 {
+		return f.ListDirectionSnapshots(provider, model)
+	}
+	result := make([]loadbalancer.DirectionStatus, 0, len(f.localDirections))
+	for _, direction := range f.localDirections {
 		if provider != "" && direction.Provider != provider {
 			continue
 		}
@@ -278,6 +314,63 @@ func TestCollectAdaptiveRoutingStatusAggregatesPeerResponses(t *testing.T) {
 	}
 	if !foundRemote {
 		t.Fatalf("expected remote route to be present, got %+v", response.Routes)
+	}
+}
+
+func TestGetInternalAdaptiveRoutingStatusReturnsLocalOnlySnapshots(t *testing.T) {
+	store, err := kvstore.New(kvstore.Config{CleanupInterval: time.Minute})
+	if err != nil {
+		t.Fatalf("kvstore.New() error = %v", err)
+	}
+	defer store.Close()
+
+	cluster, err := enterprisecfg.NewClusterService(&enterprisecfg.ClusterConfig{
+		Enabled:   true,
+		AuthToken: schemas.NewEnvVar("cluster-secret"),
+	}, store, "local-node", bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("NewClusterService() error = %v", err)
+	}
+	defer cluster.Close()
+
+	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, func() LoadBalancerStatusProvider {
+		return &fakeLoadBalancerStatusProvider{
+			routes: []loadbalancer.RouteStatus{
+				{Provider: schemas.OpenAI, Model: "gpt-4", KeyID: "merged-key", RouteSnapshot: loadbalancer.RouteSnapshot{Samples: 5}},
+			},
+			localRoutes: []loadbalancer.RouteStatus{
+				{Provider: schemas.OpenAI, Model: "gpt-4", KeyID: "local-key", RouteSnapshot: loadbalancer.RouteSnapshot{Samples: 2}},
+			},
+			directions: []loadbalancer.DirectionStatus{
+				{Provider: schemas.OpenAI, Model: "gpt-4", DirectionSnapshot: loadbalancer.DirectionSnapshot{Samples: 5}},
+			},
+			localDirections: []loadbalancer.DirectionStatus{
+				{Provider: schemas.OpenAI, Model: "gpt-4", DirectionSnapshot: loadbalancer.DirectionSnapshot{Samples: 2}},
+			},
+			enabled: true,
+		}
+	}, nil, nil, nil)
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(fasthttp.MethodGet)
+	ctx.Request.Header.Set(enterprisecfg.ClusterAuthHeader, "cluster-secret")
+	ctx.Request.SetRequestURI(clusterAdaptiveRoutingEndpoint)
+
+	handler.getInternalAdaptiveRoutingStatus(ctx)
+
+	if ctx.Response.StatusCode() != fasthttp.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	}
+
+	var response adaptiveRoutingStatusResponse
+	if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(response.Routes) != 1 || response.Routes[0].KeyID != "local-key" {
+		t.Fatalf("expected only local route snapshot, got %+v", response.Routes)
+	}
+	if len(response.Directions) != 1 || response.Directions[0].Samples != 2 {
+		t.Fatalf("expected only local direction snapshot, got %+v", response.Directions)
 	}
 }
 
