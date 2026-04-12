@@ -1509,13 +1509,57 @@
           "type": "string",
           "description": "CEL (Common Expression Language) expression for rule evaluation"
         },
+        "rule_type": {
+          "type": "string",
+          "enum": ["direct", "adaptive"],
+          "description": "Rule type: 'direct' for static routing, 'adaptive' for adaptive load balancing",
+          "default": "direct"
+        },
         "targets": {
           "type": "array",
-          "minItems": 1,
-          "description": "Weighted routing targets. Weights must sum to 1. Omit provider or model to use the incoming request value.",
+          "description": "Weighted routing targets. Weights must sum to 1. Required for direct rules, optional for adaptive rules.",
           "items": {
             "$ref": "#/$defs/routing_target"
           }
+        },
+        "adaptive_config": {
+          "type": "object",
+          "description": "Adaptive load balancing configuration (only used when rule_type is 'adaptive')",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable adaptive load balancing for this rule's scope",
+              "default": true
+            },
+            "key_balancing_enabled": {
+              "type": "boolean",
+              "description": "Dynamically rebalance provider keys based on latency and error metrics"
+            },
+            "direction_routing_enabled": {
+              "type": "boolean",
+              "description": "Allow adaptive routing to choose provider for bare model requests"
+            },
+            "direction_routing_for_virtual_keys": {
+              "type": "boolean",
+              "description": "Allow direction routing for virtual key traffic"
+            },
+            "provider_allowlist": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Limit adaptive routing to these providers"
+            },
+            "model_allowlist": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Limit adaptive routing to these models"
+            },
+            "tracker_config": {
+              "type": "object",
+              "description": "Per-rule tracker tuning overrides",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": false
         },
         "provider": false,
         "model": false,
@@ -1547,7 +1591,7 @@
           "additionalProperties": true
         }
       },
-      "required": ["id", "name", "targets"],
+      "required": ["id", "name"],
       "additionalProperties": false
     },
     "virtual_key_provider_config": {

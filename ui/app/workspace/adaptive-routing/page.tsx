@@ -6,29 +6,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
 import { useDebouncedValue } from "@/hooks/useDebounce";
 import { ProviderLabels } from "@/lib/constants/logs";
-import { getErrorMessage, useGetAdaptiveRoutingStatusQuery, useGetAlertsQuery, useGetCoreConfigQuery, useGetProvidersQuery, useUpdateCoreConfigMutation } from "@/lib/store";
-import { DefaultLoadBalancerConfig, LoadBalancerConfig } from "@/lib/types/config";
+import { getErrorMessage, useGetAdaptiveRoutingStatusQuery, useGetAlertsQuery, useGetProvidersQuery } from "@/lib/store";
 import { formatLatencyMs, formatPercentage, formatRelativeTimestamp, isServiceDisabledError } from "@/lib/utils/enterprise";
-import { AlertCircle, ArrowUpDown, Gauge, RefreshCw, Route, ShieldAlert } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { toast } from "sonner";
-
-function scoreBadgeVariant(score: number): "default" | "secondary" | "destructive" {
-	if (score >= 0.85) {
-		return "default";
-	}
-	if (score >= 0.6) {
-		return "secondary";
-	}
-	return "destructive";
-}
+import { AlertCircle, CheckCircle2, RefreshCw, Wifi } from "lucide-react";
+import { useMemo, useState } from "react";
 
 function stateBadgeVariant(state: "healthy" | "degraded" | "failed" | "recovering"): "default" | "secondary" | "destructive" | "outline" {
 	switch (state) {
@@ -46,14 +31,9 @@ function stateBadgeVariant(state: "healthy" | "degraded" | "failed" | "recoverin
 export default function AdaptiveRoutingPage() {
 	const [providerFilter, setProviderFilter] = useState("all");
 	const [modelFilter, setModelFilter] = useState("");
-	const [configDraft, setConfigDraft] = useState<LoadBalancerConfig>(DefaultLoadBalancerConfig);
-	const [providerAllowlistText, setProviderAllowlistText] = useState("");
-	const [modelAllowlistText, setModelAllowlistText] = useState("");
 	const debouncedModelFilter = useDebouncedValue(modelFilter, 250);
 
 	const { data: providers = [] } = useGetProvidersQuery();
-	const { data: bifrostConfig, isFetching: configFetching } = useGetCoreConfigQuery({ fromDB: true });
-	const [updateCoreConfig, { isLoading: configSaving }] = useUpdateCoreConfigMutation();
 	const {
 		data: routingStatus,
 		error: routingError,
@@ -73,71 +53,59 @@ export default function AdaptiveRoutingPage() {
 	);
 	const {
 		data: alertsResponse,
-		error: alertsError,
 		isFetching: alertsFetching,
 		refetch: refetchAlerts,
 	} = useGetAlertsQuery(
-		{
-			cluster: true,
-		},
-		{
-			pollingInterval: 15000,
-			skipPollingIfUnfocused: true,
-		},
+		{ cluster: true },
+		{ pollingInterval: 15000, skipPollingIfUnfocused: true },
 	);
-	const serverLoadBalancerConfig = useMemo(
-		() => normalizeLoadBalancerConfig(bifrostConfig?.load_balancer_config),
-		[bifrostConfig?.load_balancer_config],
-	);
-
-	useEffect(() => {
-		setConfigDraft(serverLoadBalancerConfig);
-		setProviderAllowlistText(serverLoadBalancerConfig.provider_allowlist?.join(", ") || "");
-		setModelAllowlistText(serverLoadBalancerConfig.model_allowlist?.join(", ") || "");
-	}, [serverLoadBalancerConfig]);
 
 	const routingDisabled = isServiceDisabledError(routingError);
-	const alertsDisabled = isServiceDisabledError(alertsError);
 
 	const directionRows = useMemo(
 		() =>
-			(routingStatus?.directions ?? []).slice().sort((a, b) => {
-				if (a.score === b.score) {
-					return b.samples - a.samples;
-				}
-				return b.score - a.score;
-			}),
+			(routingStatus?.directions ?? []).slice().sort((a, b) => b.weight - a.weight),
 		[routingStatus?.directions],
 	);
 	const routeRows = useMemo(
 		() =>
-			(routingStatus?.routes ?? []).slice().sort((a, b) => {
-				if (a.consecutive_failures === b.consecutive_failures) {
-					return b.error_ewma - a.error_ewma;
-				}
-				return b.consecutive_failures - a.consecutive_failures;
-			}),
+			(routingStatus?.routes ?? []).slice().sort((a, b) => b.weight - a.weight),
 		[routingStatus?.routes],
 	);
-	const activeAlerts = alertsResponse?.alerts ?? [];
-	const routingWarnings = routingStatus?.warnings ?? [];
-	const alertWarnings = alertsResponse?.warnings ?? [];
-	const degradedRoutes = routeRows.filter((route) => route.consecutive_failures > 0 || route.error_ewma >= 0.4).length;
-	const lowScoreDirections = directionRows.filter((direction) => direction.score < 0.6).length;
-	const reportingNodes = useMemo(() => {
-		const values = new Set<string>();
-		for (const route of routeRows) {
-			if (route.node_id) {
-				values.add(route.node_id);
-			}
+
+	// Live metrics computed from direction + route data
+	const totalRequests = useMemo(() => {
+		let total = 0;
+		for (const d of directionRows) {
+			total += d.samples;
 		}
-		for (const direction of directionRows) {
-			if (direction.node_id) {
-				values.add(direction.node_id);
-			}
+		return total;
+	}, [directionRows]);
+
+	const successRate = useMemo(() => {
+		let totalSamples = 0;
+		let totalSuccesses = 0;
+		for (const d of directionRows) {
+			totalSamples += d.samples;
+			totalSuccesses += d.successes;
 		}
-		return values.size;
-	}, [directionRows, routeRows]);
+		return totalSamples > 0 ? (totalSuccesses / totalSamples) * 100 : 100;
+	}, [directionRows]);
+
+	// Traffic distribution: aggregate by key (provider+model+key_id)
+	const trafficDistribution = useMemo(() => {
+		const totalSamples = routeRows.reduce((sum, r) => sum + r.samples, 0);
+		return routeRows
+			.filter((r) => r.samples > 0)
+			.map((r) => ({
+				key_id: r.key_id,
+				provider: r.provider,
+				model: r.model,
+				samples: r.samples,
+				share: totalSamples > 0 ? (r.samples / totalSamples) * 100 : 0,
+			}))
+			.sort((a, b) => b.share - a.share);
+	}, [routeRows]);
 
 	const providerOptions = useMemo(() => {
 		const values = new Set<string>();
@@ -149,262 +117,81 @@ export default function AdaptiveRoutingPage() {
 		}
 		return [...values].sort((a, b) => a.localeCompare(b));
 	}, [providers, routingStatus?.routes]);
-	const configDirty = useMemo(
-		() => JSON.stringify(serverLoadBalancerConfig) !== JSON.stringify(configDraft),
-		[configDraft, serverLoadBalancerConfig],
-	);
 
-	const updateTrackerValue = <K extends keyof NonNullable<LoadBalancerConfig["tracker_config"]>>(
-		key: K,
-		value: number,
-	) => {
-		setConfigDraft((current) => ({
-			...current,
-			tracker_config: {
-				...current.tracker_config,
-				[key]: value,
-			},
-		}));
-	};
-
-	const handleSaveConfig = async () => {
-		if (!bifrostConfig) {
-			toast.error("Adaptive routing configuration is not available yet.");
-			return;
-		}
-		try {
-			await updateCoreConfig({
-				...bifrostConfig,
-				load_balancer_config: configDraft,
-			}).unwrap();
-			toast.success("Adaptive routing configuration updated successfully.");
-		} catch (error) {
-			toast.error(getErrorMessage(error));
-		}
-	};
+	const activeAlerts = alertsResponse?.alerts ?? [];
 
 	if (routingLoading && !routingStatus) {
 		return <FullPageLoader />;
 	}
 
+	const connectedTime = new Date().toLocaleTimeString();
+
 	return (
 		<div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
+			{/* Header */}
 			<div className="flex flex-wrap items-start justify-between gap-3">
 				<div>
-					<h1 className="text-2xl font-semibold tracking-tight">Adaptive Routing</h1>
+					<h1 className="text-2xl font-semibold tracking-tight">Live Metrics</h1>
 					<p className="text-muted-foreground mt-1 text-sm">
-						Inspect key-level route scoring, provider direction health, precomputed weights, and the active enterprise alert feed.
+						Real-time adaptive routing status, traffic distribution, and provider health.
 					</p>
 				</div>
-				<div className="flex flex-wrap gap-2">
-					<Select value={providerFilter} onValueChange={setProviderFilter}>
-						<SelectTrigger className="w-[180px]" data-testid="adaptive-routing-provider-filter">
-							<SelectValue placeholder="All providers" />
-						</SelectTrigger>
-						<SelectContent>
-							<SelectItem value="all">All providers</SelectItem>
-							{providerOptions.map((provider) => (
-								<SelectItem key={provider} value={provider}>
-									{ProviderLabels[provider as keyof typeof ProviderLabels] || provider}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-					<Input
-						value={modelFilter}
-						onChange={(event) => setModelFilter(event.target.value)}
-						placeholder="Filter model"
-						className="w-[220px]"
-						data-testid="adaptive-routing-model-filter"
-					/>
-					<Button
-						variant="outline"
-						onClick={() => {
-							void refetchRouting();
-							void refetchAlerts();
-						}}
-						isLoading={routingFetching || alertsFetching}
-						dataTestId="adaptive-routing-refresh"
-					>
-						{!(routingFetching || alertsFetching) && <RefreshCw />}
-						Refresh
-					</Button>
-				</div>
-			</div>
-
-			<Card className="shadow-none">
-				<CardHeader className="pb-3">
-					<CardTitle className="text-base">Adaptive Routing Policy</CardTitle>
-				</CardHeader>
-				<CardContent className="space-y-4">
-					<Alert variant="info">
-						<AlertCircle />
-						<AlertDescription>
-							For enterprise private-model deployments, a safer default is to keep <strong>provider direction routing</strong> off and use
-							<strong> key balancing</strong> only. That keeps explicit provider or virtual-key governance intact while still smoothing key or endpoint health.
-						</AlertDescription>
-					</Alert>
-
-					<div className="grid gap-4 lg:grid-cols-2">
-						<SettingToggle
-							label="Enable Adaptive Routing"
-							description="Master switch for all adaptive load-balancing logic and status collection."
-							checked={configDraft.enabled}
-							onCheckedChange={(checked) => setConfigDraft((current) => ({ ...current, enabled: checked }))}
-						/>
-						<SettingToggle
-							label="Enable Key Balancing"
-							description="Dynamically rebalance provider keys for the same provider/model using latency and error metrics."
-							checked={configDraft.key_balancing_enabled}
-							onCheckedChange={(checked) => setConfigDraft((current) => ({ ...current, key_balancing_enabled: checked }))}
-							disabled={!configDraft.enabled}
-						/>
-						<SettingToggle
-							label="Enable Provider Direction Routing"
-							description="Allow Adaptive Routing to choose a provider when the incoming request uses a bare model name with no explicit provider or fallbacks."
-							checked={configDraft.direction_routing_enabled}
-							onCheckedChange={(checked) => setConfigDraft((current) => ({ ...current, direction_routing_enabled: checked }))}
-							disabled={!configDraft.enabled}
-						/>
-						<SettingToggle
-							label="Allow Direction Routing For Virtual Keys"
-							description="Disabled by default so governance-managed virtual-key traffic is not globally rerouted across providers."
-							checked={configDraft.direction_routing_for_virtual_keys}
-							onCheckedChange={(checked) =>
-								setConfigDraft((current) => ({ ...current, direction_routing_for_virtual_keys: checked }))
-							}
-							disabled={!configDraft.enabled || !configDraft.direction_routing_enabled}
-						/>
+				<div className="flex items-center gap-3">
+					<div className="flex items-center gap-2 text-sm">
+						{routingDisabled ? (
+							<span className="text-muted-foreground">Disconnected</span>
+						) : (
+							<>
+								<Wifi className="h-4 w-4 text-green-500" />
+								<span className="text-muted-foreground">Connected</span>
+								<span className="text-muted-foreground">{connectedTime}</span>
+							</>
+						)}
 					</div>
-
-					<div className="grid gap-4 lg:grid-cols-2">
-						<div className="space-y-2">
-							<Label htmlFor="adaptive-provider-allowlist">Provider Allowlist</Label>
-							<Textarea
-								id="adaptive-provider-allowlist"
-								value={providerAllowlistText}
-								onChange={(event) => {
-									const value = event.target.value;
-									setProviderAllowlistText(value);
-									setConfigDraft((current) => ({ ...current, provider_allowlist: parseList(value) }));
-								}}
-								rows={3}
-								disabled={!configDraft.enabled}
-								placeholder="openai, anthropic, vllm"
-								data-testid="adaptive-routing-provider-allowlist"
-							/>
-							<p className="text-muted-foreground text-xs">Leave empty to apply across all providers.</p>
-						</div>
-						<div className="space-y-2">
-							<Label htmlFor="adaptive-model-allowlist">Model Allowlist</Label>
-							<Textarea
-								id="adaptive-model-allowlist"
-								value={modelAllowlistText}
-								onChange={(event) => {
-									const value = event.target.value;
-									setModelAllowlistText(value);
-									setConfigDraft((current) => ({ ...current, model_allowlist: parseList(value) }));
-								}}
-								rows={3}
-								disabled={!configDraft.enabled}
-								placeholder="gpt-4o, claude-sonnet-4, qwen-max"
-								data-testid="adaptive-routing-model-allowlist"
-							/>
-							<p className="text-muted-foreground text-xs">Leave empty to apply across all models.</p>
-						</div>
-					</div>
-
-					<div className="space-y-3 rounded-lg border p-4">
-						<div>
-							<h3 className="text-sm font-medium">Tracker Tuning</h3>
-							<p className="text-muted-foreground mt-1 text-xs">
-								These parameters affect how fast scores react to latency and error changes. They sync through ConfigStore and cluster propagation.
-							</p>
-						</div>
-						<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-							<NumericSetting
-								label="Minimum Samples"
-								value={configDraft.tracker_config?.minimum_samples ?? DefaultLoadBalancerConfig.tracker_config!.minimum_samples!}
-								min={1}
-								onChange={(value) => updateTrackerValue("minimum_samples", value)}
-							/>
-							<NumericSetting
-								label="Recompute Interval (s)"
-								value={
-									configDraft.tracker_config?.recompute_interval_seconds ??
-									DefaultLoadBalancerConfig.tracker_config!.recompute_interval_seconds!
-								}
-								min={1}
-								onChange={(value) => updateTrackerValue("recompute_interval_seconds", value)}
-							/>
-							<NumericSetting
-								label="Exploration Ratio"
-								value={configDraft.tracker_config?.exploration_ratio ?? DefaultLoadBalancerConfig.tracker_config!.exploration_ratio!}
-								min={0}
-								max={1}
-								step={0.01}
-								onChange={(value) => updateTrackerValue("exploration_ratio", value)}
-							/>
-							<NumericSetting
-								label="Jitter Ratio"
-								value={configDraft.tracker_config?.jitter_ratio ?? DefaultLoadBalancerConfig.tracker_config!.jitter_ratio!}
-								min={0}
-								max={1}
-								step={0.01}
-								onChange={(value) => updateTrackerValue("jitter_ratio", value)}
-							/>
-							<NumericSetting
-								label="Degraded Error Threshold"
-								value={
-									configDraft.tracker_config?.degraded_error_threshold ??
-									DefaultLoadBalancerConfig.tracker_config!.degraded_error_threshold!
-								}
-								min={0}
-								max={1}
-								step={0.01}
-								onChange={(value) => updateTrackerValue("degraded_error_threshold", value)}
-							/>
-							<NumericSetting
-								label="Failed Error Threshold"
-								value={
-									configDraft.tracker_config?.failed_error_threshold ??
-									DefaultLoadBalancerConfig.tracker_config!.failed_error_threshold!
-								}
-								min={0}
-								max={1}
-								step={0.01}
-								onChange={(value) => updateTrackerValue("failed_error_threshold", value)}
-							/>
-							<NumericSetting
-								label="Weight Floor"
-								value={configDraft.tracker_config?.weight_floor ?? DefaultLoadBalancerConfig.tracker_config!.weight_floor!}
-								min={1}
-								onChange={(value) => updateTrackerValue("weight_floor", value)}
-							/>
-							<NumericSetting
-								label="Weight Ceiling"
-								value={configDraft.tracker_config?.weight_ceiling ?? DefaultLoadBalancerConfig.tracker_config!.weight_ceiling!}
-								min={1}
-								onChange={(value) => updateTrackerValue("weight_ceiling", value)}
-							/>
-						</div>
-					</div>
-
-					<div className="flex flex-wrap items-center justify-between gap-3">
-						<p className="text-muted-foreground text-xs">
-							Changes are persisted in ConfigStore and propagated across cluster peers. Controlled self-heal will also reconcile drift if a node misses a reload.
-						</p>
+					<div className="flex flex-wrap gap-2">
+						<Select value={providerFilter} onValueChange={setProviderFilter}>
+							<SelectTrigger className="w-[160px]" data-testid="adaptive-routing-provider-filter">
+								<SelectValue placeholder="All Providers" />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="all">All Providers</SelectItem>
+								{providerOptions.map((provider) => (
+									<SelectItem key={provider} value={provider}>
+										{ProviderLabels[provider as keyof typeof ProviderLabels] || provider}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+						<Select value="all">
+							<SelectTrigger className="w-[140px]">
+								<SelectValue placeholder="All Models" />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="all">All Models</SelectItem>
+							</SelectContent>
+						</Select>
+						<Input
+							value={modelFilter}
+							onChange={(event) => setModelFilter(event.target.value)}
+							placeholder="Filter model..."
+							className="w-[180px]"
+							data-testid="adaptive-routing-model-filter"
+						/>
 						<Button
-							onClick={() => void handleSaveConfig()}
-							isLoading={configSaving}
-							disabled={!configDirty || configFetching}
-							dataTestId="adaptive-routing-save"
+							variant="outline"
+							onClick={() => {
+								void refetchRouting();
+								void refetchAlerts();
+							}}
+							isLoading={routingFetching || alertsFetching}
+							dataTestId="adaptive-routing-refresh"
 						>
-							Save Configuration
+							{!(routingFetching || alertsFetching) && <RefreshCw className="h-4 w-4" />}
+							Refresh
 						</Button>
 					</div>
-				</CardContent>
-			</Card>
+				</div>
+			</div>
 
 			{Boolean(routingError) && !routingDisabled && (
 				<Alert variant="destructive">
@@ -419,50 +206,40 @@ export default function AdaptiveRoutingPage() {
 					<AlertCircle />
 					<AlertTitle>Adaptive routing is not enabled</AlertTitle>
 					<AlertDescription>
-						Enable `load_balancer_config.enabled` to expose real-time route scores, fallback ordering, and traffic health signals.
+						Create an adaptive routing rule in <strong>Routing Rules</strong> to enable real-time traffic monitoring and health scoring.
 					</AlertDescription>
 				</Alert>
 			)}
 
 			{routingStatus && (
 				<>
-					<div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-						<SummaryCard label="Tracked Routes" value={routeRows.length.toLocaleString()} icon={Route} />
-						<SummaryCard label="Direction Scores" value={directionRows.length.toLocaleString()} icon={ArrowUpDown} />
-						<SummaryCard label="Degraded Routes" value={degradedRoutes.toLocaleString()} icon={ShieldAlert} />
-						<SummaryCard
-							label={routingStatus?.cluster ? "Nodes Reporting" : "Low-Score Directions"}
-							value={routingStatus?.cluster ? reportingNodes.toLocaleString() : lowScoreDirections.toLocaleString()}
-							icon={routingStatus?.cluster ? Gauge : Gauge}
-						/>
+					{/* Live Metrics Summary */}
+					<div className="grid gap-4 md:grid-cols-2">
+						<Card className="shadow-none">
+							<CardContent className="flex items-center justify-center px-6 py-8">
+								<div className="text-center">
+									<p className="font-mono text-4xl font-semibold">{totalRequests.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</p>
+									<p className="text-muted-foreground mt-1 text-sm">Total Requests</p>
+								</div>
+							</CardContent>
+						</Card>
+						<Card className="shadow-none">
+							<CardContent className="flex items-center justify-center px-6 py-8">
+								<div className="text-center">
+									<p className="font-mono text-4xl font-semibold">{formatPercentage(successRate)}</p>
+									<p className="text-muted-foreground mt-1 text-sm">Success Rate</p>
+								</div>
+							</CardContent>
+						</Card>
 					</div>
 
-					{routingWarnings.length > 0 && (
-						<Alert variant="info">
-							<AlertCircle />
-							<AlertTitle>Partial cluster aggregation</AlertTitle>
-							<AlertDescription>
-								{routingWarnings.length} peer{routingWarnings.length === 1 ? "" : "s"} could not be queried for adaptive routing status.
-							</AlertDescription>
-						</Alert>
-					)}
-
-					<Card className="shadow-none">
-						<CardHeader className="pb-3">
-							<CardTitle className="text-base">Active Alerts</CardTitle>
-						</CardHeader>
-						<CardContent>
-							{Boolean(alertsError) && !alertsDisabled && (
-								<Alert variant="destructive" className="mb-4">
-									<AlertCircle />
-									<AlertDescription>{getErrorMessage(alertsError)}</AlertDescription>
-								</Alert>
-							)}
-							{alertsDisabled ? (
-								<p className="text-muted-foreground text-sm">Alerts are not enabled for this deployment.</p>
-							) : activeAlerts.length === 0 ? (
-								<p className="text-muted-foreground text-sm">No active alerts right now.</p>
-							) : (
+					{/* Active Alerts */}
+					{activeAlerts.length > 0 && (
+						<Card className="shadow-none border-orange-200 dark:border-orange-800">
+							<CardHeader className="pb-3">
+								<CardTitle className="text-base">Active Alerts</CardTitle>
+							</CardHeader>
+							<CardContent>
 								<div className="grid gap-3 lg:grid-cols-2">
 									{activeAlerts.map((alert) => (
 										<div key={`${alert.node_id || alert.address || "local"}:${alert.id}`} className="rounded-sm border p-4">
@@ -478,245 +255,262 @@ export default function AdaptiveRoutingPage() {
 												</Badge>
 											</div>
 											<div className="text-muted-foreground mt-3 flex flex-wrap gap-4 text-xs">
-												<span>{alert.node_id || alertsResponse?.node_id || "local"}</span>
+												<span>{alert.node_id || "local"}</span>
 												<span>{alert.type}</span>
 												<span>{formatRelativeTimestamp(alert.triggered_at)}</span>
 											</div>
 										</div>
 									))}
 								</div>
-							)}
-							{alertWarnings.length > 0 && (
-								<p className="text-muted-foreground mt-4 text-xs">
-									{alertWarnings.length} peer{alertWarnings.length === 1 ? "" : "s"} did not return alert data during aggregation.
-								</p>
-							)}
+							</CardContent>
+						</Card>
+					)}
+
+					{/* Total Traffic Distribution */}
+					<Card className="shadow-none">
+						<CardHeader className="flex flex-row items-center justify-between pb-3">
+							<CardTitle className="text-base">Total Traffic Distribution in the last 10s</CardTitle>
+							<div className="flex gap-2">
+								<Select value={providerFilter} onValueChange={setProviderFilter}>
+									<SelectTrigger className="h-8 w-[140px] text-xs">
+										<SelectValue placeholder="All Providers" />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="all">All Providers</SelectItem>
+										{providerOptions.map((p) => (
+											<SelectItem key={p} value={p}>
+												{ProviderLabels[p as keyof typeof ProviderLabels] || p}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							</div>
+						</CardHeader>
+						<CardContent>
+							<Table data-testid="traffic-distribution-table">
+								<TableHeader>
+									<TableRow>
+										<TableHead>Key</TableHead>
+										<TableHead>Provider</TableHead>
+										<TableHead>Model</TableHead>
+										<TableHead className="w-[40%]">Total Traffic</TableHead>
+										<TableHead className="text-right">Share</TableHead>
+									</TableRow>
+								</TableHeader>
+								<TableBody>
+									{trafficDistribution.length === 0 ? (
+										<TableRow>
+											<TableCell colSpan={5} className="h-24 text-center">
+												<span className="text-muted-foreground text-sm">No traffic data collected yet.</span>
+											</TableCell>
+										</TableRow>
+									) : (
+										trafficDistribution.map((row) => (
+											<TableRow key={`${row.provider}/${row.model}/${row.key_id}`}>
+												<TableCell className="font-mono text-xs">{row.key_id}</TableCell>
+												<TableCell>{ProviderLabels[row.provider as keyof typeof ProviderLabels] || row.provider}</TableCell>
+												<TableCell className="font-mono text-xs">{row.model}</TableCell>
+												<TableCell>
+													<div className="flex items-center gap-2">
+														<div className="h-2.5 flex-1 rounded-full bg-muted">
+															<div
+																className="h-2.5 rounded-full bg-primary"
+																style={{ width: `${Math.min(row.share, 100)}%` }}
+															/>
+														</div>
+													</div>
+												</TableCell>
+												<TableCell className="text-right font-mono text-sm">{formatPercentage(row.share)}</TableCell>
+											</TableRow>
+										))
+									)}
+								</TableBody>
+							</Table>
 						</CardContent>
 					</Card>
 
-					<div className="grid gap-4 xl:grid-cols-2">
-						<Card className="shadow-none">
-							<CardHeader className="pb-3">
-								<CardTitle className="text-base">Direction Health</CardTitle>
-							</CardHeader>
-							<CardContent>
-								<Table containerClassName="max-h-[32rem]" data-testid="adaptive-directions-table">
-									<TableHeader>
+					{/* Direction Weights & Performance */}
+					<Card className="shadow-none">
+						<CardHeader className="flex flex-row items-center justify-between pb-3">
+							<CardTitle className="text-base">Direction Weights &amp; Performance</CardTitle>
+							<div className="flex gap-2">
+								<Select value={providerFilter} onValueChange={setProviderFilter}>
+									<SelectTrigger className="h-8 w-[140px] text-xs">
+										<SelectValue placeholder="All Providers" />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="all">All Providers</SelectItem>
+										{providerOptions.map((p) => (
+											<SelectItem key={p} value={p}>
+												{ProviderLabels[p as keyof typeof ProviderLabels] || p}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							</div>
+						</CardHeader>
+						<CardContent>
+							<Table containerClassName="max-h-[32rem]" data-testid="adaptive-directions-table">
+								<TableHeader>
+									<TableRow>
+										<TableHead>Provider</TableHead>
+										<TableHead>Model</TableHead>
+										<TableHead>Weight &darr;</TableHead>
+										<TableHead>Success Rate</TableHead>
+										<TableHead>Errors &uarr;</TableHead>
+										<TableHead>U (Utilization Penalty)</TableHead>
+										<TableHead>E (Error Penalty)</TableHead>
+										<TableHead>L (Latency Penalty) &uarr;</TableHead>
+										<TableHead>Health Status</TableHead>
+									</TableRow>
+								</TableHeader>
+								<TableBody>
+									{directionRows.length === 0 ? (
 										<TableRow>
-											<TableHead>Node</TableHead>
-											<TableHead>Provider</TableHead>
-											<TableHead>Model</TableHead>
-											<TableHead>State</TableHead>
-											<TableHead>Score</TableHead>
-											<TableHead>Weight</TableHead>
-											<TableHead>Share</TableHead>
-											<TableHead>Samples</TableHead>
-											<TableHead>Latency</TableHead>
-											<TableHead>Error EWMA</TableHead>
-											<TableHead>Updated</TableHead>
+											<TableCell colSpan={9} className="h-24 text-center">
+												<span className="text-muted-foreground text-sm">No direction metrics have been collected yet.</span>
+											</TableCell>
 										</TableRow>
-									</TableHeader>
-									<TableBody>
-										{directionRows.length === 0 ? (
-											<TableRow>
-												<TableCell colSpan={10} className="h-24 text-center">
-													<span className="text-muted-foreground text-sm">No direction metrics have been collected yet.</span>
-												</TableCell>
-											</TableRow>
-										) : (
-											directionRows.map((direction) => (
-												<TableRow key={`${direction.node_id || direction.address || "local"}/${direction.provider}/${direction.model}`}>
-													<TableCell className="font-mono text-xs">{direction.node_id || direction.address || "local"}</TableCell>
+									) : (
+										directionRows.map((direction) => {
+											const dirSuccessRate = direction.samples > 0
+												? (direction.successes / direction.samples) * 100
+												: 100;
+											const utilPenalty = direction.actual_traffic_share > 0
+												? Math.max(0, direction.actual_traffic_share - direction.expected_traffic_share).toFixed(2)
+												: "0.00";
+											const errPenalty = direction.error_ewma.toFixed(2);
+											const latPenalty = direction.latency_ewma > 0 ? (direction.latency_ewma / 1000).toFixed(2) : "0.00";
+											return (
+												<TableRow key={`${direction.node_id || "local"}/${direction.provider}/${direction.model}`}>
 													<TableCell>{ProviderLabels[direction.provider as keyof typeof ProviderLabels] || direction.provider}</TableCell>
 													<TableCell className="font-mono text-xs">{direction.model || "*"}</TableCell>
 													<TableCell>
-														<Badge variant={stateBadgeVariant(direction.state)}>{direction.state}</Badge>
+														<div className="text-sm">
+															{direction.weight.toLocaleString()}
+															<span className="text-muted-foreground ml-1 text-xs">
+																{formatPercentage(direction.expected_traffic_share * 100)}
+															</span>
+														</div>
 													</TableCell>
 													<TableCell>
-														<Badge variant={scoreBadgeVariant(direction.score)}>{direction.score.toFixed(2)}</Badge>
+														<span className={dirSuccessRate >= 99 ? "text-green-600 font-medium" : dirSuccessRate >= 90 ? "text-yellow-600" : "text-red-600 font-medium"}>
+															{formatPercentage(dirSuccessRate)}
+														</span>
+														<span className="text-muted-foreground ml-1 text-xs">{direction.samples} reqs</span>
 													</TableCell>
-													<TableCell>{direction.weight.toLocaleString()}</TableCell>
-													<TableCell className="text-xs">
-														{formatPercentage(direction.actual_traffic_share * 100)} / {formatPercentage(direction.expected_traffic_share * 100)}
+													<TableCell>{direction.failures}</TableCell>
+													<TableCell>
+														<span className={Number(utilPenalty) > 0 ? "text-yellow-600" : "text-green-600"}>{utilPenalty}</span>
 													</TableCell>
-													<TableCell>{direction.samples.toLocaleString()}</TableCell>
-													<TableCell>{formatLatencyMs(direction.latency_ewma)}</TableCell>
-													<TableCell>{formatPercentage(direction.error_ewma * 100)}</TableCell>
-													<TableCell className="text-xs">{formatRelativeTimestamp(direction.last_updated)}</TableCell>
+													<TableCell>
+														<span className={Number(errPenalty) > 0.01 ? "text-red-600" : "text-green-600"}>{errPenalty}</span>
+													</TableCell>
+													<TableCell>
+														<span className={Number(latPenalty) > 1 ? "text-yellow-600" : ""}>{latPenalty}</span>
+													</TableCell>
+													<TableCell>
+														<Badge variant={stateBadgeVariant(direction.state)}>{direction.state}</Badge>
+													</TableCell>
 												</TableRow>
-											))
-										)}
-									</TableBody>
-								</Table>
-							</CardContent>
-						</Card>
+											);
+										})
+									)}
+								</TableBody>
+							</Table>
+						</CardContent>
+					</Card>
 
-						<Card className="shadow-none">
-							<CardHeader className="pb-3">
-								<CardTitle className="text-base">Key Route Health</CardTitle>
-							</CardHeader>
-							<CardContent>
-								<Table containerClassName="max-h-[32rem]" data-testid="adaptive-routes-table">
-									<TableHeader>
+					{/* Route Weights & Performance */}
+					<Card className="shadow-none">
+						<CardHeader className="flex flex-row items-center justify-between pb-3">
+							<CardTitle className="text-base">Route Weights &amp; Performance</CardTitle>
+							<div className="flex gap-2">
+								<Select value={providerFilter} onValueChange={setProviderFilter}>
+									<SelectTrigger className="h-8 w-[140px] text-xs">
+										<SelectValue placeholder="All Providers" />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="all">All Providers</SelectItem>
+										{providerOptions.map((p) => (
+											<SelectItem key={p} value={p}>
+												{ProviderLabels[p as keyof typeof ProviderLabels] || p}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							</div>
+						</CardHeader>
+						<CardContent>
+							<Table containerClassName="max-h-[32rem]" data-testid="adaptive-routes-table">
+								<TableHeader>
+									<TableRow>
+										<TableHead>Key</TableHead>
+										<TableHead>Provider</TableHead>
+										<TableHead>Model</TableHead>
+										<TableHead>Weight &darr;</TableHead>
+										<TableHead>Success Rate</TableHead>
+										<TableHead>Errors &uarr;</TableHead>
+										<TableHead>U (Utilization Penalty)</TableHead>
+										<TableHead>E (Error Penalty)</TableHead>
+										<TableHead>L (Latency Penalty)</TableHead>
+										<TableHead>M (Momentum)</TableHead>
+									</TableRow>
+								</TableHeader>
+								<TableBody>
+									{routeRows.length === 0 ? (
 										<TableRow>
-											<TableHead>Node</TableHead>
-											<TableHead>Provider</TableHead>
-											<TableHead>Model</TableHead>
-											<TableHead>Key</TableHead>
-											<TableHead>State</TableHead>
-											<TableHead>Score</TableHead>
-											<TableHead>Weight</TableHead>
-											<TableHead>Share</TableHead>
-											<TableHead>Samples</TableHead>
-											<TableHead>Success Rate</TableHead>
-											<TableHead>Latency</TableHead>
-											<TableHead>Failures</TableHead>
-											<TableHead>Updated</TableHead>
+											<TableCell colSpan={10} className="h-24 text-center">
+												<span className="text-muted-foreground text-sm">No route metrics have been collected yet.</span>
+											</TableCell>
 										</TableRow>
-									</TableHeader>
-									<TableBody>
-										{routeRows.length === 0 ? (
-											<TableRow>
-												<TableCell colSpan={13} className="h-24 text-center">
-													<span className="text-muted-foreground text-sm">No route metrics have been collected yet.</span>
-												</TableCell>
-											</TableRow>
-										) : (
-											routeRows.map((route) => {
-												const successRate = route.samples > 0 ? (route.successes / route.samples) * 100 : 0;
-												return (
-													<TableRow key={`${route.node_id || route.address || "local"}/${route.provider}/${route.model}/${route.key_id}`}>
-														<TableCell className="font-mono text-xs">{route.node_id || route.address || "local"}</TableCell>
-														<TableCell>{ProviderLabels[route.provider as keyof typeof ProviderLabels] || route.provider}</TableCell>
-														<TableCell className="font-mono text-xs">{route.model || "*"}</TableCell>
-														<TableCell className="font-mono text-xs">{route.key_id}</TableCell>
-														<TableCell>
-															<Badge variant={stateBadgeVariant(route.state)}>{route.state}</Badge>
-														</TableCell>
-														<TableCell>
-															<Badge variant={scoreBadgeVariant(route.score)}>{route.score.toFixed(2)}</Badge>
-														</TableCell>
-														<TableCell>{route.weight.toLocaleString()}</TableCell>
-														<TableCell className="text-xs">
-															{formatPercentage(route.actual_traffic_share * 100)} / {formatPercentage(route.expected_traffic_share * 100)}
-														</TableCell>
-														<TableCell>{route.samples.toLocaleString()}</TableCell>
-														<TableCell>{formatPercentage(successRate)}</TableCell>
-														<TableCell>{formatLatencyMs(route.latency_ewma)}</TableCell>
-														<TableCell>
-															<div className="flex items-center gap-2">
-																<Badge variant={route.consecutive_failures > 0 ? "destructive" : "outline"}>
-																	{route.consecutive_failures}
-																</Badge>
-																<span className="text-muted-foreground text-xs">{route.failures} total</span>
-															</div>
-														</TableCell>
-														<TableCell className="text-xs">{formatRelativeTimestamp(route.last_updated)}</TableCell>
-													</TableRow>
-												);
-											})
-										)}
-									</TableBody>
-								</Table>
-							</CardContent>
-						</Card>
-					</div>
+									) : (
+										routeRows.map((route) => {
+											const routeSuccessRate = route.samples > 0 ? (route.successes / route.samples) * 100 : 0;
+											const utilPenalty = route.actual_traffic_share > 0
+												? Math.max(0, route.actual_traffic_share - route.expected_traffic_share).toFixed(2)
+												: "0.00";
+											const errPenalty = route.error_ewma.toFixed(2);
+											const latPenalty = route.latency_ewma > 0 ? (route.latency_ewma / 1000).toFixed(2) : "0.00";
+											const momentum = route.score.toFixed(2);
+											return (
+												<TableRow key={`${route.node_id || "local"}/${route.provider}/${route.model}/${route.key_id}`}>
+													<TableCell className="font-mono text-xs">{route.key_id}</TableCell>
+													<TableCell>{ProviderLabels[route.provider as keyof typeof ProviderLabels] || route.provider}</TableCell>
+													<TableCell className="font-mono text-xs">{route.model || "*"}</TableCell>
+													<TableCell>
+														<div className="text-sm">
+															{route.weight.toLocaleString()}
+															<span className="text-muted-foreground ml-1 text-xs">
+																{formatPercentage(route.expected_traffic_share * 100)}
+															</span>
+														</div>
+													</TableCell>
+													<TableCell>
+														<span className={routeSuccessRate >= 99 ? "text-green-600 font-medium" : routeSuccessRate >= 90 ? "text-yellow-600" : "text-red-600 font-medium"}>
+															{formatPercentage(routeSuccessRate)}
+														</span>
+														<span className="text-muted-foreground ml-1 text-xs">{route.samples} reqs</span>
+													</TableCell>
+													<TableCell>{route.failures}</TableCell>
+													<TableCell>
+														<span className={Number(utilPenalty) > 0 ? "text-yellow-600" : "text-green-600"}>{utilPenalty}</span>
+													</TableCell>
+													<TableCell>
+														<span className={Number(errPenalty) > 0.01 ? "text-red-600" : "text-green-600"}>{errPenalty}</span>
+													</TableCell>
+													<TableCell>{latPenalty}</TableCell>
+													<TableCell>{momentum}</TableCell>
+												</TableRow>
+											);
+										})
+									)}
+								</TableBody>
+							</Table>
+						</CardContent>
+					</Card>
 				</>
 			)}
 		</div>
 	);
-}
-
-function SummaryCard({ label, value, icon: Icon }: { label: string; value: string; icon: typeof Route }) {
-	return (
-		<Card className="shadow-none">
-			<CardContent className="flex items-start justify-between px-4 py-4">
-				<div>
-					<p className="text-muted-foreground text-xs">{label}</p>
-					<p className="mt-1 text-xl font-semibold">{value}</p>
-				</div>
-				<Icon className="text-muted-foreground mt-0.5 h-4 w-4" />
-			</CardContent>
-		</Card>
-	);
-}
-
-function SettingToggle({
-	label,
-	description,
-	checked,
-	onCheckedChange,
-	disabled,
-}: {
-	label: string;
-	description: string;
-	checked: boolean;
-	onCheckedChange: (checked: boolean) => void;
-	disabled?: boolean;
-}) {
-	return (
-		<div className="flex items-center justify-between rounded-lg border p-4">
-			<div className="space-y-1">
-				<p className="text-sm font-medium">{label}</p>
-				<p className="text-muted-foreground text-xs">{description}</p>
-			</div>
-			<Switch checked={checked} onCheckedChange={onCheckedChange} disabled={disabled} />
-		</div>
-	);
-}
-
-function NumericSetting({
-	label,
-	value,
-	onChange,
-	min,
-	max,
-	step,
-}: {
-	label: string;
-	value: number;
-	onChange: (value: number) => void;
-	min?: number;
-	max?: number;
-	step?: number;
-}) {
-	return (
-		<div className="space-y-2">
-			<Label>{label}</Label>
-			<Input
-				type="number"
-				value={Number.isFinite(value) ? value : ""}
-				min={min}
-				max={max}
-				step={step}
-				onChange={(event) => {
-					const nextValue = Number(event.target.value);
-					if (!Number.isFinite(nextValue)) {
-						return;
-					}
-					onChange(nextValue);
-				}}
-			/>
-		</div>
-	);
-}
-
-function parseList(value: string): string[] {
-	return value
-		.split(",")
-		.map((entry) => entry.trim())
-		.filter(Boolean);
-}
-
-function normalizeLoadBalancerConfig(config?: Partial<LoadBalancerConfig> | null): LoadBalancerConfig {
-	return {
-		...DefaultLoadBalancerConfig,
-		...config,
-		provider_allowlist: config?.provider_allowlist ?? [],
-		model_allowlist: config?.model_allowlist ?? [],
-		tracker_config: {
-			...DefaultLoadBalancerConfig.tracker_config,
-			...(config?.tracker_config ?? {}),
-		},
-	};
 }

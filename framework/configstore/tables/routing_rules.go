@@ -18,6 +18,9 @@ type TableRoutingRule struct {
 	Enabled       bool   `gorm:"not null;default:true" json:"enabled"`
 	CelExpression string `gorm:"type:text;not null" json:"cel_expression"`
 
+	// Rule type: "direct" (default, static routing) or "adaptive" (adaptive load balancing)
+	RuleType string `gorm:"type:varchar(50);not null;default:direct" json:"rule_type"`
+
 	// Routing Targets (output) — 1:many relationship; weights must sum to 1
 	Targets []TableRoutingTarget `gorm:"foreignKey:RuleID;constraint:OnDelete:CASCADE" json:"targets,omitempty"`
 
@@ -26,6 +29,10 @@ type TableRoutingRule struct {
 
 	Query       *string        `gorm:"type:text" json:"-"`
 	ParsedQuery map[string]any `gorm:"-" json:"query,omitempty"`
+
+	// Adaptive load balancing configuration (JSON, nullable — only used when rule_type="adaptive")
+	AdaptiveConfig       *string        `gorm:"type:text" json:"-"`
+	ParsedAdaptiveConfig map[string]any `gorm:"-" json:"adaptive_config,omitempty"`
 
 	// Scope: where this rule applies
 	Scope   string  `gorm:"type:varchar(50);not null;uniqueIndex:idx_routing_rule_scope_name" json:"scope"` // "global" | "team" | "customer" | "virtual_key"
@@ -62,6 +69,18 @@ func (r *TableRoutingRule) BeforeSave(tx *gorm.DB) error {
 	} else {
 		r.Query = nil
 	}
+	if len(r.ParsedAdaptiveConfig) > 0 {
+		data, err := sonic.Marshal(r.ParsedAdaptiveConfig)
+		if err != nil {
+			return err
+		}
+		r.AdaptiveConfig = bifrost.Ptr(string(data))
+	} else {
+		r.AdaptiveConfig = nil
+	}
+	if r.RuleType == "" {
+		r.RuleType = "direct"
+	}
 	return nil
 }
 
@@ -76,6 +95,14 @@ func (r *TableRoutingRule) AfterFind(tx *gorm.DB) error {
 		if err := sonic.Unmarshal([]byte(*r.Query), &r.ParsedQuery); err != nil {
 			return err
 		}
+	}
+	if r.AdaptiveConfig != nil && strings.TrimSpace(*r.AdaptiveConfig) != "" {
+		if err := sonic.Unmarshal([]byte(*r.AdaptiveConfig), &r.ParsedAdaptiveConfig); err != nil {
+			return err
+		}
+	}
+	if r.RuleType == "" {
+		r.RuleType = "direct"
 	}
 	return nil
 }

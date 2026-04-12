@@ -12,6 +12,7 @@ import {
 	CircleDollarSign,
 	Construction,
 	DatabaseZap,
+	FileText,
 	FlaskConical,
 	FolderGit,
 	Globe,
@@ -636,8 +637,15 @@ export default function AppSidebar() {
 				title: "Adaptive Routing",
 				url: "/workspace/adaptive-routing",
 				icon: Shuffle,
-				description: "Manage adaptive load balancer",
+				description: "Adaptive routing live metrics",
 				hasAccess: isAdaptiveRoutingAllowed,
+			},
+			{
+				title: "Log Exports",
+				url: "/workspace/log-exports",
+				icon: FileText,
+				description: "Export request logs",
+				hasAccess: hasLogsAccess,
 			},
 			...(isDbConnected
 				? [

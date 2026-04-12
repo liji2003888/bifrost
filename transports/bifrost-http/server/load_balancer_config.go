@@ -107,3 +107,24 @@ func updateLoadBalancerConfigInStore(ctx context.Context, store configstore.Conf
 		Value: payload,
 	})
 }
+
+// ReloadLoadBalancerFromAdaptiveRules aggregates all enabled adaptive routing rules
+// and rebuilds the LoadBalancerConfig. Called after any routing rule create/update/delete.
+func (s *BifrostHTTPServer) ReloadLoadBalancerFromAdaptiveRules(ctx context.Context) error {
+	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
+		return nil
+	}
+
+	rules, err := s.Config.ConfigStore.GetRoutingRules(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load routing rules: %w", err)
+	}
+
+	baseCfg, err := loadLoadBalancerConfigFromStore(ctx, s.Config.ConfigStore)
+	if err != nil {
+		baseCfg = enterprisecfg.NormalizeLoadBalancerConfig(nil)
+	}
+
+	merged := enterprisecfg.AggregateAdaptiveRules(baseCfg, rules)
+	return s.ReloadLoadBalancerConfig(ctx, merged)
+}

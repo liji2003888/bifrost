@@ -620,6 +620,51 @@ Current cluster auto-sync scope now includes:
   - `npm exec next build -- --no-lint`
   - `npm exec tsc -- --noEmit`
 
+### 2026-04-12 | Base Commit fa39857 | Adaptive Routing 按规则配置重构 + 日志导出 UI + 状态面板重设计
+
+- **Adaptive Routing 配置从全局迁移到 Provider Routing Rules**
+  - 新增 `rule_type` 字段（`direct` / `adaptive`），支持在 Routing Rules 中创建自适应负载均衡规则。
+  - 新增 `adaptive_config` JSON 字段，承载每条规则的自适应配置（enabled、key_balancing、direction_routing、provider/model allowlist、tracker tuning）。
+  - `TableRoutingRule` schema 扩展：`RuleType` + `AdaptiveConfig` 列，含 GORM BeforeSave/AfterFind 钩子自动序列化。
+  - DB migration `add_routing_rule_adaptive_columns` 自动添加新列并回填已有规则为 `direct` 类型。
+  - `config.schema.json` 已同步更新 routing_rule 定义，包含 `rule_type`、`adaptive_config` schema。
+
+- **后端：自适应规则聚合机制**
+  - 新增 `enterprise.AggregateAdaptiveRules()` 函数，扫描所有 enabled 且 rule_type="adaptive" 的规则，合并生成统一 `LoadBalancerConfig`。
+  - 新增 `server.ReloadLoadBalancerFromAdaptiveRules()`，在 routing rule CRUD（create/update/delete）后自动触发聚合与热更新。
+  - 支持 by-provider / by-key 作用域：规则的 `scope`（global/team/customer/virtual_key）控制适用范围，`adaptive_config.provider_allowlist` / `model_allowlist` 控制哪些 provider/model 启用自适应。
+  - 集群同步：routing rule 变更通过已有的 `ClusterConfigScopeRoutingRule` 自动传播到所有节点，`adaptive_config` 作为 rule 的一部分随 JSON 一起同步。
+
+- **Adaptive Routing 状态面板重设计**
+  - 移除了原有的全局配置面板（Adaptive Routing Policy 区域）。
+  - 新增 Live Metrics 仪表盘：Total Requests、Success Rate。
+  - 新增 Total Traffic Distribution 表：按 key/provider/model 显示流量占比和进度条。
+  - Direction Weights & Performance 表：Provider、Model、Weight、Success Rate、Errors、U/E/L Penalty、Health Status。
+  - Route Weights & Performance 表：Key、Provider、Model、Weight、Success Rate、Errors、U/E/L Penalty、Momentum。
+  - 所有表格支持 provider/model 筛选，5s 自动轮询刷新，集群聚合模式。
+
+- **Routing Rules UI 扩展**
+  - Sheet 表单新增 "Rule Type" 选择器（Direct / Adaptive）。
+  - 选择 Adaptive 后展开自适应配置区：Enable、Key Balancing、Direction Routing、VK Direction Routing 开关 + Provider/Model Allowlist。
+  - Routing Rules 表格新增 "Type" 列，显示 Direct / Adaptive badge。
+  - Adaptive 规则的 targets 验证放宽（不强制要求 targets，允许纯 allowlist 作用域模式）。
+
+- **日志导出（Log Exports）功能完善**
+  - 后端已有完整 LogExportService（JSONL/CSV + gzip）、API（POST/GET /api/logs/exports、/api/mcp-logs/exports、/api/log-exports/{id}/download）和集群聚合。
+  - 本轮新增 Log Exports UI 页面（`/workspace/log-exports`）：
+    - 创建导出表单：Scope（LLM/MCP）、Format（JSONL/CSV）、Compression（None/Gzip）、Max Rows。
+    - 导出历史表格：ID、Scope、Format、Status、Rows、Node、Created/Completed、Download 按钮。
+    - 10s 自动轮询刷新，支持集群聚合查看所有节点的导出任务。
+  - Sidebar 新增 "Log Exports" 导航入口。
+
+- **验证通过**
+  - `go test ./bifrost-http/loadbalancer` ✓
+  - `go test ./bifrost-http/handlers` ✓
+  - `go test ./bifrost-http/enterprise` ✓
+  - `go test ./bifrost-http/lib` ✓
+  - `go test ./configstore ./configstore/tables` (framework) ✓
+  - `npx tsc --noEmit` ✓
+
 ### 2026-04-12 09:55:48 CST | Base Commit 90fbe5f7c | Adaptive Load Balancing 官网设计对齐增强
 
 - 本轮重新对照了官网 `Adaptive Load Balancing` / `Provider Routing` 设计，并基于当前企业版 fork 的现有实现做了“最小破坏式”增强。

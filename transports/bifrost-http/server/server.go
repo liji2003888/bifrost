@@ -704,6 +704,13 @@ func (s *BifrostHTTPServer) ReloadRoutingRule(ctx context.Context, id string) er
 	if err := store.UpdateRoutingRuleInMemory(rule); err != nil {
 		return fmt.Errorf("failed to update routing rule in store: %w", err)
 	}
+
+	// If this is an adaptive rule, re-aggregate all adaptive rules into the loadbalancer config
+	if rule.RuleType == "adaptive" {
+		if err := s.ReloadLoadBalancerFromAdaptiveRules(ctx); err != nil && logger != nil {
+			logger.Warn("failed to reload adaptive routing from rules: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -722,6 +729,11 @@ func (s *BifrostHTTPServer) RemoveRoutingRule(ctx context.Context, id string) er
 	// Delete the rule from the store (this removes from in-memory cache)
 	if err := store.DeleteRoutingRuleInMemory(id); err != nil {
 		return fmt.Errorf("failed to delete routing rule from store: %w", err)
+	}
+
+	// Re-aggregate adaptive rules in case the deleted rule was adaptive
+	if err := s.ReloadLoadBalancerFromAdaptiveRules(ctx); err != nil && logger != nil {
+		logger.Warn("failed to reload adaptive routing after rule deletion: %v", err)
 	}
 	return nil
 }
