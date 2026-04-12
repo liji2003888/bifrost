@@ -26,6 +26,16 @@ type LoadBalancerStatusProvider interface {
 	ListDirectionSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.DirectionStatus
 }
 
+// LoadBalancerConfigManager provides access to the adaptive routing configuration.
+type LoadBalancerConfigManager interface {
+	// GetLoadBalancerConfig returns the current in-memory load balancer config.
+	GetLoadBalancerConfig() *enterprisecfg.LoadBalancerConfig
+	// ReloadLoadBalancerConfig updates the plugin with the given config.
+	ReloadLoadBalancerConfig(ctx context.Context, cfg *enterprisecfg.LoadBalancerConfig) error
+	// ApplyClusterLoadBalancerConfig persists config to store and reloads.
+	ApplyClusterLoadBalancerConfig(ctx context.Context, cfg *enterprisecfg.LoadBalancerConfig) error
+}
+
 const (
 	clusterAlertsEndpoint          = "/_cluster/alerts"
 	clusterAdaptiveRoutingEndpoint = "/_cluster/adaptive-routing/status"
@@ -104,27 +114,31 @@ type logExportsResponse struct {
 }
 
 type EnterpriseHandler struct {
-	cluster *enterprisecfg.ClusterService
-	audit   *enterprisecfg.AuditService
-	exports *enterprisecfg.LogExportService
-	alerts  *enterprisecfg.AlertManager
-	vault   *enterprisecfg.VaultService
-	lb      func() LoadBalancerStatusProvider
-	config  ClusterConfigApplier
+	cluster   *enterprisecfg.ClusterService
+	audit     *enterprisecfg.AuditService
+	exports   *enterprisecfg.LogExportService
+	alerts    *enterprisecfg.AlertManager
+	vault     *enterprisecfg.VaultService
+	lb        func() LoadBalancerStatusProvider
+	config    ClusterConfigApplier
+	lbConfig  LoadBalancerConfigManager
+	propagate ClusterConfigPropagator
 }
 
-func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager, vault *enterprisecfg.VaultService, lb func() LoadBalancerStatusProvider, config ClusterConfigApplier) *EnterpriseHandler {
-	if cluster == nil && audit == nil && exports == nil && alerts == nil && vault == nil && lb == nil && config == nil {
+func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager, vault *enterprisecfg.VaultService, lb func() LoadBalancerStatusProvider, config ClusterConfigApplier, lbConfig LoadBalancerConfigManager, propagate ClusterConfigPropagator) *EnterpriseHandler {
+	if cluster == nil && audit == nil && exports == nil && alerts == nil && vault == nil && lb == nil && config == nil && lbConfig == nil {
 		return nil
 	}
 	return &EnterpriseHandler{
-		cluster: cluster,
-		audit:   audit,
-		exports: exports,
-		alerts:  alerts,
-		vault:   vault,
-		lb:      lb,
-		config:  config,
+		cluster:   cluster,
+		audit:     audit,
+		exports:   exports,
+		alerts:    alerts,
+		vault:     vault,
+		lb:        lb,
+		config:    config,
+		lbConfig:  lbConfig,
+		propagate: propagate,
 	}
 }
 
@@ -143,6 +157,8 @@ func (h *EnterpriseHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 	r.GET("/api/alerts", lib.ChainMiddlewares(h.getAlerts, middlewares...))
 	r.GET("/api/vault/status", lib.ChainMiddlewares(h.getVaultStatus, middlewares...))
 	r.GET("/api/adaptive-routing/status", lib.ChainMiddlewares(h.getAdaptiveRoutingStatus, middlewares...))
+	r.GET("/api/adaptive-routing/config", lib.ChainMiddlewares(h.getAdaptiveRoutingConfig, middlewares...))
+	r.PUT("/api/adaptive-routing/config", lib.ChainMiddlewares(h.updateAdaptiveRoutingConfig, middlewares...))
 
 	if h.cluster != nil {
 		r.GET("/_cluster/status", h.getInternalClusterStatus)
@@ -457,6 +473,55 @@ func (h *EnterpriseHandler) getInternalAdaptiveRoutingStatus(ctx *fasthttp.Reque
 	provider := schemas.ModelProvider(strings.TrimSpace(string(ctx.QueryArgs().Peek("provider"))))
 	model := strings.TrimSpace(string(ctx.QueryArgs().Peek("model")))
 	SendJSON(ctx, h.collectAdaptiveRoutingStatus(clusterRequestContext(), provider, model, false))
+}
+
+// getAdaptiveRoutingConfig returns the current adaptive routing (load balancer) configuration.
+func (h *EnterpriseHandler) getAdaptiveRoutingConfig(ctx *fasthttp.RequestCtx) {
+	if h.lbConfig == nil {
+		SendJSON(ctx, enterprisecfg.NormalizeLoadBalancerConfig(nil))
+		return
+	}
+	cfg := h.lbConfig.GetLoadBalancerConfig()
+	SendJSON(ctx, enterprisecfg.NormalizeLoadBalancerConfig(cfg))
+}
+
+// updateAdaptiveRoutingConfig updates the adaptive routing (load balancer) configuration.
+// The config is persisted and propagated to all cluster nodes.
+func (h *EnterpriseHandler) updateAdaptiveRoutingConfig(ctx *fasthttp.RequestCtx) {
+	if h.lbConfig == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "adaptive routing configuration is not available")
+		return
+	}
+
+	var cfg enterprisecfg.LoadBalancerConfig
+	if err := sonic.Unmarshal(ctx.PostBody(), &cfg); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("invalid JSON: %v", err))
+		return
+	}
+
+	normalized := enterprisecfg.NormalizeLoadBalancerConfig(&cfg)
+
+	// Persist and reload locally
+	if err := h.lbConfig.ApplyClusterLoadBalancerConfig(ctx, normalized); err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to apply adaptive routing config: %v", err))
+		return
+	}
+
+	// Propagate to cluster peers
+	if h.propagate != nil {
+		if err := h.propagate.PropagateClusterConfigChange(ctx, &ClusterConfigChange{
+			Scope:              ClusterConfigScopeLoadBalancer,
+			LoadBalancerConfig: normalized,
+		}); err != nil {
+			logger.Warn("failed to propagate adaptive routing config to cluster: %v", err)
+		}
+	}
+
+	SendJSON(ctx, map[string]any{
+		"status":  "success",
+		"message": "adaptive routing configuration updated",
+		"config":  normalized,
+	})
 }
 
 func (h *EnterpriseHandler) requireClusterAuth(ctx *fasthttp.RequestCtx) bool {

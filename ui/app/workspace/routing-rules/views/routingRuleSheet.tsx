@@ -29,10 +29,7 @@ import {
 	RoutingTargetFormData,
 	DEFAULT_ROUTING_RULE_FORM_DATA,
 	DEFAULT_ROUTING_TARGET,
-	DEFAULT_ADAPTIVE_CONFIG,
 	ROUTING_RULE_SCOPES,
-	type RoutingRuleType,
-	type AdaptiveConfig,
 } from "@/lib/types/routingRules";
 import {
 	useCreateRoutingRuleMutation,
@@ -116,8 +113,6 @@ export function RoutingRuleSheet({
 	const scope = watch("scope");
 	const scopeId = watch("scope_id");
 	const fallbacks = watch("fallbacks");
-	const ruleType = watch("rule_type") || "direct";
-	const [adaptiveConfig, setAdaptiveConfig] = useState<AdaptiveConfig>({ ...DEFAULT_ADAPTIVE_CONFIG });
 
 	// Get available providers from configured providers, plus any provider already
 	// referenced by the current targets, existing rules' targets, or rules' fallbacks
@@ -138,17 +133,11 @@ export function RoutingRuleSheet({
 			setValue("name", editingRule.name);
 			setValue("description", editingRule.description);
 			setValue("cel_expression", editingRule.cel_expression);
-			setValue("rule_type", editingRule.rule_type || "direct");
 			setValue("fallbacks", editingRule.fallbacks || []);
 			setValue("scope", editingRule.scope);
 			setValue("scope_id", editingRule.scope_id || "");
 			setValue("priority", editingRule.priority);
 			setValue("enabled", editingRule.enabled);
-			if (editingRule.adaptive_config) {
-				setAdaptiveConfig({ ...DEFAULT_ADAPTIVE_CONFIG, ...editingRule.adaptive_config });
-			} else {
-				setAdaptiveConfig({ ...DEFAULT_ADAPTIVE_CONFIG });
-			}
 			if (editingRule.targets && editingRule.targets.length > 0) {
 				setTargets(editingRule.targets.map((t) => ({
 					...DEFAULT_ROUTING_TARGET,
@@ -171,7 +160,6 @@ export function RoutingRuleSheet({
 			reset();
 			setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
 			setQuery(defaultQuery);
-			setAdaptiveConfig({ ...DEFAULT_ADAPTIVE_CONFIG });
 			setBuilderKey((prev) => prev + 1);
 		}
 	}, [editingRule, open, setValue, reset]);
@@ -200,30 +188,26 @@ export function RoutingRuleSheet({
 	const totalWeight = targets.reduce((sum, t) => sum + (t.weight || 0), 0);
 
 	const onSubmit = (data: RoutingRuleFormData) => {
-		const currentRuleType = data.rule_type || "direct";
-
 		// Validate scope_id is required when scope is not global
 		if (data.scope !== "global" && !data.scope_id?.trim()) {
 			toast.error(`${data.scope === "team" ? "Team" : data.scope === "customer" ? "Customer" : "Virtual Key"} is required`);
 			return;
 		}
 
-		// Validate targets (required for direct rules only)
-		if (currentRuleType === "direct") {
-			if (targets.length === 0) {
-				toast.error("At least one routing target is required for direct rules");
+		// Validate targets
+		if (targets.length === 0) {
+			toast.error("At least one routing target is required");
+			return;
+		}
+		for (const t of targets) {
+			if (t.weight <= 0) {
+				toast.error("Each target weight must be greater than 0");
 				return;
 			}
-			for (const t of targets) {
-				if (t.weight <= 0) {
-					toast.error("Each target weight must be greater than 0");
-					return;
-				}
-			}
-			if (Math.abs(totalWeight - 1) > 0.001) {
-				toast.error(`Target weights must sum to 1, current total: ${totalWeight.toFixed(4)}`);
-				return;
-			}
+		}
+		if (Math.abs(totalWeight - 1) > 0.001) {
+			toast.error(`Target weights must sum to 1, current total: ${totalWeight.toFixed(4)}`);
+			return;
 		}
 
 		// Validate regex patterns in routing rules
@@ -246,23 +230,17 @@ export function RoutingRuleSheet({
 			return provider && provider.length > 0;
 		});
 
-		const mappedTargets = currentRuleType === "direct" ? targets.map(({ provider, model, key_id, weight }) => ({
+		const mappedTargets = targets.map(({ provider, model, key_id, weight }) => ({
 			provider: provider || undefined,
 			model: model || undefined,
 			key_id: key_id || undefined,
 			weight,
-		})) : targets.filter((t) => t.provider || t.model).map(({ provider, model, key_id, weight }) => ({
-			provider: provider || undefined,
-			model: model || undefined,
-			key_id: key_id || undefined,
-			weight: weight || 1,
 		}));
 
 		const payload = {
 			name: data.name,
 			description: data.description,
 			cel_expression: data.cel_expression,
-			rule_type: currentRuleType,
 			targets: mappedTargets,
 			fallbacks: validFallbacks,
 			scope: data.scope,
@@ -270,7 +248,6 @@ export function RoutingRuleSheet({
 			priority: data.priority,
 			enabled: data.enabled,
 			query: query,
-			adaptive_config: currentRuleType === "adaptive" ? adaptiveConfig : undefined,
 		};
 
 		const submitPromise = isEditing && editingRule
@@ -303,7 +280,6 @@ export function RoutingRuleSheet({
 		reset();
 		setTargets([{ ...DEFAULT_ROUTING_TARGET }]);
 		setQuery(defaultQuery);
-		setAdaptiveConfig({ ...DEFAULT_ADAPTIVE_CONFIG });
 		setBuilderKey((prev) => prev + 1);
 		onOpenChange(false);
 	};
@@ -360,111 +336,6 @@ export function RoutingRuleSheet({
 						/>
 					</div>
 
-					{/* Rule Type */}
-					<div className="space-y-3">
-						<Label>Rule Type</Label>
-						<Select value={ruleType} onValueChange={(value) => setValue("rule_type", value as RoutingRuleType)}>
-							<SelectTrigger className="w-full">
-								<SelectValue placeholder="Select rule type..." />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectItem value="direct">Direct (Static Routing)</SelectItem>
-								<SelectItem value="adaptive">Adaptive (Load Balancing)</SelectItem>
-							</SelectContent>
-						</Select>
-						<p className="text-muted-foreground text-xs">
-							{ruleType === "adaptive"
-								? "Adaptive rules enable dynamic key/provider selection based on real-time health, latency, and error metrics."
-								: "Direct rules route requests to specific provider/model targets with weighted distribution."}
-						</p>
-					</div>
-
-					{/* Adaptive Config (only shown for adaptive rules) */}
-					{ruleType === "adaptive" && (
-						<div className="space-y-4 rounded-lg border p-4">
-							<div>
-								<h3 className="text-sm font-medium">Adaptive Load Balancing Configuration</h3>
-								<p className="text-muted-foreground mt-1 text-xs">
-									Configure how adaptive routing behaves for requests matching this rule.
-								</p>
-							</div>
-
-							<div className="grid gap-4 lg:grid-cols-2">
-								<div className="flex items-center justify-between rounded-lg border p-3">
-									<div className="space-y-0.5">
-										<p className="text-sm font-medium">Enable</p>
-										<p className="text-muted-foreground text-xs">Master switch for adaptive load balancing</p>
-									</div>
-									<Switch
-										checked={adaptiveConfig.enabled}
-										onCheckedChange={(checked) => setAdaptiveConfig((c) => ({ ...c, enabled: checked }))}
-									/>
-								</div>
-								<div className="flex items-center justify-between rounded-lg border p-3">
-									<div className="space-y-0.5">
-										<p className="text-sm font-medium">Key Balancing</p>
-										<p className="text-muted-foreground text-xs">Balance across provider API keys</p>
-									</div>
-									<Switch
-										checked={adaptiveConfig.key_balancing_enabled ?? true}
-										onCheckedChange={(checked) => setAdaptiveConfig((c) => ({ ...c, key_balancing_enabled: checked }))}
-										disabled={!adaptiveConfig.enabled}
-									/>
-								</div>
-								<div className="flex items-center justify-between rounded-lg border p-3">
-									<div className="space-y-0.5">
-										<p className="text-sm font-medium">Direction Routing</p>
-										<p className="text-muted-foreground text-xs">Auto-select provider for bare model names</p>
-									</div>
-									<Switch
-										checked={adaptiveConfig.direction_routing_enabled ?? false}
-										onCheckedChange={(checked) => setAdaptiveConfig((c) => ({ ...c, direction_routing_enabled: checked }))}
-										disabled={!adaptiveConfig.enabled}
-									/>
-								</div>
-								<div className="flex items-center justify-between rounded-lg border p-3">
-									<div className="space-y-0.5">
-										<p className="text-sm font-medium">VK Direction Routing</p>
-										<p className="text-muted-foreground text-xs">Allow direction routing for virtual keys</p>
-									</div>
-									<Switch
-										checked={adaptiveConfig.direction_routing_for_virtual_keys ?? false}
-										onCheckedChange={(checked) => setAdaptiveConfig((c) => ({ ...c, direction_routing_for_virtual_keys: checked }))}
-										disabled={!adaptiveConfig.enabled || !adaptiveConfig.direction_routing_enabled}
-									/>
-								</div>
-							</div>
-
-							<div className="grid gap-4 lg:grid-cols-2">
-								<div className="space-y-2">
-									<Label className="text-xs">Provider Allowlist</Label>
-									<Textarea
-										value={adaptiveConfig.provider_allowlist?.join(", ") || ""}
-										onChange={(e) => setAdaptiveConfig((c) => ({
-											...c,
-											provider_allowlist: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
-										}))}
-										rows={2}
-										placeholder="openai, anthropic (empty = all)"
-										disabled={!adaptiveConfig.enabled}
-									/>
-								</div>
-								<div className="space-y-2">
-									<Label className="text-xs">Model Allowlist</Label>
-									<Textarea
-										value={adaptiveConfig.model_allowlist?.join(", ") || ""}
-										onChange={(e) => setAdaptiveConfig((c) => ({
-											...c,
-											model_allowlist: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
-										}))}
-										rows={2}
-										placeholder="gpt-4o, claude-sonnet-4 (empty = all)"
-										disabled={!adaptiveConfig.enabled}
-									/>
-								</div>
-							</div>
-						</div>
-					)}
 
 					{/* Scope and Priority - Side by Side */}
 					<div className="grid grid-cols-2 gap-4">

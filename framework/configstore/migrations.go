@@ -5018,47 +5018,17 @@ func migrationAddWhitelistedRoutesJSONColumn(ctx context.Context, db *gorm.DB) e
 	return nil
 }
 
-// migrationAddRoutingRuleAdaptiveColumns adds rule_type and adaptive_config columns to routing_rules table
+// migrationAddRoutingRuleAdaptiveColumns was a legacy migration that added rule_type and
+// adaptive_config columns. Those columns are now deprecated (adaptive routing is configured
+// globally, not per-rule). The migration ID is preserved to avoid re-running on existing DBs.
 func migrationAddRoutingRuleAdaptiveColumns(ctx context.Context, db *gorm.DB) error {
 	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
 		ID: "add_routing_rule_adaptive_columns",
 		Migrate: func(tx *gorm.DB) error {
-			tx = tx.WithContext(ctx)
-			m := tx.Migrator()
-
-			if !m.HasColumn(&tables.TableRoutingRule{}, "rule_type") {
-				if err := m.AddColumn(&tables.TableRoutingRule{}, "RuleType"); err != nil {
-					return fmt.Errorf("failed to add rule_type column: %w", err)
-				}
-				// Backfill existing rules as "direct"
-				if err := tx.Model(&tables.TableRoutingRule{}).Where("rule_type IS NULL OR rule_type = ''").Update("rule_type", "direct").Error; err != nil {
-					return fmt.Errorf("failed to backfill rule_type: %w", err)
-				}
-			}
-
-			if !m.HasColumn(&tables.TableRoutingRule{}, "adaptive_config") {
-				if err := m.AddColumn(&tables.TableRoutingRule{}, "AdaptiveConfig"); err != nil {
-					return fmt.Errorf("failed to add adaptive_config column: %w", err)
-				}
-			}
-
+			// No-op: these columns are deprecated. Previously-created columns are harmless.
 			return nil
 		},
 		Rollback: func(tx *gorm.DB) error {
-			tx = tx.WithContext(ctx)
-			m := tx.Migrator()
-
-			if m.HasColumn(&tables.TableRoutingRule{}, "adaptive_config") {
-				if err := m.DropColumn(&tables.TableRoutingRule{}, "adaptive_config"); err != nil {
-					return fmt.Errorf("failed to drop adaptive_config column: %w", err)
-				}
-			}
-			if m.HasColumn(&tables.TableRoutingRule{}, "rule_type") {
-				if err := m.DropColumn(&tables.TableRoutingRule{}, "rule_type"); err != nil {
-					return fmt.Errorf("failed to drop rule_type column: %w", err)
-				}
-			}
-
 			return nil
 		},
 	}})

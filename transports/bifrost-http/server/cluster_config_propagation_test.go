@@ -125,7 +125,7 @@ func TestPropagateClusterConfigChangeAppliesAuthConfigOnRemotePeer(t *testing.T)
 	}
 
 	remoteRouter := router.New()
-	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer, nil, nil).RegisterRoutes(remoteRouter)
 	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -206,7 +206,7 @@ func TestPropagateClusterConfigChangeAppliesGovernanceResourcesOnRemotePeer(t *t
 	remoteServer.Ctx = schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 
 	remoteRouter := router.New()
-	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer, nil, nil).RegisterRoutes(remoteRouter)
 	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -449,7 +449,7 @@ func TestPropagateClusterConfigChangeAppliesBuiltinPluginConfigOnRemotePeer(t *t
 	}
 
 	remoteRouter := router.New()
-	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer, nil, nil).RegisterRoutes(remoteRouter)
 	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -551,7 +551,7 @@ func TestPropagateClusterConfigChangeAppliesOAuthStateOnRemotePeer(t *testing.T)
 	}
 
 	remoteRouter := router.New()
-	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer, nil, nil).RegisterRoutes(remoteRouter)
 	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -682,7 +682,7 @@ func TestPropagateClusterConfigChangeAppliesPromptRepositoryStateOnRemotePeer(t 
 	}
 
 	remoteRouter := router.New()
-	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer, nil, nil).RegisterRoutes(remoteRouter)
 	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -859,7 +859,7 @@ func TestPropagateClusterConfigChangeAppliesSessionStateOnRemotePeer(t *testing.
 	}
 
 	remoteRouter := router.New()
-	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer).RegisterRoutes(remoteRouter)
+	handlers.NewEnterpriseHandler(remoteCluster, nil, nil, nil, nil, nil, remoteServer, nil, nil).RegisterRoutes(remoteRouter)
 	remoteHTTPServer := &fasthttp.Server{Handler: remoteRouter.Handler}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

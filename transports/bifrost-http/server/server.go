@@ -706,12 +706,6 @@ func (s *BifrostHTTPServer) ReloadRoutingRule(ctx context.Context, id string) er
 		return fmt.Errorf("failed to update routing rule in store: %w", err)
 	}
 
-	// If this is an adaptive rule, re-aggregate all adaptive rules into the loadbalancer config
-	if rule.RuleType == "adaptive" {
-		if err := s.ReloadLoadBalancerFromAdaptiveRules(ctx); err != nil && logger != nil {
-			logger.Warn("failed to reload adaptive routing from rules: %v", err)
-		}
-	}
 	return nil
 }
 
@@ -732,10 +726,6 @@ func (s *BifrostHTTPServer) RemoveRoutingRule(ctx context.Context, id string) er
 		return fmt.Errorf("failed to delete routing rule from store: %w", err)
 	}
 
-	// Re-aggregate adaptive rules in case the deleted rule was adaptive
-	if err := s.ReloadLoadBalancerFromAdaptiveRules(ctx); err != nil && logger != nil {
-		logger.Warn("failed to reload adaptive routing after rule deletion: %v", err)
-	}
 	return nil
 }
 
@@ -1111,7 +1101,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager, s.VaultService, func() handlers.LoadBalancerStatusProvider {
 		plugin, _ := lib.FindPluginAs[*loadbalancer.Plugin](s.Config, loadbalancer.PluginName)
 		return plugin
-	}, clusterConfigApplier)
+	}, clusterConfigApplier, s, clusterPropagator)
 	var governanceHandler *handlers.GovernanceHandler
 	governancePluginName := governance.PluginName
 	if name, ok := ctx.Value(schemas.BifrostContextKeyGovernancePluginName).(string); ok && name != "" {

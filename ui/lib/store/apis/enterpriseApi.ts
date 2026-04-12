@@ -13,6 +13,7 @@ import type {
 	TriggerLogExportConfigResponse,
 	VaultStatus,
 } from "@/lib/types/enterprise";
+import type { AdaptiveRoutingConfig } from "@/lib/types/adaptiveRouting";
 import { baseApi } from "./baseApi";
 
 export interface GetAdaptiveRoutingStatusArgs {
@@ -160,6 +161,20 @@ export const enterpriseApi = baseApi.injectEndpoints({
 			}),
 			invalidatesTags: ["LogExports"],
 		}),
+		getAdaptiveRoutingConfig: builder.query<AdaptiveRoutingConfig, void>({
+			query: () => ({
+				url: "/adaptive-routing/config",
+			}),
+			providesTags: ["AdaptiveRouting"],
+		}),
+		updateAdaptiveRoutingConfig: builder.mutation<{ status: string; message: string; config: AdaptiveRoutingConfig }, AdaptiveRoutingConfig>({
+			query: (body) => ({
+				url: "/adaptive-routing/config",
+				method: "PUT",
+				body,
+			}),
+			invalidatesTags: ["AdaptiveRouting"],
+		}),
 	}),
 });
 
@@ -177,4 +192,6 @@ export const {
 	useUpdateLogExportConfigMutation,
 	useDeleteLogExportConfigMutation,
 	useTriggerLogExportConfigMutation,
+	useGetAdaptiveRoutingConfigQuery,
+	useUpdateAdaptiveRoutingConfigMutation,
 } = enterpriseApi;

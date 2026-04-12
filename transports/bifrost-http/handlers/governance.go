@@ -140,34 +140,30 @@ type RoutingTarget struct {
 
 // CreateRoutingRuleRequest represents the request body for creating a routing rule
 type CreateRoutingRuleRequest struct {
-	Name           string          `json:"name" validate:"required"`
-	Description    string          `json:"description,omitempty"`
-	Enabled        *bool           `json:"enabled,omitempty"` // nil = use DB default (true)
-	CelExpression  string          `json:"cel_expression"`
-	RuleType       string          `json:"rule_type,omitempty"` // "direct" (default) or "adaptive"
-	Targets        []RoutingTarget `json:"targets"`             // Required for direct rules; weights must sum to 1
-	Fallbacks      []string        `json:"fallbacks,omitempty"`
-	Scope          string          `json:"scope,omitempty"` // Defaults to "global" if not provided
-	ScopeID        *string         `json:"scope_id,omitempty"`
-	Query          map[string]any  `json:"query,omitempty"`
-	Priority       int             `json:"priority,omitempty"` // Defaults to 0 if not provided
-	AdaptiveConfig map[string]any  `json:"adaptive_config,omitempty"`
+	Name          string          `json:"name" validate:"required"`
+	Description   string          `json:"description,omitempty"`
+	Enabled       *bool           `json:"enabled,omitempty"` // nil = use DB default (true)
+	CelExpression string          `json:"cel_expression"`
+	Targets       []RoutingTarget `json:"targets"`           // Required; weights must sum to 1
+	Fallbacks     []string        `json:"fallbacks,omitempty"`
+	Scope         string          `json:"scope,omitempty"` // Defaults to "global" if not provided
+	ScopeID       *string         `json:"scope_id,omitempty"`
+	Query         map[string]any  `json:"query,omitempty"`
+	Priority      int             `json:"priority,omitempty"` // Defaults to 0 if not provided
 }
 
 // UpdateRoutingRuleRequest represents the request body for updating a routing rule
 type UpdateRoutingRuleRequest struct {
-	Name           *string         `json:"name,omitempty"`
-	Description    *string         `json:"description,omitempty"`
-	Enabled        *bool           `json:"enabled,omitempty"`
-	CelExpression  *string         `json:"cel_expression,omitempty"`
-	RuleType       *string         `json:"rule_type,omitempty"` // "direct" or "adaptive"
-	Targets        []RoutingTarget `json:"targets,omitempty"`   // If provided, replaces all existing targets; weights must sum to 1
-	Fallbacks      []string        `json:"fallbacks,omitempty"`
-	Query          map[string]any  `json:"query,omitempty"`
-	Priority       *int            `json:"priority,omitempty"`
-	Scope          *string         `json:"scope,omitempty"`
-	ScopeID        *string         `json:"scope_id,omitempty"`
-	AdaptiveConfig map[string]any  `json:"adaptive_config,omitempty"`
+	Name          *string         `json:"name,omitempty"`
+	Description   *string         `json:"description,omitempty"`
+	Enabled       *bool           `json:"enabled,omitempty"`
+	CelExpression *string         `json:"cel_expression,omitempty"`
+	Targets       []RoutingTarget `json:"targets,omitempty"` // If provided, replaces all existing targets; weights must sum to 1
+	Fallbacks     []string        `json:"fallbacks,omitempty"`
+	Query         map[string]any  `json:"query,omitempty"`
+	Priority      *int            `json:"priority,omitempty"`
+	Scope         *string         `json:"scope,omitempty"`
+	ScopeID       *string         `json:"scope_id,omitempty"`
 }
 
 // CreateRateLimitRequest represents the request body for creating a rate limit using flexible approach
@@ -3196,28 +3192,14 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	// Normalize rule type
-	ruleType := req.RuleType
-	if ruleType == "" {
-		ruleType = "direct"
-	}
-	if ruleType != "direct" && ruleType != "adaptive" {
-		SendError(ctx, 400, "rule_type must be 'direct' or 'adaptive'")
+	// Validate targets
+	if len(req.Targets) == 0 {
+		SendError(ctx, 400, "at least one target is required")
 		return
 	}
-
-	// Validate targets (required for direct rules; optional for adaptive rules)
-	if ruleType == "direct" {
-		if len(req.Targets) == 0 {
-			SendError(ctx, 400, "at least one target is required for direct rules")
-			return
-		}
-	}
-	if len(req.Targets) > 0 {
-		if err := validateRoutingTargets(req.Targets); err != nil {
-			SendError(ctx, 400, err.Error())
-			return
-		}
+	if err := validateRoutingTargets(req.Targets); err != nil {
+		SendError(ctx, 400, err.Error())
+		return
 	}
 
 	// Set defaults and normalize scope/scope_id
@@ -3259,19 +3241,17 @@ func (h *GovernanceHandler) createRoutingRule(ctx *fasthttp.RequestCtx) {
 		enabled = *req.Enabled
 	}
 	rule := &configstoreTables.TableRoutingRule{
-		ID:                   ruleID,
-		Name:                 req.Name,
-		Description:          req.Description,
-		Enabled:              enabled,
-		CelExpression:        req.CelExpression,
-		RuleType:             ruleType,
-		Targets:              targets,
-		Scope:                scope,
-		ScopeID:              req.ScopeID,
-		Priority:             req.Priority,
-		ParsedFallbacks:      req.Fallbacks,
-		ParsedQuery:          req.Query,
-		ParsedAdaptiveConfig: req.AdaptiveConfig,
+		ID:              ruleID,
+		Name:            req.Name,
+		Description:     req.Description,
+		Enabled:         enabled,
+		CelExpression:   req.CelExpression,
+		Targets:         targets,
+		Scope:           scope,
+		ScopeID:         req.ScopeID,
+		Priority:        req.Priority,
+		ParsedFallbacks: req.Fallbacks,
+		ParsedQuery:     req.Query,
 	}
 
 	// Create in database
@@ -3333,31 +3313,14 @@ func (h *GovernanceHandler) updateRoutingRule(ctx *fasthttp.RequestCtx) {
 	if req.CelExpression != nil {
 		rule.CelExpression = *req.CelExpression
 	}
-	if req.RuleType != nil {
-		rt := *req.RuleType
-		if rt != "direct" && rt != "adaptive" {
-			SendError(ctx, 400, "rule_type must be 'direct' or 'adaptive'")
-			return
-		}
-		rule.RuleType = rt
-	}
-	if req.AdaptiveConfig != nil {
-		rule.ParsedAdaptiveConfig = req.AdaptiveConfig
-	}
 	if req.Targets != nil {
-		effectiveType := rule.RuleType
-		if effectiveType == "" {
-			effectiveType = "direct"
-		}
-		if len(req.Targets) == 0 && effectiveType == "direct" {
-			SendError(ctx, 400, "at least one routing target is required for direct rules")
+		if len(req.Targets) == 0 {
+			SendError(ctx, 400, "at least one routing target is required")
 			return
 		}
-		if len(req.Targets) > 0 {
-			if err := validateRoutingTargets(req.Targets); err != nil {
-				SendError(ctx, 400, err.Error())
-				return
-			}
+		if err := validateRoutingTargets(req.Targets); err != nil {
+			SendError(ctx, 400, err.Error())
+			return
 		}
 		newTargets := make([]configstoreTables.TableRoutingTarget, 0, len(req.Targets))
 		for _, t := range req.Targets {

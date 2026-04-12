@@ -14,6 +14,14 @@ import (
 	"github.com/maximhq/bifrost/transports/bifrost-http/loadbalancer"
 )
 
+// GetLoadBalancerConfig returns the current in-memory load balancer config.
+func (s *BifrostHTTPServer) GetLoadBalancerConfig() *enterprisecfg.LoadBalancerConfig {
+	if s == nil || s.Config == nil {
+		return nil
+	}
+	return s.Config.LoadBalancerConfig
+}
+
 func (s *BifrostHTTPServer) ReloadLoadBalancerConfig(ctx context.Context, cfg *enterprisecfg.LoadBalancerConfig) error {
 	if s == nil || s.Config == nil {
 		return fmt.Errorf("config not found")
@@ -108,23 +116,3 @@ func updateLoadBalancerConfigInStore(ctx context.Context, store configstore.Conf
 	})
 }
 
-// ReloadLoadBalancerFromAdaptiveRules aggregates all enabled adaptive routing rules
-// and rebuilds the LoadBalancerConfig. Called after any routing rule create/update/delete.
-func (s *BifrostHTTPServer) ReloadLoadBalancerFromAdaptiveRules(ctx context.Context) error {
-	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
-		return nil
-	}
-
-	rules, err := s.Config.ConfigStore.GetRoutingRules(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load routing rules: %w", err)
-	}
-
-	baseCfg, err := loadLoadBalancerConfigFromStore(ctx, s.Config.ConfigStore)
-	if err != nil {
-		baseCfg = enterprisecfg.NormalizeLoadBalancerConfig(nil)
-	}
-
-	merged := enterprisecfg.AggregateAdaptiveRules(baseCfg, rules)
-	return s.ReloadLoadBalancerConfig(ctx, merged)
-}

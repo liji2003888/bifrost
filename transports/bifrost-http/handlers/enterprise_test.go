@@ -84,7 +84,7 @@ func (f *fakeLoadBalancerStatusProvider) Enabled() bool {
 }
 
 func TestRegisterRoutesExposesDisabledEnterpriseStatusEndpoints(t *testing.T) {
-	handler := NewEnterpriseHandler(nil, nil, nil, nil, nil, nil, &fakeClusterConfigApplier{})
+	handler := NewEnterpriseHandler(nil, nil, nil, nil, nil, nil, &fakeClusterConfigApplier{}, nil, nil)
 	testRouter := router.New()
 	handler.RegisterRoutes(testRouter)
 
@@ -244,7 +244,7 @@ func TestCollectAdaptiveRoutingStatusAggregatesPeerResponses(t *testing.T) {
 			},
 			enabled: true,
 		}
-	}, nil)
+	}, nil, nil, nil)
 
 	response := handler.collectAdaptiveRoutingStatus(context.Background(), schemas.ModelProvider("openai"), "gpt-4", true)
 	if !response.Cluster {
@@ -300,7 +300,7 @@ func TestApplyClusterConfigReloadDelegatesToApplier(t *testing.T) {
 	defer cluster.Close()
 
 	applier := &fakeClusterConfigApplier{}
-	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil, applier)
+	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil, applier, nil, nil)
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.Header.SetMethod(fasthttp.MethodPost)
@@ -343,7 +343,7 @@ func TestApplyClusterConfigReloadRejectsInvalidClusterToken(t *testing.T) {
 	defer cluster.Close()
 
 	applier := &fakeClusterConfigApplier{}
-	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil, applier)
+	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil, applier, nil, nil)
 
 	ctx := &fasthttp.RequestCtx{}
 	ctx.Request.Header.SetMethod(fasthttp.MethodPost)
@@ -409,7 +409,7 @@ func TestCollectAlertsAggregatesPeerResponses(t *testing.T) {
 	}
 	defer cluster.Close()
 
-	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil, nil)
+	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, nil, nil, nil, nil)
 	response := handler.collectAlerts(context.Background(), true)
 
 	if !response.Cluster {
@@ -498,7 +498,7 @@ func TestCollectAuditLogsAggregatesPeerResponses(t *testing.T) {
 	}
 	defer cluster.Close()
 
-	handler := NewEnterpriseHandler(cluster, audit, nil, nil, nil, nil, nil)
+	handler := NewEnterpriseHandler(cluster, audit, nil, nil, nil, nil, nil, nil, nil)
 	response := handler.collectAuditLogs(context.Background(), enterprisecfg.AuditSearchFilters{Limit: 10}, true)
 
 	if !response.Cluster {
@@ -588,7 +588,7 @@ func TestCollectExportJobsAggregatesPeerResponses(t *testing.T) {
 	}
 
 	exportService := mustNewMinimalExportServiceForTest(t, exportDir)
-	handler := NewEnterpriseHandler(cluster, nil, exportService, nil, nil, nil, nil)
+	handler := NewEnterpriseHandler(cluster, nil, exportService, nil, nil, nil, nil, nil, nil)
 
 	response := handler.collectExportJobs(context.Background(), true)
 	if !response.Cluster {

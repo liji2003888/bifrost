@@ -121,7 +121,6 @@ export function RoutingRulesTable({ rules, totalCount, isLoading, onEdit, canDel
 					<TableHeader>
 						<TableRow className="bg-muted/50">
 							<TableHead className="font-semibold">Name</TableHead>
-							<TableHead className="font-semibold">Type</TableHead>
 							<TableHead className="font-semibold">Targets</TableHead>
 							<TableHead className="font-semibold">Scope</TableHead>
 							<TableHead className="text-right font-semibold">Priority</TableHead>
@@ -147,11 +146,6 @@ export function RoutingRulesTable({ rules, totalCount, isLoading, onEdit, canDel
 											<span data-testid="routing-rule-description" className="text-xs text-muted-foreground truncate max-w-xs">{rule.description}</span>
 										)}
 									</div>
-								</TableCell>
-								<TableCell>
-									<Badge variant={rule.rule_type === "adaptive" ? "outline" : "secondary"}>
-										{rule.rule_type === "adaptive" ? "Adaptive" : "Direct"}
-									</Badge>
 								</TableCell>
 								<TableCell>
 									<TargetsSummary targets={rule.targets || []} />

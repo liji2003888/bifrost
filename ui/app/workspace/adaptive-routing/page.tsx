@@ -6,14 +6,27 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import { useDebouncedValue } from "@/hooks/useDebounce";
 import { ProviderLabels } from "@/lib/constants/logs";
-import { getErrorMessage, useGetAdaptiveRoutingStatusQuery, useGetAlertsQuery, useGetProvidersQuery } from "@/lib/store";
-import { formatLatencyMs, formatPercentage, formatRelativeTimestamp, isServiceDisabledError } from "@/lib/utils/enterprise";
-import { AlertCircle, CheckCircle2, RefreshCw, Wifi } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+	getErrorMessage,
+	useGetAdaptiveRoutingStatusQuery,
+	useGetAdaptiveRoutingConfigQuery,
+	useUpdateAdaptiveRoutingConfigMutation,
+	useGetAlertsQuery,
+	useGetProvidersQuery,
+} from "@/lib/store";
+import type { AdaptiveRoutingConfig } from "@/lib/types/adaptiveRouting";
+import { DEFAULT_ADAPTIVE_ROUTING_CONFIG } from "@/lib/types/adaptiveRouting";
+import { formatPercentage, formatRelativeTimestamp, isServiceDisabledError } from "@/lib/utils/enterprise";
+import { AlertCircle, CheckCircle2, RefreshCw, Settings2, Wifi } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 function stateBadgeVariant(state: "healthy" | "degraded" | "failed" | "recovering"): "default" | "secondary" | "destructive" | "outline" {
 	switch (state) {
@@ -26,6 +39,193 @@ function stateBadgeVariant(state: "healthy" | "degraded" | "failed" | "recoverin
 		default:
 			return "destructive";
 	}
+}
+
+function AdaptiveRoutingConfigPanel() {
+	const { data: config, isLoading } = useGetAdaptiveRoutingConfigQuery();
+	const [updateConfig, { isLoading: isUpdating }] = useUpdateAdaptiveRoutingConfigMutation();
+	const [localConfig, setLocalConfig] = useState<AdaptiveRoutingConfig>({ ...DEFAULT_ADAPTIVE_ROUTING_CONFIG });
+	const [showAdvanced, setShowAdvanced] = useState(false);
+
+	useEffect(() => {
+		if (config) {
+			setLocalConfig({ ...DEFAULT_ADAPTIVE_ROUTING_CONFIG, ...config });
+		}
+	}, [config]);
+
+	const handleSave = async () => {
+		try {
+			await updateConfig(localConfig).unwrap();
+			toast.success("Adaptive routing configuration updated");
+		} catch (error) {
+			toast.error(getErrorMessage(error));
+		}
+	};
+
+	const isDirty = JSON.stringify(localConfig) !== JSON.stringify(config ?? DEFAULT_ADAPTIVE_ROUTING_CONFIG);
+
+	if (isLoading) {
+		return (
+			<Card className="shadow-none">
+				<CardContent className="flex items-center justify-center py-8">
+					<span className="text-muted-foreground text-sm">Loading configuration...</span>
+				</CardContent>
+			</Card>
+		);
+	}
+
+	return (
+		<Card className="shadow-none">
+			<CardHeader className="flex flex-row items-center justify-between pb-3">
+				<div className="flex items-center gap-2">
+					<Settings2 className="h-4 w-4" />
+					<CardTitle className="text-base">Configuration</CardTitle>
+				</div>
+				<div className="flex items-center gap-2">
+					{isDirty && <span className="text-xs text-amber-600">Unsaved changes</span>}
+					<Button
+						variant="default"
+						size="sm"
+						onClick={handleSave}
+						disabled={!isDirty || isUpdating}
+						isLoading={isUpdating}
+					>
+						Save
+					</Button>
+				</div>
+			</CardHeader>
+			<CardContent className="space-y-6">
+				{/* Main toggles */}
+				<div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+					<div className="flex items-center justify-between rounded-lg border p-3">
+						<div className="space-y-0.5">
+							<p className="text-sm font-medium">Enable</p>
+							<p className="text-muted-foreground text-xs">Master switch</p>
+						</div>
+						<Switch
+							checked={localConfig.enabled}
+							onCheckedChange={(checked) => setLocalConfig((c) => ({ ...c, enabled: checked }))}
+						/>
+					</div>
+					<div className="flex items-center justify-between rounded-lg border p-3">
+						<div className="space-y-0.5">
+							<p className="text-sm font-medium">Key Balancing</p>
+							<p className="text-muted-foreground text-xs">Balance across API keys</p>
+						</div>
+						<Switch
+							checked={localConfig.key_balancing_enabled ?? true}
+							onCheckedChange={(checked) => setLocalConfig((c) => ({ ...c, key_balancing_enabled: checked }))}
+							disabled={!localConfig.enabled}
+						/>
+					</div>
+					<div className="flex items-center justify-between rounded-lg border p-3">
+						<div className="space-y-0.5">
+							<p className="text-sm font-medium">Direction Routing</p>
+							<p className="text-muted-foreground text-xs">Auto-select provider</p>
+						</div>
+						<Switch
+							checked={localConfig.direction_routing_enabled ?? false}
+							onCheckedChange={(checked) => setLocalConfig((c) => ({ ...c, direction_routing_enabled: checked }))}
+							disabled={!localConfig.enabled}
+						/>
+					</div>
+					<div className="flex items-center justify-between rounded-lg border p-3">
+						<div className="space-y-0.5">
+							<p className="text-sm font-medium">VK Direction</p>
+							<p className="text-muted-foreground text-xs">Direction for virtual keys</p>
+						</div>
+						<Switch
+							checked={localConfig.direction_routing_for_virtual_keys ?? false}
+							onCheckedChange={(checked) => setLocalConfig((c) => ({ ...c, direction_routing_for_virtual_keys: checked }))}
+							disabled={!localConfig.enabled || !(localConfig.direction_routing_enabled ?? false)}
+						/>
+					</div>
+				</div>
+
+				{/* Allowlists */}
+				<div className="grid gap-4 md:grid-cols-2">
+					<div className="space-y-2">
+						<Label className="text-xs">Provider Allowlist</Label>
+						<Textarea
+							value={localConfig.provider_allowlist?.join(", ") || ""}
+							onChange={(e) => setLocalConfig((c) => ({
+								...c,
+								provider_allowlist: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+							}))}
+							rows={2}
+							placeholder="openai, anthropic (empty = all providers)"
+							disabled={!localConfig.enabled}
+						/>
+					</div>
+					<div className="space-y-2">
+						<Label className="text-xs">Model Allowlist</Label>
+						<Textarea
+							value={localConfig.model_allowlist?.join(", ") || ""}
+							onChange={(e) => setLocalConfig((c) => ({
+								...c,
+								model_allowlist: e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+							}))}
+							rows={2}
+							placeholder="gpt-4o, claude-sonnet-4 (empty = all models)"
+							disabled={!localConfig.enabled}
+						/>
+					</div>
+				</div>
+
+				{/* Advanced tracker tuning */}
+				<div>
+					<Button
+						variant="ghost"
+						size="sm"
+						className="text-xs"
+						onClick={() => setShowAdvanced(!showAdvanced)}
+					>
+						{showAdvanced ? "Hide" : "Show"} Advanced Tracker Settings
+					</Button>
+					{showAdvanced && (
+						<div className="mt-3 grid gap-3 md:grid-cols-3 lg:grid-cols-4">
+							{[
+								{ key: "ewma_alpha", label: "EWMA Alpha", placeholder: "0.25" },
+								{ key: "error_penalty", label: "Error Penalty", placeholder: "1.5" },
+								{ key: "latency_penalty", label: "Latency Penalty", placeholder: "0.6" },
+								{ key: "consecutive_failure_penalty", label: "Consecutive Failure Penalty", placeholder: "0.15" },
+								{ key: "minimum_samples", label: "Minimum Samples", placeholder: "10" },
+								{ key: "exploration_ratio", label: "Exploration Ratio", placeholder: "0.25" },
+								{ key: "jitter_ratio", label: "Jitter Ratio", placeholder: "0.05" },
+								{ key: "recompute_interval_seconds", label: "Recompute Interval (s)", placeholder: "5" },
+								{ key: "degraded_error_threshold", label: "Degraded Error Threshold", placeholder: "0.02" },
+								{ key: "failed_error_threshold", label: "Failed Error Threshold", placeholder: "0.05" },
+								{ key: "weight_floor", label: "Weight Floor", placeholder: "1" },
+								{ key: "weight_ceiling", label: "Weight Ceiling", placeholder: "1000" },
+							].map(({ key, label, placeholder }) => (
+								<div key={key} className="space-y-1">
+									<Label className="text-xs">{label}</Label>
+									<Input
+										type="number"
+										step="any"
+										placeholder={placeholder}
+										value={localConfig.tracker_config?.[key as keyof NonNullable<AdaptiveRoutingConfig["tracker_config"]>] ?? ""}
+										onChange={(e) => {
+											const val = e.target.value === "" ? undefined : Number(e.target.value);
+											setLocalConfig((c) => ({
+												...c,
+												tracker_config: {
+													...c.tracker_config,
+													[key]: val,
+												},
+											}));
+										}}
+										disabled={!localConfig.enabled}
+										className="h-8 text-xs"
+									/>
+								</div>
+							))}
+						</div>
+					)}
+				</div>
+			</CardContent>
+		</Card>
+	);
 }
 
 export default function AdaptiveRoutingPage() {
@@ -131,9 +331,9 @@ export default function AdaptiveRoutingPage() {
 			{/* Header */}
 			<div className="flex flex-wrap items-start justify-between gap-3">
 				<div>
-					<h1 className="text-2xl font-semibold tracking-tight">Live Metrics</h1>
+					<h1 className="text-2xl font-semibold tracking-tight">Adaptive Load Balancing</h1>
 					<p className="text-muted-foreground mt-1 text-sm">
-						Real-time adaptive routing status, traffic distribution, and provider health.
+						Global adaptive routing configuration and real-time status dashboard.
 					</p>
 				</div>
 				<div className="flex items-center gap-3">
@@ -148,50 +348,23 @@ export default function AdaptiveRoutingPage() {
 							</>
 						)}
 					</div>
-					<div className="flex flex-wrap gap-2">
-						<Select value={providerFilter} onValueChange={setProviderFilter}>
-							<SelectTrigger className="w-[160px]" data-testid="adaptive-routing-provider-filter">
-								<SelectValue placeholder="All Providers" />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectItem value="all">All Providers</SelectItem>
-								{providerOptions.map((provider) => (
-									<SelectItem key={provider} value={provider}>
-										{ProviderLabels[provider as keyof typeof ProviderLabels] || provider}
-									</SelectItem>
-								))}
-							</SelectContent>
-						</Select>
-						<Select value="all">
-							<SelectTrigger className="w-[140px]">
-								<SelectValue placeholder="All Models" />
-							</SelectTrigger>
-							<SelectContent>
-								<SelectItem value="all">All Models</SelectItem>
-							</SelectContent>
-						</Select>
-						<Input
-							value={modelFilter}
-							onChange={(event) => setModelFilter(event.target.value)}
-							placeholder="Filter model..."
-							className="w-[180px]"
-							data-testid="adaptive-routing-model-filter"
-						/>
-						<Button
-							variant="outline"
-							onClick={() => {
-								void refetchRouting();
-								void refetchAlerts();
-							}}
-							isLoading={routingFetching || alertsFetching}
-							dataTestId="adaptive-routing-refresh"
-						>
-							{!(routingFetching || alertsFetching) && <RefreshCw className="h-4 w-4" />}
-							Refresh
-						</Button>
-					</div>
+					<Button
+						variant="outline"
+						onClick={() => {
+							void refetchRouting();
+							void refetchAlerts();
+						}}
+						isLoading={routingFetching || alertsFetching}
+						dataTestId="adaptive-routing-refresh"
+					>
+						{!(routingFetching || alertsFetching) && <RefreshCw className="h-4 w-4" />}
+						Refresh
+					</Button>
 				</div>
 			</div>
+
+			{/* Configuration Panel */}
+			<AdaptiveRoutingConfigPanel />
 
 			{Boolean(routingError) && !routingDisabled && (
 				<Alert variant="destructive">
@@ -206,7 +379,7 @@ export default function AdaptiveRoutingPage() {
 					<AlertCircle />
 					<AlertTitle>Adaptive routing is not enabled</AlertTitle>
 					<AlertDescription>
-						Create an adaptive routing rule in <strong>Routing Rules</strong> to enable real-time traffic monitoring and health scoring.
+						Enable adaptive routing in the configuration panel above to start real-time traffic monitoring and health scoring.
 					</AlertDescription>
 				</Alert>
 			)}
@@ -266,25 +439,34 @@ export default function AdaptiveRoutingPage() {
 						</Card>
 					)}
 
+					{/* Filters */}
+					<div className="flex flex-wrap gap-2">
+						<Select value={providerFilter} onValueChange={setProviderFilter}>
+							<SelectTrigger className="w-[160px]" data-testid="adaptive-routing-provider-filter">
+								<SelectValue placeholder="All Providers" />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="all">All Providers</SelectItem>
+								{providerOptions.map((provider) => (
+									<SelectItem key={provider} value={provider}>
+										{ProviderLabels[provider as keyof typeof ProviderLabels] || provider}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
+						<Input
+							value={modelFilter}
+							onChange={(event) => setModelFilter(event.target.value)}
+							placeholder="Filter model..."
+							className="w-[180px]"
+							data-testid="adaptive-routing-model-filter"
+						/>
+					</div>
+
 					{/* Total Traffic Distribution */}
 					<Card className="shadow-none">
-						<CardHeader className="flex flex-row items-center justify-between pb-3">
+						<CardHeader className="pb-3">
 							<CardTitle className="text-base">Total Traffic Distribution in the last 10s</CardTitle>
-							<div className="flex gap-2">
-								<Select value={providerFilter} onValueChange={setProviderFilter}>
-									<SelectTrigger className="h-8 w-[140px] text-xs">
-										<SelectValue placeholder="All Providers" />
-									</SelectTrigger>
-									<SelectContent>
-										<SelectItem value="all">All Providers</SelectItem>
-										{providerOptions.map((p) => (
-											<SelectItem key={p} value={p}>
-												{ProviderLabels[p as keyof typeof ProviderLabels] || p}
-											</SelectItem>
-										))}
-									</SelectContent>
-								</Select>
-							</div>
 						</CardHeader>
 						<CardContent>
 							<Table data-testid="traffic-distribution-table">
@@ -331,23 +513,8 @@ export default function AdaptiveRoutingPage() {
 
 					{/* Direction Weights & Performance */}
 					<Card className="shadow-none">
-						<CardHeader className="flex flex-row items-center justify-between pb-3">
+						<CardHeader className="pb-3">
 							<CardTitle className="text-base">Direction Weights &amp; Performance</CardTitle>
-							<div className="flex gap-2">
-								<Select value={providerFilter} onValueChange={setProviderFilter}>
-									<SelectTrigger className="h-8 w-[140px] text-xs">
-										<SelectValue placeholder="All Providers" />
-									</SelectTrigger>
-									<SelectContent>
-										<SelectItem value="all">All Providers</SelectItem>
-										{providerOptions.map((p) => (
-											<SelectItem key={p} value={p}>
-												{ProviderLabels[p as keyof typeof ProviderLabels] || p}
-											</SelectItem>
-										))}
-									</SelectContent>
-								</Select>
-							</div>
 						</CardHeader>
 						<CardContent>
 							<Table containerClassName="max-h-[32rem]" data-testid="adaptive-directions-table">
@@ -423,23 +590,8 @@ export default function AdaptiveRoutingPage() {
 
 					{/* Route Weights & Performance */}
 					<Card className="shadow-none">
-						<CardHeader className="flex flex-row items-center justify-between pb-3">
+						<CardHeader className="pb-3">
 							<CardTitle className="text-base">Route Weights &amp; Performance</CardTitle>
-							<div className="flex gap-2">
-								<Select value={providerFilter} onValueChange={setProviderFilter}>
-									<SelectTrigger className="h-8 w-[140px] text-xs">
-										<SelectValue placeholder="All Providers" />
-									</SelectTrigger>
-									<SelectContent>
-										<SelectItem value="all">All Providers</SelectItem>
-										{providerOptions.map((p) => (
-											<SelectItem key={p} value={p}>
-												{ProviderLabels[p as keyof typeof ProviderLabels] || p}
-											</SelectItem>
-										))}
-									</SelectContent>
-								</Select>
-							</div>
 						</CardHeader>
 						<CardContent>
 							<Table containerClassName="max-h-[32rem]" data-testid="adaptive-routes-table">
