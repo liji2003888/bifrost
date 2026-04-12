@@ -3601,3 +3601,299 @@ func (s *RDBConfigStore) GetOauthConfigByTokenID(ctx context.Context, tokenID st
 	}
 	return &config, nil
 }
+
+// GetGuardrailProviders retrieves all guardrail providers from the database.
+func (s *RDBConfigStore) GetGuardrailProviders(ctx context.Context) ([]tables.TableGuardrailProvider, error) {
+	var providers []tables.TableGuardrailProvider
+	if err := s.db.WithContext(ctx).Order("created_at DESC, id ASC").Find(&providers).Error; err != nil {
+		return nil, err
+	}
+	return providers, nil
+}
+
+// GetGuardrailProvidersPaginated retrieves guardrail providers with pagination and optional search filtering.
+func (s *RDBConfigStore) GetGuardrailProvidersPaginated(ctx context.Context, params GuardrailProvidersQueryParams) ([]tables.TableGuardrailProvider, int64, error) {
+	baseQuery := s.db.WithContext(ctx).Model(&tables.TableGuardrailProvider{})
+
+	if params.Search != "" {
+		search := "%" + strings.ToLower(params.Search) + "%"
+		baseQuery = baseQuery.Where("LOWER(name) LIKE ?", search)
+	}
+
+	var totalCount int64
+	if err := baseQuery.Count(&totalCount).Error; err != nil {
+		return nil, 0, err
+	}
+
+	limit := params.Limit
+	offset := params.Offset
+
+	if limit <= 0 {
+		limit = 25
+	} else if limit > 100 {
+		limit = 100
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+
+	var providers []tables.TableGuardrailProvider
+	if err := baseQuery.Order("created_at DESC, id ASC").Offset(offset).Limit(limit).Find(&providers).Error; err != nil {
+		return nil, 0, err
+	}
+	return providers, totalCount, nil
+}
+
+// GetGuardrailProvider retrieves a specific guardrail provider by ID.
+func (s *RDBConfigStore) GetGuardrailProvider(ctx context.Context, id string) (*tables.TableGuardrailProvider, error) {
+	var provider tables.TableGuardrailProvider
+	result := s.db.WithContext(ctx).Where("id = ?", id).First(&provider)
+	if result.Error != nil {
+		return nil, s.parseGormError(result.Error)
+	}
+	return &provider, nil
+}
+
+// CreateGuardrailProvider creates a new guardrail provider in the database.
+func (s *RDBConfigStore) CreateGuardrailProvider(ctx context.Context, provider *tables.TableGuardrailProvider, tx ...*gorm.DB) error {
+	database := s.db
+	if len(tx) > 0 && tx[0] != nil {
+		database = tx[0]
+	}
+	return s.parseGormError(database.WithContext(ctx).Create(provider).Error)
+}
+
+// UpdateGuardrailProvider updates an existing guardrail provider in the database.
+func (s *RDBConfigStore) UpdateGuardrailProvider(ctx context.Context, provider *tables.TableGuardrailProvider, tx ...*gorm.DB) error {
+	database := s.db
+	if len(tx) > 0 && tx[0] != nil {
+		database = tx[0]
+	}
+	return s.parseGormError(database.WithContext(ctx).Save(provider).Error)
+}
+
+// DeleteGuardrailProvider deletes a guardrail provider from the database.
+func (s *RDBConfigStore) DeleteGuardrailProvider(ctx context.Context, id string, tx ...*gorm.DB) error {
+	database := s.db
+	if len(tx) > 0 && tx[0] != nil {
+		database = tx[0]
+	}
+	result := database.WithContext(ctx).Delete(&tables.TableGuardrailProvider{}, "id = ?", id)
+	if result.Error != nil {
+		return s.parseGormError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetGuardrailRules retrieves all guardrail rules from the database.
+func (s *RDBConfigStore) GetGuardrailRules(ctx context.Context) ([]tables.TableGuardrailRule, error) {
+	var rules []tables.TableGuardrailRule
+	if err := s.db.WithContext(ctx).Order("priority ASC, created_at DESC, id ASC").Find(&rules).Error; err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+// GetGuardrailRulesPaginated retrieves guardrail rules with pagination and optional search filtering.
+func (s *RDBConfigStore) GetGuardrailRulesPaginated(ctx context.Context, params GuardrailRulesQueryParams) ([]tables.TableGuardrailRule, int64, error) {
+	baseQuery := s.db.WithContext(ctx).Model(&tables.TableGuardrailRule{})
+
+	if params.Search != "" {
+		search := "%" + strings.ToLower(params.Search) + "%"
+		baseQuery = baseQuery.Where("LOWER(name) LIKE ?", search)
+	}
+
+	var totalCount int64
+	if err := baseQuery.Count(&totalCount).Error; err != nil {
+		return nil, 0, err
+	}
+
+	limit := params.Limit
+	offset := params.Offset
+
+	if limit <= 0 {
+		limit = 25
+	} else if limit > 100 {
+		limit = 100
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+
+	var rules []tables.TableGuardrailRule
+	if err := baseQuery.Order("priority ASC, created_at DESC, id ASC").Offset(offset).Limit(limit).Find(&rules).Error; err != nil {
+		return nil, 0, err
+	}
+	return rules, totalCount, nil
+}
+
+// GetGuardrailRule retrieves a specific guardrail rule by ID.
+func (s *RDBConfigStore) GetGuardrailRule(ctx context.Context, id string) (*tables.TableGuardrailRule, error) {
+	var rule tables.TableGuardrailRule
+	result := s.db.WithContext(ctx).Where("id = ?", id).First(&rule)
+	if result.Error != nil {
+		return nil, s.parseGormError(result.Error)
+	}
+	return &rule, nil
+}
+
+// CreateGuardrailRule creates a new guardrail rule in the database.
+func (s *RDBConfigStore) CreateGuardrailRule(ctx context.Context, rule *tables.TableGuardrailRule, tx ...*gorm.DB) error {
+	database := s.db
+	if len(tx) > 0 && tx[0] != nil {
+		database = tx[0]
+	}
+	// Validate scopeID is required for non-global scope
+	if rule.Scope != "" && rule.Scope != "global" && rule.ScopeID == nil {
+		return fmt.Errorf("scopeID is required for non-global scope '%s'", rule.Scope)
+	}
+	return s.parseGormError(database.WithContext(ctx).Create(rule).Error)
+}
+
+// UpdateGuardrailRule updates an existing guardrail rule in the database.
+func (s *RDBConfigStore) UpdateGuardrailRule(ctx context.Context, rule *tables.TableGuardrailRule, tx ...*gorm.DB) error {
+	database := s.db
+	if len(tx) > 0 && tx[0] != nil {
+		database = tx[0]
+	}
+	// Validate scopeID is required for non-global scope
+	if rule.Scope != "" && rule.Scope != "global" && rule.ScopeID == nil {
+		return fmt.Errorf("scopeID is required for non-global scope '%s'", rule.Scope)
+	}
+	return s.parseGormError(database.WithContext(ctx).Save(rule).Error)
+}
+
+// DeleteGuardrailRule deletes a guardrail rule from the database.
+func (s *RDBConfigStore) DeleteGuardrailRule(ctx context.Context, id string, tx ...*gorm.DB) error {
+	database := s.db
+	if len(tx) > 0 && tx[0] != nil {
+		database = tx[0]
+	}
+	result := database.WithContext(ctx).Delete(&tables.TableGuardrailRule{}, "id = ?", id)
+	if result.Error != nil {
+		return s.parseGormError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RBAC
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetRbacRoles retrieves all roles without preloading permissions.
+func (s *RDBConfigStore) GetRbacRoles(ctx context.Context) ([]tables.TableRbacRole, error) {
+	var roles []tables.TableRbacRole
+	if err := s.db.WithContext(ctx).Order("created_at ASC").Find(&roles).Error; err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+// GetAllRbacRoles retrieves all roles with permissions eagerly loaded.
+func (s *RDBConfigStore) GetAllRbacRoles(ctx context.Context) ([]tables.TableRbacRole, error) {
+	var roles []tables.TableRbacRole
+	if err := s.db.WithContext(ctx).
+		Preload("Permissions").
+		Order("created_at ASC").
+		Find(&roles).Error; err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+// GetRbacRole retrieves a single role by ID with permissions preloaded.
+func (s *RDBConfigStore) GetRbacRole(ctx context.Context, id string) (*tables.TableRbacRole, error) {
+	var role tables.TableRbacRole
+	if err := s.db.WithContext(ctx).
+		Preload("Permissions").
+		Where("id = ?", id).
+		First(&role).Error; err != nil {
+		return nil, s.parseGormError(err)
+	}
+	return &role, nil
+}
+
+// CreateRbacRole creates a new role in the database.
+func (s *RDBConfigStore) CreateRbacRole(ctx context.Context, role *tables.TableRbacRole) error {
+	return s.parseGormError(s.db.WithContext(ctx).Create(role).Error)
+}
+
+// UpdateRbacRole updates an existing role (name and description only; permissions handled separately).
+func (s *RDBConfigStore) UpdateRbacRole(ctx context.Context, role *tables.TableRbacRole) error {
+	return s.parseGormError(s.db.WithContext(ctx).
+		Model(role).
+		Updates(map[string]interface{}{
+			"name":        role.Name,
+			"description": role.Description,
+			"is_default":  role.IsDefault,
+			"updated_at":  role.UpdatedAt,
+		}).Error)
+}
+
+// DeleteRbacRole removes a role and its permissions (CASCADE) from the database.
+func (s *RDBConfigStore) DeleteRbacRole(ctx context.Context, id string) error {
+	result := s.db.WithContext(ctx).Delete(&tables.TableRbacRole{}, "id = ?", id)
+	if result.Error != nil {
+		return s.parseGormError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetRbacPermissionsByRole retrieves all permissions for a given role.
+func (s *RDBConfigStore) GetRbacPermissionsByRole(ctx context.Context, roleID string) ([]tables.TableRbacPermission, error) {
+	var perms []tables.TableRbacPermission
+	if err := s.db.WithContext(ctx).Where("role_id = ?", roleID).Find(&perms).Error; err != nil {
+		return nil, err
+	}
+	return perms, nil
+}
+
+// SetRbacPermissions replaces all permissions for a role atomically.
+func (s *RDBConfigStore) SetRbacPermissions(ctx context.Context, roleID string, permissions []tables.TableRbacPermission) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Delete existing permissions for this role
+		if err := tx.Where("role_id = ?", roleID).Delete(&tables.TableRbacPermission{}).Error; err != nil {
+			return err
+		}
+		// Insert new permissions
+		for i := range permissions {
+			permissions[i].RoleID = roleID
+		}
+		if len(permissions) > 0 {
+			if err := tx.Create(&permissions).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// GetRbacUserRoles retrieves all role assignments for a given user.
+func (s *RDBConfigStore) GetRbacUserRoles(ctx context.Context, userID string) ([]tables.TableRbacUserRole, error) {
+	var userRoles []tables.TableRbacUserRole
+	if err := s.db.WithContext(ctx).Where("user_id = ?", userID).Find(&userRoles).Error; err != nil {
+		return nil, err
+	}
+	return userRoles, nil
+}
+
+// SetRbacUserRole assigns a single role to a user, replacing any existing assignment.
+func (s *RDBConfigStore) SetRbacUserRole(ctx context.Context, userID string, roleID string) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", userID).Delete(&tables.TableRbacUserRole{}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&tables.TableRbacUserRole{UserID: userID, RoleID: roleID}).Error
+	})
+}

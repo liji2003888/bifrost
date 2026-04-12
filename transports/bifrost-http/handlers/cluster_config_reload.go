@@ -32,7 +32,10 @@ const (
 	ClusterConfigScopePrompt             ClusterConfigScope = "prompt"
 	ClusterConfigScopePromptSession      ClusterConfigScope = "prompt_session"
 	ClusterConfigScopePromptVersion      ClusterConfigScope = "prompt_version"
+	ClusterConfigScopeGuardrailProvider  ClusterConfigScope = "guardrail_provider"
+	ClusterConfigScopeGuardrailRule      ClusterConfigScope = "guardrail_rule"
 	ClusterConfigScopeRoutingRule        ClusterConfigScope = "routing_rule"
+	ClusterConfigScopeRbac               ClusterConfigScope = "rbac"
 	ClusterConfigScopeSession            ClusterConfigScope = "session"
 	ClusterConfigScopeTeam               ClusterConfigScope = "team"
 	ClusterConfigScopeVirtualKey         ClusterConfigScope = "virtual_key"
@@ -62,8 +65,14 @@ type ClusterConfigChange struct {
 	PromptSession      *configstoreTables.TablePromptSession   `json:"prompt_session,omitempty"`
 	PromptVersionID    uint                                    `json:"prompt_version_id,omitempty"`
 	PromptVersion      *configstoreTables.TablePromptVersion   `json:"prompt_version,omitempty"`
+	GuardrailProviderID string                                        `json:"guardrail_provider_id,omitempty"`
+	GuardrailProvider   *configstoreTables.TableGuardrailProvider     `json:"guardrail_provider,omitempty"`
+	GuardrailRuleID     string                                        `json:"guardrail_rule_id,omitempty"`
+	GuardrailRule       *configstoreTables.TableGuardrailRule         `json:"guardrail_rule,omitempty"`
 	RoutingRuleID      string                                  `json:"routing_rule_id,omitempty"`
 	RoutingRule        *configstoreTables.TableRoutingRule     `json:"routing_rule,omitempty"`
+	RbacRoleID         string                                  `json:"rbac_role_id,omitempty"`
+	RbacRole           *configstoreTables.TableRbacRole        `json:"rbac_role,omitempty"`
 	SessionToken       string                                  `json:"session_token,omitempty"`
 	SessionConfig      *configstoreTables.SessionsTable        `json:"session_config,omitempty"`
 	TeamID             string                                  `json:"team_id,omitempty"`

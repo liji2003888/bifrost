@@ -620,6 +620,88 @@ Current cluster auto-sync scope now includes:
   - `npm exec next build -- --no-lint`
   - `npm exec tsc -- --noEmit`
 
+### 2026-04-12 | Base Commit b388fea | 护栏系统 + RBAC + 日志导出修复 + MCP 工具组增强
+
+- **日志导出 (Log Exports) 服务自动启用修复**
+  - 原因：LogExportService 需要在配置文件中显式设置 `log_exports.enabled: true` 才能启用，导致页面显示 "Log export service is not enabled"。
+  - 修复：当日志插件 (LoggerPlugin) 可用且数据库已连接时，自动创建默认 LogExportsConfig 并启用服务。
+  - 修改文件：`transports/bifrost-http/server/server.go`
+
+- **护栏系统 (Guardrails) 完整实现**
+  - 这是全新功能，之前仅有 "Contact Us" 占位页面。
+  - **数据库 Schema**：
+    - `TableGuardrailProvider`：护栏服务提供者配置（id, name, provider_type, enabled, timeout_seconds, config JSON）
+    - `TableGuardrailRule`：护栏规则（id, name, description, enabled, apply_on, profile_ids, sampling_rate, timeout_seconds, cel_expression, scope/scope_id, priority）
+    - 支持的提供者类型：`bedrock`（AWS Bedrock Guardrails）、`azure_content_moderation`（Azure 内容安全）、`patronus`（Patronus AI）、`mistral_moderation`（Mistral 审核）
+    - 规则应用模式：`input`（仅输入）、`output`（仅输出）、`both`（双向）
+  - **API 端点**：
+    - `GET/POST /api/guardrails/providers` — 护栏提供者列表/创建
+    - `GET/PUT/DELETE /api/guardrails/providers/{id}` — 护栏提供者详情/更新/删除
+    - `GET/POST /api/guardrails/rules` — 护栏规则列表/创建
+    - `GET/PUT/DELETE /api/guardrails/rules/{id}` — 护栏规则详情/更新/删除
+  - **集群同步**：
+    - 新增 `ClusterConfigScopeGuardrailProvider` 和 `ClusterConfigScopeGuardrailRule` 作用域
+    - 在 `cluster_config_reload.go`、`cluster_config_propagation.go`、`cluster_governance_apply.go` 中完整实现跨节点同步
+    - WebSocket 标签推送确保前端页面自动刷新
+  - **前端 UI — 护栏规则配置页面** (`guardrailsConfigurationView.tsx`)：
+    - 规则列表表格：Rule Name、Description、Apply On、Sampling Rate、Status、Actions
+    - 规则创建/编辑 Sheet：Rule Name、Description、Enable Toggle、Apply On（Input Only / Output Only / Both 三选一）、Guardrail Profiles（多选下拉，关联已配置的提供者）、Sampling Rate (%)、Timeout (s)、CEL Rule Builder（复用 Routing Rules 的 CELRuleBuilder）、CEL Expression Preview
+    - 删除确认对话框
+  - **前端 UI — 护栏提供者配置页面** (`guardrailsProviderView.tsx`)：
+    - 左侧边栏：四种提供者类型（AWS Bedrock、Azure Content Moderation、Patronus AI、Mistral Moderation），带图标和数量徽章
+    - 主区域：所选提供者类型的配置列表（ID、Name、Is Enabled、Timeout、Actions）
+    - 提供者创建/编辑 Sheet，每种类型有专属配置字段：
+      - Bedrock：guardrail_identifier、guardrail_version、region、access_key（EnvVar）、secret_key（EnvVar）
+      - Azure：endpoint、api_key（EnvVar）、categories
+      - Patronus：api_key（EnvVar）、evaluator_id
+      - Mistral：api_key（EnvVar）、model
+  - 修改文件：`framework/configstore/tables/guardrails.go`（新建）、`framework/configstore/rdb.go`、`framework/configstore/store.go`、`framework/configstore/migrations.go`、`transports/bifrost-http/handlers/guardrails.go`（新建）、`transports/bifrost-http/handlers/cluster_config_reload.go`、`transports/bifrost-http/server/cluster_config_propagation.go`、`transports/bifrost-http/server/cluster_governance_apply.go`、`transports/bifrost-http/server/server.go`
+
+- **RBAC 角色权限管理完整实现**
+  - 之前仅有 "Contact Us" 占位页面。
+  - **数据库 Schema**：
+    - `TableRbacRole`：角色（id, name, description, is_default, is_system）
+    - `TableRbacPermission`：权限分配（role_id, resource, operation）
+    - `TableRbacUserRole`：用户角色映射（user_id, role_id）
+  - **默认系统角色种子数据**：
+    - `Admin`：全部资源的全部操作权限
+    - `Developer`：除 Settings、RBAC、AuditLogs、UserProvisioning 写操作外的全部权限
+    - `Viewer`：所有资源的 Read/View 只读权限
+  - **覆盖 23 种资源**：GuardrailsConfig、GuardrailsProviders、GuardrailRules、UserProvisioning、Cluster、Settings、Users、Logs、Observability、VirtualKeys、ModelProvider、Plugins、MCPGateway、AdaptiveRouter、AuditLogs、Customers、Teams、RBAC、Governance、RoutingRules、PIIRedactor、PromptRepository、PromptDeploymentStrategy
+  - **6 种操作**：Read、View、Create、Update、Delete、Download
+  - **API 端点**：
+    - `GET/POST /api/rbac/roles` — 角色列表/创建
+    - `GET/PUT/DELETE /api/rbac/roles/{id}` — 角色详情/更新/删除（系统角色不可删除）
+    - `GET /api/rbac/users` — 用户角色映射列表
+    - `PUT /api/rbac/users/{user_id}` — 分配角色给用户
+    - `GET /api/rbac/resources` — 获取所有可用资源和操作
+    - `GET /api/rbac/check` — 权限检查
+  - **前端 UI** (`rbacView.tsx`)：
+    - 角色列表表格：Name、Description、Type（System/Custom badge）、Permissions Count、Actions
+    - 创建/编辑角色对话框：Name、Description、权限矩阵（行=资源，列=操作，复选框）
+    - 系统角色显示为只读
+    - 删除确认对话框（系统角色不可删除）
+  - 修改文件：`framework/configstore/tables/rbac.go`（新建）、`framework/configstore/rdb.go`、`framework/configstore/store.go`、`framework/configstore/migrations.go`、`transports/bifrost-http/handlers/rbac.go`（新建）、`transports/bifrost-http/server/server.go`
+
+- **MCP 工具组 (Tool Groups) 增强**
+  - 替换原有 "Contact Us" 占位页面为完整功能实现。
+  - 汇总统计：Connected Servers / Total Tools / Enabled for Execution
+  - 工具搜索：按名称或描述过滤
+  - 服务器分组折叠面板：每个 MCP 服务器独立展开，显示其所有工具
+  - 工具管理表格：Tool Name、Description、Execute（复选框）、Auto Execute（复选框）
+  - 批量操作：Enable All / Disable All 按钮
+  - 直接调用现有 MCP Client API 更新 `tools_to_execute` 和 `tools_to_auto_execute` 配置
+  - 修改文件：`ui/app/_fallbacks/enterprise/components/mcp-tool-groups/mcpToolGroups.tsx`
+
+- **验证通过**
+  - `go build ./bifrost-http/...` ✓
+  - `go test ./bifrost-http/handlers` ✓
+  - `go test ./bifrost-http/loadbalancer` ✓
+  - `go test ./bifrost-http/enterprise` ✓
+  - `go test ./bifrost-http/lib` ✓
+  - `go test ./configstore ./configstore/tables` (framework) ✓
+  - `npx tsc --noEmit` ✓
+
 ### 2026-04-12 | Base Commit fa39857 | Adaptive Routing 按规则配置重构 + 日志导出 UI + 状态面板重设计
 
 - **Adaptive Routing 配置从全局迁移到 Provider Routing Rules**

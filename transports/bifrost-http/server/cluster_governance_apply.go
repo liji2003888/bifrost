@@ -820,3 +820,103 @@ func derefString(value *string) string {
 	}
 	return *value
 }
+
+// ApplyClusterGuardrailProviderConfig applies a guardrail provider config change received from a cluster peer.
+func (s *BifrostHTTPServer) ApplyClusterGuardrailProviderConfig(ctx context.Context, id string, cfg *configstoreTables.TableGuardrailProvider, deleteProvider bool) error {
+	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
+		return fmt.Errorf("config store not found")
+	}
+
+	if id == "" && cfg != nil {
+		id = cfg.ID
+	}
+	if id == "" {
+		return fmt.Errorf("guardrail provider id is required")
+	}
+
+	if deleteProvider {
+		if err := s.Config.ConfigStore.DeleteGuardrailProvider(ctx, id); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			return fmt.Errorf("failed to delete guardrail provider: %w", err)
+		}
+		return nil
+	}
+	if cfg == nil {
+		return fmt.Errorf("guardrail provider payload is required")
+	}
+
+	existing, err := s.Config.ConfigStore.GetGuardrailProvider(ctx, id)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+		return fmt.Errorf("failed to get existing guardrail provider: %w", err)
+	}
+
+	record := *cfg
+	if existing == nil {
+		if err := s.Config.ConfigStore.CreateGuardrailProvider(ctx, &record); err != nil {
+			return fmt.Errorf("failed to create guardrail provider: %w", err)
+		}
+	} else {
+		if err := s.Config.ConfigStore.UpdateGuardrailProvider(ctx, &record); err != nil {
+			return fmt.Errorf("failed to update guardrail provider: %w", err)
+		}
+	}
+	return nil
+}
+
+// ApplyClusterGuardrailRuleConfig applies a guardrail rule config change received from a cluster peer.
+func (s *BifrostHTTPServer) ApplyClusterGuardrailRuleConfig(ctx context.Context, id string, cfg *configstoreTables.TableGuardrailRule, deleteRule bool) error {
+	if s == nil || s.Config == nil || s.Config.ConfigStore == nil {
+		return fmt.Errorf("config store not found")
+	}
+
+	if id == "" && cfg != nil {
+		id = cfg.ID
+	}
+	if id == "" {
+		return fmt.Errorf("guardrail rule id is required")
+	}
+
+	if deleteRule {
+		if err := s.Config.ConfigStore.DeleteGuardrailRule(ctx, id); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			return fmt.Errorf("failed to delete guardrail rule: %w", err)
+		}
+		return nil
+	}
+	if cfg == nil {
+		return fmt.Errorf("guardrail rule payload is required")
+	}
+
+	existing, err := s.Config.ConfigStore.GetGuardrailRule(ctx, id)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+		return fmt.Errorf("failed to get existing guardrail rule: %w", err)
+	}
+
+	record := clusterGuardrailRuleRecord(cfg)
+	if existing == nil {
+		if err := s.Config.ConfigStore.CreateGuardrailRule(ctx, record); err != nil {
+			return fmt.Errorf("failed to create guardrail rule: %w", err)
+		}
+	} else {
+		if err := s.Config.ConfigStore.UpdateGuardrailRule(ctx, record); err != nil {
+			return fmt.Errorf("failed to update guardrail rule: %w", err)
+		}
+	}
+	return nil
+}
+
+func clusterGuardrailRuleRecord(cfg *configstoreTables.TableGuardrailRule) *configstoreTables.TableGuardrailRule {
+	record := *cfg
+	if len(cfg.ParsedProfileIDs) > 0 {
+		record.ParsedProfileIDs = append([]string(nil), cfg.ParsedProfileIDs...)
+	} else {
+		record.ParsedProfileIDs = nil
+	}
+	if cfg.ParsedQuery != nil {
+		record.ParsedQuery = make(map[string]any, len(cfg.ParsedQuery))
+		for key, value := range cfg.ParsedQuery {
+			record.ParsedQuery[key] = value
+		}
+	} else {
+		record.ParsedQuery = nil
+	}
+	return &record
+}

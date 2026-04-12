@@ -117,6 +117,10 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		err = s.ApplyClusterPromptSessionConfig(ctx, change.PromptSessionID, change.PromptSession, change.Delete)
 	case handlers.ClusterConfigScopePromptVersion:
 		err = s.ApplyClusterPromptVersionConfig(ctx, change.PromptVersionID, change.PromptVersion, change.Delete)
+	case handlers.ClusterConfigScopeGuardrailProvider:
+		err = s.ApplyClusterGuardrailProviderConfig(ctx, change.GuardrailProviderID, change.GuardrailProvider, change.Delete)
+	case handlers.ClusterConfigScopeGuardrailRule:
+		err = s.ApplyClusterGuardrailRuleConfig(ctx, change.GuardrailRuleID, change.GuardrailRule, change.Delete)
 	case handlers.ClusterConfigScopeRoutingRule:
 		err = s.ApplyClusterRoutingRuleConfig(ctx, change.RoutingRuleID, change.RoutingRule, change.Delete)
 	case handlers.ClusterConfigScopeSession:
@@ -159,6 +163,8 @@ func clusterConfigChangeTags(change *handlers.ClusterConfigChange) []string {
 		tags = append(tags, "Config", "AdaptiveRouting")
 	case handlers.ClusterConfigScopeCustomer, handlers.ClusterConfigScopeTeam, handlers.ClusterConfigScopeVirtualKey, handlers.ClusterConfigScopeModelConfig, handlers.ClusterConfigScopeProviderGovernance, handlers.ClusterConfigScopeRoutingRule:
 		tags = append(tags, "Customers", "Teams", "VirtualKeys", "Budgets", "RateLimits", "UsageStats", "DebugStats", "HealthCheck", "ModelConfigs", "ProviderGovernance", "RoutingRules")
+	case handlers.ClusterConfigScopeGuardrailProvider, handlers.ClusterConfigScopeGuardrailRule:
+		tags = append(tags, "GuardrailProviders", "GuardrailRules")
 	case handlers.ClusterConfigScopeMCPClient:
 		tags = append(tags, "MCPClients", "OAuth2Config")
 	case handlers.ClusterConfigScopeOAuthConfig, handlers.ClusterConfigScopeOAuthToken:

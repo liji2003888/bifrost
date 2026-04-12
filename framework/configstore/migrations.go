@@ -8,6 +8,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/google/uuid"
@@ -334,6 +335,55 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	}
 	if err := migrationAddRoutingRuleAdaptiveColumns(ctx, db); err != nil {
 		return err
+	}
+	if err := migrationAddGuardrailTables(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddRbacTables(ctx, db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrationAddGuardrailTables adds the guardrail_providers and guardrail_rules tables
+func migrationAddGuardrailTables(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_guardrail_tables",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			if !migrator.HasTable(&tables.TableGuardrailProvider{}) {
+				if err := migrator.CreateTable(&tables.TableGuardrailProvider{}); err != nil {
+					return fmt.Errorf("failed to create guardrail_providers table: %w", err)
+				}
+			}
+
+			if !migrator.HasTable(&tables.TableGuardrailRule{}) {
+				if err := migrator.CreateTable(&tables.TableGuardrailRule{}); err != nil {
+					return fmt.Errorf("failed to create guardrail_rules table: %w", err)
+				}
+			}
+
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			if err := migrator.DropTable(&tables.TableGuardrailRule{}); err != nil {
+				return err
+			}
+			if err := migrator.DropTable(&tables.TableGuardrailProvider{}); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	}})
+	err := m.Migrate()
+	if err != nil {
+		return fmt.Errorf("error while running guardrail_tables migration: %s", err.Error())
 	}
 	return nil
 }
@@ -5013,4 +5063,153 @@ func migrationAddRoutingRuleAdaptiveColumns(ctx context.Context, db *gorm.DB) er
 		return fmt.Errorf("error running routing_rule_adaptive_columns migration: %s", err.Error())
 	}
 	return nil
+}
+
+// migrationAddRbacTables adds the rbac_roles, rbac_permissions, and rbac_user_roles tables
+// and seeds the three built-in system roles (admin, developer, viewer).
+func migrationAddRbacTables(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_rbac_tables",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+
+			if !mg.HasTable(&tables.TableRbacRole{}) {
+				if err := mg.CreateTable(&tables.TableRbacRole{}); err != nil {
+					return fmt.Errorf("failed to create rbac_roles table: %w", err)
+				}
+			}
+
+			if !mg.HasTable(&tables.TableRbacPermission{}) {
+				if err := mg.CreateTable(&tables.TableRbacPermission{}); err != nil {
+					return fmt.Errorf("failed to create rbac_permissions table: %w", err)
+				}
+			}
+
+			if !mg.HasTable(&tables.TableRbacUserRole{}) {
+				if err := mg.CreateTable(&tables.TableRbacUserRole{}); err != nil {
+					return fmt.Errorf("failed to create rbac_user_roles table: %w", err)
+				}
+			}
+
+			// All resources and operations from rbacContext.tsx
+			allResources := []string{
+				"GuardrailsConfig", "GuardrailsProviders", "GuardrailRules",
+				"UserProvisioning", "Cluster", "Settings", "Users", "Logs",
+				"Observability", "VirtualKeys", "ModelProvider", "Plugins",
+				"MCPGateway", "AdaptiveRouter", "AuditLogs", "Customers", "Teams",
+				"RBAC", "Governance", "RoutingRules", "PIIRedactor",
+				"PromptRepository", "PromptDeploymentStrategy",
+			}
+			allOperations := []string{"Read", "View", "Create", "Update", "Delete", "Download"}
+
+			// Restricted resources for developer role (no Settings/RBAC/AuditLogs write)
+			developerWriteBlacklist := map[string]bool{
+				"Settings":  true,
+				"RBAC":      true,
+				"AuditLogs": true,
+			}
+
+			now := log_time_now()
+
+			type systemRole struct {
+				id          string
+				name        string
+				description string
+				permsFilter func(resource, operation string) bool
+			}
+
+			systemRoles := []systemRole{
+				{
+					id:          "system-admin",
+					name:        "admin",
+					description: "Full access to all resources and operations",
+					permsFilter: func(resource, operation string) bool { return true },
+				},
+				{
+					id:          "system-developer",
+					name:        "developer",
+					description: "Access to most resources; cannot modify Settings, RBAC, or AuditLogs",
+					permsFilter: func(resource, operation string) bool {
+						writeOps := map[string]bool{"Create": true, "Update": true, "Delete": true}
+						if developerWriteBlacklist[resource] && writeOps[operation] {
+							return false
+						}
+						return true
+					},
+				},
+				{
+					id:          "system-viewer",
+					name:        "viewer",
+					description: "Read-only access to all resources",
+					permsFilter: func(resource, operation string) bool {
+						return operation == "Read" || operation == "View" || operation == "Download"
+					},
+				},
+			}
+
+			for _, sr := range systemRoles {
+				var existing tables.TableRbacRole
+				if err := tx.Where("id = ?", sr.id).First(&existing).Error; err != nil {
+					// Role doesn't exist yet, create it
+					role := tables.TableRbacRole{
+						ID:          sr.id,
+						Name:        sr.name,
+						Description: sr.description,
+						IsDefault:   false,
+						IsSystem:    true,
+						CreatedAt:   now,
+						UpdatedAt:   now,
+					}
+					if err := tx.Create(&role).Error; err != nil {
+						return fmt.Errorf("failed to seed system role %q: %w", sr.name, err)
+					}
+
+					// Seed permissions for this role
+					for _, resource := range allResources {
+						for _, operation := range allOperations {
+							if sr.permsFilter(resource, operation) {
+								perm := tables.TableRbacPermission{
+									RoleID:    sr.id,
+									Resource:  resource,
+									Operation: operation,
+								}
+								if err := tx.Create(&perm).Error; err != nil {
+									return fmt.Errorf("failed to seed permission %s/%s for role %q: %w", resource, operation, sr.name, err)
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+
+			if err := mg.DropTable(&tables.TableRbacUserRole{}); err != nil {
+				return err
+			}
+			if err := mg.DropTable(&tables.TableRbacPermission{}); err != nil {
+				return err
+			}
+			if err := mg.DropTable(&tables.TableRbacRole{}); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while running rbac_tables migration: %s", err.Error())
+	}
+	return nil
+}
+
+// log_time_now is a helper to get the current time for migrations
+// (avoids importing time directly in migration body lambdas)
+func log_time_now() time.Time {
+	return time.Now()
 }

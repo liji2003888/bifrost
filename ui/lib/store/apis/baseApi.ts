@@ -145,6 +145,7 @@ export const baseApi = createApi({
 		"ClusterNodes",
 		"Users",
 		"GuardrailRules",
+		"GuardrailProviders",
 		"Roles",
 		"Resources",
 		"Operations",

@@ -1158,6 +1158,20 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	pluginsHandler := handlers.NewPluginsHandler(callbacks, s.Config.ConfigStore, clusterPropagator)
 	sessionHandler := handlers.NewSessionHandler(s.Config.ConfigStore, s.WSTicketStore, clusterPropagator)
 	promptsHandler := handlers.NewPromptsHandler(s.Config.ConfigStore, clusterPropagator)
+	var guardrailsHandler *handlers.GuardrailsHandler
+	if s.Config.ConfigStore != nil {
+		guardrailsHandler, err = handlers.NewGuardrailsHandler(s.Config.ConfigStore, clusterPropagator)
+		if err != nil {
+			return fmt.Errorf("failed to initialize guardrails handler: %v", err)
+		}
+	}
+	var rbacHandler *handlers.RBACHandler
+	if s.Config.ConfigStore != nil {
+		rbacHandler, err = handlers.NewRBACHandler(s.Config.ConfigStore, clusterPropagator)
+		if err != nil {
+			return fmt.Errorf("failed to initialize RBAC handler: %v", err)
+		}
+	}
 	// Going ahead with API handlers
 	healthHandler.RegisterRoutes(s.Router, middlewares...)
 	providerHandler.RegisterRoutes(s.Router, middlewares...)
@@ -1175,6 +1189,12 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	}
 	if cacheHandler != nil {
 		cacheHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if guardrailsHandler != nil {
+		guardrailsHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if rbacHandler != nil {
+		rbacHandler.RegisterRoutes(s.Router, middlewares...)
 	}
 	if governanceHandler != nil {
 		governanceHandler.RegisterRoutes(s.Router, middlewares...)
@@ -1372,10 +1392,18 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		}
 	}
 	loggerPlugin, _ := lib.FindPluginAs[*logging.LoggerPlugin](s.Config, logging.PluginName)
-	if loggerPlugin != nil && s.Config.LogExportsConfig != nil && s.Config.LogExportsConfig.Enabled {
-		s.LogExportService, err = enterprisecfg.NewLogExportService(configDir, s.Config.LogExportsConfig, loggerPlugin.GetPluginLogManager(), s.AuditService, logger)
-		if err != nil {
-			return fmt.Errorf("failed to initialize log export service: %v", err)
+	// Auto-enable log exports when logging plugin is available and DB is connected
+	if loggerPlugin != nil {
+		logExportsCfg := s.Config.LogExportsConfig
+		if logExportsCfg == nil && s.Config.ConfigStore != nil {
+			logExportsCfg = &enterprisecfg.LogExportsConfig{Enabled: true}
+			s.Config.LogExportsConfig = logExportsCfg
+		}
+		if logExportsCfg != nil && logExportsCfg.Enabled {
+			s.LogExportService, err = enterprisecfg.NewLogExportService(configDir, logExportsCfg, loggerPlugin.GetPluginLogManager(), s.AuditService, logger)
+			if err != nil {
+				return fmt.Errorf("failed to initialize log export service: %v", err)
+			}
 		}
 	}
 	if s.Config.AlertsConfig != nil && s.Config.AlertsConfig.Enabled {

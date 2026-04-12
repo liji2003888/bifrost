@@ -1055,6 +1055,82 @@ func (m *MockConfigStore) DeleteRoutingRule(ctx context.Context, id string, tx .
 	return nil
 }
 
+// Guardrail Providers CRUD
+func (m *MockConfigStore) GetGuardrailProviders(ctx context.Context) ([]tables.TableGuardrailProvider, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) GetGuardrailProvidersPaginated(ctx context.Context, params configstore.GuardrailProvidersQueryParams) ([]tables.TableGuardrailProvider, int64, error) {
+	return nil, 0, nil
+}
+func (m *MockConfigStore) GetGuardrailProvider(ctx context.Context, id string) (*tables.TableGuardrailProvider, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) CreateGuardrailProvider(ctx context.Context, provider *tables.TableGuardrailProvider, tx ...*gorm.DB) error {
+	return nil
+}
+func (m *MockConfigStore) UpdateGuardrailProvider(ctx context.Context, provider *tables.TableGuardrailProvider, tx ...*gorm.DB) error {
+	return nil
+}
+func (m *MockConfigStore) DeleteGuardrailProvider(ctx context.Context, id string, tx ...*gorm.DB) error {
+	return nil
+}
+
+// Guardrail Rules CRUD
+func (m *MockConfigStore) GetGuardrailRules(ctx context.Context) ([]tables.TableGuardrailRule, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) GetGuardrailRulesPaginated(ctx context.Context, params configstore.GuardrailRulesQueryParams) ([]tables.TableGuardrailRule, int64, error) {
+	return nil, 0, nil
+}
+func (m *MockConfigStore) GetGuardrailRule(ctx context.Context, id string) (*tables.TableGuardrailRule, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) CreateGuardrailRule(ctx context.Context, rule *tables.TableGuardrailRule, tx ...*gorm.DB) error {
+	return nil
+}
+func (m *MockConfigStore) UpdateGuardrailRule(ctx context.Context, rule *tables.TableGuardrailRule, tx ...*gorm.DB) error {
+	return nil
+}
+func (m *MockConfigStore) DeleteGuardrailRule(ctx context.Context, id string, tx ...*gorm.DB) error {
+	return nil
+}
+
+// RBAC Roles CRUD
+func (m *MockConfigStore) GetRbacRoles(ctx context.Context) ([]tables.TableRbacRole, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) GetAllRbacRoles(ctx context.Context) ([]tables.TableRbacRole, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) GetRbacRole(ctx context.Context, id string) (*tables.TableRbacRole, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) CreateRbacRole(ctx context.Context, role *tables.TableRbacRole) error {
+	return nil
+}
+func (m *MockConfigStore) UpdateRbacRole(ctx context.Context, role *tables.TableRbacRole) error {
+	return nil
+}
+func (m *MockConfigStore) DeleteRbacRole(ctx context.Context, id string) error {
+	return nil
+}
+
+// RBAC Permissions
+func (m *MockConfigStore) GetRbacPermissionsByRole(ctx context.Context, roleID string) ([]tables.TableRbacPermission, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) SetRbacPermissions(ctx context.Context, roleID string, permissions []tables.TableRbacPermission) error {
+	return nil
+}
+
+// RBAC User-Role mappings
+func (m *MockConfigStore) GetRbacUserRoles(ctx context.Context, userID string) ([]tables.TableRbacUserRole, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) SetRbacUserRole(ctx context.Context, userID string, roleID string) error {
+	return nil
+}
+
 // Prompt Repository - Folders
 func (m *MockConfigStore) GetFolders(ctx context.Context) ([]tables.TableFolder, error) {
 	return nil, nil

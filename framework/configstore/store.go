@@ -40,6 +40,20 @@ type RoutingRulesQueryParams struct {
 	Search string
 }
 
+// GuardrailProvidersQueryParams holds pagination, filtering, and search parameters for guardrail provider queries.
+type GuardrailProvidersQueryParams struct {
+	Limit  int
+	Offset int
+	Search string
+}
+
+// GuardrailRulesQueryParams holds pagination, filtering, and search parameters for guardrail rule queries.
+type GuardrailRulesQueryParams struct {
+	Limit  int
+	Offset int
+	Search string
+}
+
 // MCPClientsQueryParams holds pagination, filtering, and search parameters for MCP client queries.
 type MCPClientsQueryParams struct {
 	Limit  int
@@ -184,6 +198,22 @@ type ConfigStore interface {
 	UpdateRoutingRule(ctx context.Context, rule *tables.TableRoutingRule, tx ...*gorm.DB) error
 	DeleteRoutingRule(ctx context.Context, id string, tx ...*gorm.DB) error
 
+	// Guardrail Providers CRUD
+	GetGuardrailProviders(ctx context.Context) ([]tables.TableGuardrailProvider, error)
+	GetGuardrailProvidersPaginated(ctx context.Context, params GuardrailProvidersQueryParams) ([]tables.TableGuardrailProvider, int64, error)
+	GetGuardrailProvider(ctx context.Context, id string) (*tables.TableGuardrailProvider, error)
+	CreateGuardrailProvider(ctx context.Context, provider *tables.TableGuardrailProvider, tx ...*gorm.DB) error
+	UpdateGuardrailProvider(ctx context.Context, provider *tables.TableGuardrailProvider, tx ...*gorm.DB) error
+	DeleteGuardrailProvider(ctx context.Context, id string, tx ...*gorm.DB) error
+
+	// Guardrail Rules CRUD
+	GetGuardrailRules(ctx context.Context) ([]tables.TableGuardrailRule, error)
+	GetGuardrailRulesPaginated(ctx context.Context, params GuardrailRulesQueryParams) ([]tables.TableGuardrailRule, int64, error)
+	GetGuardrailRule(ctx context.Context, id string) (*tables.TableGuardrailRule, error)
+	CreateGuardrailRule(ctx context.Context, rule *tables.TableGuardrailRule, tx ...*gorm.DB) error
+	UpdateGuardrailRule(ctx context.Context, rule *tables.TableGuardrailRule, tx ...*gorm.DB) error
+	DeleteGuardrailRule(ctx context.Context, id string, tx ...*gorm.DB) error
+
 	// Model config CRUD
 	GetModelConfigs(ctx context.Context) ([]tables.TableModelConfig, error)
 	GetModelConfigsPaginated(ctx context.Context, params ModelConfigsQueryParams) ([]tables.TableModelConfig, int64, error)
@@ -310,6 +340,22 @@ type ConfigStore interface {
 
 	// Cleanup
 	Close(ctx context.Context) error
+
+	// RBAC Roles CRUD
+	GetRbacRoles(ctx context.Context) ([]tables.TableRbacRole, error)
+	GetAllRbacRoles(ctx context.Context) ([]tables.TableRbacRole, error) // with permissions eagerly loaded
+	GetRbacRole(ctx context.Context, id string) (*tables.TableRbacRole, error)
+	CreateRbacRole(ctx context.Context, role *tables.TableRbacRole) error
+	UpdateRbacRole(ctx context.Context, role *tables.TableRbacRole) error
+	DeleteRbacRole(ctx context.Context, id string) error
+
+	// RBAC Permissions
+	GetRbacPermissionsByRole(ctx context.Context, roleID string) ([]tables.TableRbacPermission, error)
+	SetRbacPermissions(ctx context.Context, roleID string, permissions []tables.TableRbacPermission) error
+
+	// RBAC User-Role mappings
+	GetRbacUserRoles(ctx context.Context, userID string) ([]tables.TableRbacUserRole, error)
+	SetRbacUserRole(ctx context.Context, userID string, roleID string) error
 }
 
 // NewConfigStore creates a new config store based on the configuration
