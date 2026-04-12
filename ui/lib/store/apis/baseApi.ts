@@ -164,6 +164,7 @@ export const baseApi = createApi({
 		"AdaptiveRouting",
 		"Alerts",
 		"LogExports",
+		"LogExportConfigs",
 		"VaultStatus",
 		"SessionState",
 	],

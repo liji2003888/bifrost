@@ -356,6 +356,13 @@ type ConfigStore interface {
 	// RBAC User-Role mappings
 	GetRbacUserRoles(ctx context.Context, userID string) ([]tables.TableRbacUserRole, error)
 	SetRbacUserRole(ctx context.Context, userID string, roleID string) error
+
+	// Log Export Config CRUD
+	GetLogExportConfigs(ctx context.Context) ([]tables.TableLogExportConfig, error)
+	GetLogExportConfig(ctx context.Context, id string) (*tables.TableLogExportConfig, error)
+	CreateLogExportConfig(ctx context.Context, config *tables.TableLogExportConfig, tx ...*gorm.DB) error
+	UpdateLogExportConfig(ctx context.Context, config *tables.TableLogExportConfig, tx ...*gorm.DB) error
+	DeleteLogExportConfig(ctx context.Context, id string, tx ...*gorm.DB) error
 }
 
 // NewConfigStore creates a new config store based on the configuration

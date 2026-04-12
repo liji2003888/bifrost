@@ -161,11 +161,12 @@ type BifrostHTTPServer struct {
 	Client *bifrost.Bifrost
 	Config *lib.Config
 
-	ClusterService   *enterprisecfg.ClusterService
-	AuditService     *enterprisecfg.AuditService
-	LogExportService *enterprisecfg.LogExportService
-	AlertManager     *enterprisecfg.AlertManager
-	VaultService     *enterprisecfg.VaultService
+	ClusterService    *enterprisecfg.ClusterService
+	AuditService      *enterprisecfg.AuditService
+	LogExportService  *enterprisecfg.LogExportService
+	ExportScheduler   *enterprisecfg.ExportScheduler
+	AlertManager      *enterprisecfg.AlertManager
+	VaultService      *enterprisecfg.VaultService
 
 	clusterConfigReporter   *clusterConfigSyncReporter
 	clusterConfigSelfHealer *clusterConfigSelfHealer
@@ -1172,6 +1173,13 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 			return fmt.Errorf("failed to initialize RBAC handler: %v", err)
 		}
 	}
+	var logExportConfigsHandler *handlers.LogExportConfigsHandler
+	if s.Config.ConfigStore != nil {
+		logExportConfigsHandler, err = handlers.NewLogExportConfigsHandler(s.Config.ConfigStore, s.ExportScheduler, s.LogExportService, clusterPropagator)
+		if err != nil {
+			return fmt.Errorf("failed to initialize log export configs handler: %v", err)
+		}
+	}
 	// Going ahead with API handlers
 	healthHandler.RegisterRoutes(s.Router, middlewares...)
 	providerHandler.RegisterRoutes(s.Router, middlewares...)
@@ -1195,6 +1203,9 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	}
 	if rbacHandler != nil {
 		rbacHandler.RegisterRoutes(s.Router, middlewares...)
+	}
+	if logExportConfigsHandler != nil {
+		logExportConfigsHandler.RegisterRoutes(s.Router, middlewares...)
 	}
 	if governanceHandler != nil {
 		governanceHandler.RegisterRoutes(s.Router, middlewares...)
@@ -1403,6 +1414,11 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 			s.LogExportService, err = enterprisecfg.NewLogExportService(configDir, logExportsCfg, loggerPlugin.GetPluginLogManager(), s.AuditService, logger)
 			if err != nil {
 				return fmt.Errorf("failed to initialize log export service: %v", err)
+			}
+			// Start the export scheduler only when a ConfigStore is available (so it can load configs).
+			if s.Config.ConfigStore != nil && s.LogExportService != nil {
+				s.ExportScheduler = enterprisecfg.NewExportScheduler(s.Config.ConfigStore, s.LogExportService, logger)
+				s.ExportScheduler.Start()
 			}
 		}
 	}
@@ -1669,6 +1685,10 @@ func (s *BifrostHTTPServer) Start() error {
 				logger.Info("closing websocket connection pool...")
 				s.wsPool.Close()
 			}
+			if s.ExportScheduler != nil {
+				logger.Info("stopping export scheduler...")
+				s.ExportScheduler.Stop()
+			}
 			if s.AlertManager != nil {
 				logger.Info("stopping alert manager...")
 				s.AlertManager.Stop()
@@ -1695,6 +1715,9 @@ func (s *BifrostHTTPServer) Start() error {
 		}
 
 	case err := <-errChan:
+		if s.ExportScheduler != nil {
+			s.ExportScheduler.Stop()
+		}
 		if s.AlertManager != nil {
 			s.AlertManager.Stop()
 		}

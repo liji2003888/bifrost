@@ -212,3 +212,48 @@ export interface VaultStatus {
 	last_error?: string;
 	managed_secrets: number;
 }
+
+export type LogExportFrequency = "daily" | "weekly" | "monthly";
+export type LogExportDestinationType = "local" | "s3" | "gcs" | "azure_blob";
+export type LogExportFormat = "jsonl" | "csv";
+export type LogExportCompression = "none" | "gzip";
+export type LogExportDataScope = "logs" | "mcp_logs";
+export type LogExportRunStatus = "success" | "failed" | "running";
+
+export interface LogExportConfig {
+	id: string;
+	name: string;
+	description: string;
+	enabled: boolean;
+	frequency: LogExportFrequency;
+	schedule_time: string; // "HH:MM"
+	schedule_day: string; // "sunday".."saturday" for weekly, "1".."28" for monthly
+	timezone: string;
+	destination_type: LogExportDestinationType;
+	destination_config: Record<string, any>;
+	format: LogExportFormat;
+	compression: LogExportCompression;
+	max_rows: number;
+	data_scope: LogExportDataScope;
+	filters: Record<string, any>;
+	last_run_at?: string;
+	last_run_status?: LogExportRunStatus;
+	last_run_error?: string;
+	next_run_at?: string;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface LogExportConfigsResponse {
+	configs: LogExportConfig[];
+	count: number;
+}
+
+export interface LogExportConfigResponse {
+	config: LogExportConfig;
+}
+
+export interface TriggerLogExportConfigResponse {
+	message: string;
+	job_id: string;
+}

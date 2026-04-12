@@ -342,6 +342,9 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationAddRbacTables(ctx, db); err != nil {
 		return err
 	}
+	if err := migrationAddLogExportConfigTable(ctx, db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -5212,4 +5215,37 @@ func migrationAddRbacTables(ctx context.Context, db *gorm.DB) error {
 // (avoids importing time directly in migration body lambdas)
 func log_time_now() time.Time {
 	return time.Now()
+}
+
+// migrationAddLogExportConfigTable creates the log_export_configs table.
+func migrationAddLogExportConfigTable(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_log_export_config_table",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+
+			if !mg.HasTable(&tables.TableLogExportConfig{}) {
+				if err := mg.CreateTable(&tables.TableLogExportConfig{}); err != nil {
+					return fmt.Errorf("failed to create log_export_configs table: %w", err)
+				}
+			}
+
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+
+			if err := mg.DropTable(&tables.TableLogExportConfig{}); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while running log_export_config_table migration: %s", err.Error())
+	}
+	return nil
 }

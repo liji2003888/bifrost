@@ -6,7 +6,11 @@ import type {
 	ClusterStatus,
 	CreateLogExportRequest,
 	ExportJob,
+	LogExportConfig,
+	LogExportConfigResponse,
+	LogExportConfigsResponse,
 	LogExportsResponse,
+	TriggerLogExportConfigResponse,
 	VaultStatus,
 } from "@/lib/types/enterprise";
 import { baseApi } from "./baseApi";
@@ -120,6 +124,42 @@ export const enterpriseApi = baseApi.injectEndpoints({
 			}),
 			invalidatesTags: ["LogExports"],
 		}),
+		getLogExportConfigs: builder.query<LogExportConfigsResponse, void>({
+			query: () => ({
+				url: "/log-export-configs",
+			}),
+			providesTags: ["LogExportConfigs"],
+		}),
+		createLogExportConfig: builder.mutation<LogExportConfigResponse, Partial<LogExportConfig>>({
+			query: (body) => ({
+				url: "/log-export-configs",
+				method: "POST",
+				body,
+			}),
+			invalidatesTags: ["LogExportConfigs"],
+		}),
+		updateLogExportConfig: builder.mutation<LogExportConfigResponse, { id: string; data: Partial<LogExportConfig> }>({
+			query: ({ id, data }) => ({
+				url: `/log-export-configs/${id}`,
+				method: "PUT",
+				body: data,
+			}),
+			invalidatesTags: ["LogExportConfigs"],
+		}),
+		deleteLogExportConfig: builder.mutation<{ message: string }, string>({
+			query: (id) => ({
+				url: `/log-export-configs/${id}`,
+				method: "DELETE",
+			}),
+			invalidatesTags: ["LogExportConfigs"],
+		}),
+		triggerLogExportConfig: builder.mutation<TriggerLogExportConfigResponse, string>({
+			query: (id) => ({
+				url: `/log-export-configs/${id}/run`,
+				method: "POST",
+			}),
+			invalidatesTags: ["LogExports"],
+		}),
 	}),
 });
 
@@ -132,4 +172,9 @@ export const {
 	useGetClusterStatusQuery,
 	useGetLogExportsQuery,
 	useGetVaultStatusQuery,
+	useGetLogExportConfigsQuery,
+	useCreateLogExportConfigMutation,
+	useUpdateLogExportConfigMutation,
+	useDeleteLogExportConfigMutation,
+	useTriggerLogExportConfigMutation,
 } = enterpriseApi;

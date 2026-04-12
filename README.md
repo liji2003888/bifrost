@@ -620,6 +620,54 @@ Current cluster auto-sync scope now includes:
   - `npm exec next build -- --no-lint`
   - `npm exec tsc -- --noEmit`
 
+### 2026-04-12 | Base Commit a237336 | 日志导出企业级增强 — 定时导出 + 云存储 + 配置管理
+
+- **日志导出系统全面升级，对齐官网企业版文档设计**
+  - 参考文档：https://docs.getbifrost.ai/enterprise/log-exports
+  - 从"手动一次性导出"升级为"可配置定时导出 + 多目标存储"的企业级数据导出系统。
+
+- **命名导出配置 (LogExportConfig)**
+  - 新增 `log_export_configs` 数据库表，支持创建多个独立的命名导出配置。
+  - 每个配置包含：名称、描述、启用开关、调度计划、存储目标、数据格式、过滤条件。
+  - API 端点：`GET/POST /api/log-export-configs`、`GET/PUT/DELETE /api/log-export-configs/{id}`、`POST /api/log-export-configs/{id}/run`（立即触发）。
+
+- **定时导出调度器 (ExportScheduler)**
+  - 支持三种调度频率：每日 (daily)、每周 (weekly)、每月 (monthly)。
+  - 可配置执行时间 (HH:MM)、星期几/日期、时区。
+  - 后台每 60 秒检查一次，自动触发到期配置的导出任务。
+  - 执行完成后自动更新 `last_run_at`、`last_run_status`、`next_run_at`。
+  - 实现文件：`transports/bifrost-http/enterprise/export_scheduler.go`
+
+- **云存储目标 (Export Destinations)**
+  - **Amazon S3**：完整实现（bucket、region、prefix、credentials），使用 AWS SDK v2。
+  - **Google Cloud Storage**：接口预留（需要额外 GCS SDK 依赖）。
+  - **Azure Blob Storage**：接口预留（需要额外 Azure SDK 依赖）。
+  - **Local Disk**：保持原有本地文件存储行为。
+  - 路径模板支持：`{year}`、`{month}`、`{day}` 变量自动替换。
+  - 实现文件：`transports/bifrost-http/enterprise/export_destinations.go`
+
+- **前端 UI 全面重设计**
+  - **导出配置管理区**：配置列表表格（Name、Destination、Schedule、Format、Last/Next Run、Status、Actions）+ 创建/编辑 Sheet。
+  - **配置 Sheet 表单**：
+    - General：名称、描述、启用开关、数据范围（LLM Logs / MCP Logs）
+    - Schedule：频率（Daily/Weekly/Monthly）、时间、星期/日期、时区
+    - Destination：类型选择（Local / Amazon S3 / Google Cloud Storage / Azure Blob Storage）+ 各类型专属配置字段（bucket、region、prefix、credentials）
+    - Data：格式（JSONL/CSV）、压缩（None/Gzip）、最大行数
+  - **一次性导出区**：保留原有手动导出功能（时间窗口 + 范围 + 格式 + 压缩 + 最大行数）。
+  - **导出历史区**：任务列表（ID、Scope、Format、Status、Rows、Node、Created、Completed、Download）。
+  - 操作按钮：Run Now（立即触发）、Edit（编辑配置）、Delete（删除配置）。
+
+- **集群同步**
+  - 新增 `ClusterConfigScopeLogExportConfig` 作用域。
+  - 导出配置变更通过集群传播自动同步到所有节点。
+  - 调度器在每个节点独立运行，通过 DB 状态避免重复执行。
+
+- **验证通过**
+  - `go build ./bifrost-http/...` ✓
+  - `go test ./bifrost-http/handlers` ✓
+  - `go test ./bifrost-http/enterprise` ✓
+  - `npx tsc --noEmit` ✓
+
 ### 2026-04-12 | Base Commit 8090a43 | 日志导出下载修复 + 时间窗口支持
 
 - **日志导出 (Log Exports) 下载 500 错误修复**

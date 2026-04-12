@@ -3897,3 +3897,60 @@ func (s *RDBConfigStore) SetRbacUserRole(ctx context.Context, userID string, rol
 		return tx.Create(&tables.TableRbacUserRole{UserID: userID, RoleID: roleID}).Error
 	})
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Log Export Configs
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetLogExportConfigs retrieves all log export configurations from the database.
+func (s *RDBConfigStore) GetLogExportConfigs(ctx context.Context) ([]tables.TableLogExportConfig, error) {
+	var configs []tables.TableLogExportConfig
+	if err := s.db.WithContext(ctx).Order("created_at DESC, id ASC").Find(&configs).Error; err != nil {
+		return nil, err
+	}
+	return configs, nil
+}
+
+// GetLogExportConfig retrieves a specific log export configuration by ID.
+func (s *RDBConfigStore) GetLogExportConfig(ctx context.Context, id string) (*tables.TableLogExportConfig, error) {
+	var config tables.TableLogExportConfig
+	result := s.db.WithContext(ctx).Where("id = ?", id).First(&config)
+	if result.Error != nil {
+		return nil, s.parseGormError(result.Error)
+	}
+	return &config, nil
+}
+
+// CreateLogExportConfig creates a new log export configuration in the database.
+func (s *RDBConfigStore) CreateLogExportConfig(ctx context.Context, config *tables.TableLogExportConfig, tx ...*gorm.DB) error {
+	database := s.db
+	if len(tx) > 0 && tx[0] != nil {
+		database = tx[0]
+	}
+	return s.parseGormError(database.WithContext(ctx).Create(config).Error)
+}
+
+// UpdateLogExportConfig updates an existing log export configuration in the database.
+func (s *RDBConfigStore) UpdateLogExportConfig(ctx context.Context, config *tables.TableLogExportConfig, tx ...*gorm.DB) error {
+	database := s.db
+	if len(tx) > 0 && tx[0] != nil {
+		database = tx[0]
+	}
+	return s.parseGormError(database.WithContext(ctx).Save(config).Error)
+}
+
+// DeleteLogExportConfig deletes a log export configuration from the database.
+func (s *RDBConfigStore) DeleteLogExportConfig(ctx context.Context, id string, tx ...*gorm.DB) error {
+	database := s.db
+	if len(tx) > 0 && tx[0] != nil {
+		database = tx[0]
+	}
+	result := database.WithContext(ctx).Delete(&tables.TableLogExportConfig{}, "id = ?", id)
+	if result.Error != nil {
+		return s.parseGormError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

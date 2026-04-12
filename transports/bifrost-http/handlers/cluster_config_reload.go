@@ -35,6 +35,7 @@ const (
 	ClusterConfigScopeGuardrailProvider  ClusterConfigScope = "guardrail_provider"
 	ClusterConfigScopeGuardrailRule      ClusterConfigScope = "guardrail_rule"
 	ClusterConfigScopeRoutingRule        ClusterConfigScope = "routing_rule"
+	ClusterConfigScopeLogExportConfig    ClusterConfigScope = "log_export_config"
 	ClusterConfigScopeRbac               ClusterConfigScope = "rbac"
 	ClusterConfigScopeSession            ClusterConfigScope = "session"
 	ClusterConfigScopeTeam               ClusterConfigScope = "team"
@@ -69,6 +70,8 @@ type ClusterConfigChange struct {
 	GuardrailProvider   *configstoreTables.TableGuardrailProvider     `json:"guardrail_provider,omitempty"`
 	GuardrailRuleID     string                                        `json:"guardrail_rule_id,omitempty"`
 	GuardrailRule       *configstoreTables.TableGuardrailRule         `json:"guardrail_rule,omitempty"`
+	LogExportConfigID   string                                        `json:"log_export_config_id,omitempty"`
+	LogExportConfig     *configstoreTables.TableLogExportConfig       `json:"log_export_config,omitempty"`
 	RoutingRuleID      string                                  `json:"routing_rule_id,omitempty"`
 	RoutingRule        *configstoreTables.TableRoutingRule     `json:"routing_rule,omitempty"`
 	RbacRoleID         string                                  `json:"rbac_role_id,omitempty"`

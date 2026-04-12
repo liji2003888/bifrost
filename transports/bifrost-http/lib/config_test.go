@@ -1194,6 +1194,23 @@ func (m *MockConfigStore) RenamePromptSession(ctx context.Context, id uint, name
 }
 func (m *MockConfigStore) DeletePromptSession(ctx context.Context, id uint) error { return nil }
 
+// Log Export Config CRUD (stub implementations for interface compliance)
+func (m *MockConfigStore) GetLogExportConfigs(ctx context.Context) ([]tables.TableLogExportConfig, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) GetLogExportConfig(ctx context.Context, id string) (*tables.TableLogExportConfig, error) {
+	return nil, nil
+}
+func (m *MockConfigStore) CreateLogExportConfig(ctx context.Context, config *tables.TableLogExportConfig, tx ...*gorm.DB) error {
+	return nil
+}
+func (m *MockConfigStore) UpdateLogExportConfig(ctx context.Context, config *tables.TableLogExportConfig, tx ...*gorm.DB) error {
+	return nil
+}
+func (m *MockConfigStore) DeleteLogExportConfig(ctx context.Context, id string, tx ...*gorm.DB) error {
+	return nil
+}
+
 // Helper functions for tests
 
 // createTempDir creates a temporary directory for test files
