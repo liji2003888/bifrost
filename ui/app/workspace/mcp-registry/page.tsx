@@ -6,6 +6,9 @@ import { useDebouncedValue } from "@/hooks/useDebounce";
 import { getErrorMessage, useGetMCPClientsQuery } from "@/lib/store";
 import { useEffect, useState } from "react";
 import MCPClientsTable from "./views/mcpClientsTable";
+import { MCPImportDialog } from "./views/mcpImportDialog";
+import { Button } from "@/components/ui/button";
+import { Upload } from "lucide-react";
 
 const POLLING_INTERVAL = 5000;
 const PAGE_SIZE = 25;
@@ -13,6 +16,7 @@ const PAGE_SIZE = 25;
 export default function MCPServersPage() {
 	const [search, setSearch] = useState("");
 	const [offset, setOffset] = useState(0);
+	const [importOpen, setImportOpen] = useState(false);
 	const debouncedSearch = useDebouncedValue(search, 300);
 
 	// Reset to first page when search changes
@@ -60,6 +64,12 @@ export default function MCPServersPage() {
 
 	return (
 		<div className="mx-auto w-full max-w-7xl">
+			<div className="mb-4 flex items-center justify-between">
+				<div />
+				<Button variant="outline" onClick={() => setImportOpen(true)}>
+					<Upload className="h-4 w-4" /> Import APIs
+				</Button>
+			</div>
 			<MCPClientsTable
 				mcpClients={mcpClients}
 				totalCount={totalCount}
@@ -70,6 +80,11 @@ export default function MCPServersPage() {
 				offset={offset}
 				limit={PAGE_SIZE}
 				onOffsetChange={setOffset}
+			/>
+			<MCPImportDialog
+				open={importOpen}
+				onOpenChange={setImportOpen}
+				onImported={() => void refetch()}
 			/>
 		</div>
 	);

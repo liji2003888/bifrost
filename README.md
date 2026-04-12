@@ -620,6 +620,33 @@ Current cluster auto-sync scope now includes:
   - `npm exec next build -- --no-lint`
   - `npm exec tsc -- --noEmit`
 
+### 2026-04-12 | Base Commit 0ce12c6 | MCP 联合身份验证 + API 导入 + 日志下载修复
+
+- **MCP 联合身份验证 (Federated Auth) 支持**
+  - 在 MCP 工具执行路径 (`core/mcp/toolmanager.go`) 中新增请求级模板变量解析。
+  - 支持 `{{req.header.<name>}}`：从调用方的 HTTP 请求头中动态提取认证信息并转发给 MCP 工具服务端。
+  - 支持 `{{env.<VAR>}}`：从环境变量中读取值。
+  - 零信任架构：认证信息不缓存，每次请求独立认证，直接透传到目标 API。
+  - 支持的认证模式：Bearer Token (JWT/OAuth)、API Key (header/query)、Custom Headers (tenant ID, user token)、Basic Auth。
+
+- **MCP API 导入功能**
+  - 新增 "Import APIs" 按钮（MCP Registry 页面）打开多标签页导入对话框：
+  - **Postman Collection**：粘贴 Postman Collection v2.1 JSON → 解析所有请求 → 预览表格 → 批量导入为 MCP 工具。
+  - **OpenAPI Spec**：粘贴 OpenAPI 3.0+ JSON/YAML → 自动解析 paths + security schemes → 转换为 MCP 工具。支持 Bearer Auth 和 API Key 安全方案自动转换为 `{{req.header.*}}` 模板。
+  - **cURL Commands**：粘贴一个或多个 cURL 命令 → 解析 `-X`/`-H`/`-d`/URL → 转换为 MCP 工具。
+  - **Manual API Builder**：内置 UI 手动配置：HTTP Method + URL + Headers（支持模板变量提示）+ Request Body → 一键添加为 MCP 工具。
+  - 所有导入方式均保留 `{{req.header.*}}` 模板变量，确保联合认证生效。
+  - 新增文件：`ui/app/workspace/mcp-registry/views/mcpImportDialog.tsx`
+
+- **日志导出下载 "file already closed" 错误修复**
+  - 根因：`defer file.Close()` 在 `SetBodyStream` 返回后执行，但 fasthttp 异步读取 stream，导致文件已关闭。
+  - 修复：改用 `io.ReadFull` 同步读取文件到内存，然后用 `SetBody` 发送响应。
+
+- **验证通过**
+  - `go build ./...` (core) ✓
+  - `go test ./mcp/...` (core) ✓
+  - `npx tsc --noEmit` ✓
+
 ### 2026-04-12 | Base Commit a237336 | 日志导出企业级增强 — 定时导出 + 云存储 + 配置管理
 
 - **日志导出系统全面升级，对齐官网企业版文档设计**

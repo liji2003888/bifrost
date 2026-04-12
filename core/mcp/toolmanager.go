@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -545,8 +546,16 @@ func (m *ToolsManager) executeToolInternal(ctx *schemas.BifrostContext, toolCall
 
 	if client.ExecutionConfig.Headers != nil {
 		headers := make(http.Header)
+		// Get request headers from context for federated auth template resolution
+		var requestHeaders map[string]string
+		if ctx != nil {
+			if rh, ok := ctx.Value(schemas.BifrostContextKeyRequestHeaders).(map[string]string); ok {
+				requestHeaders = rh
+			}
+		}
 		for key, value := range client.ExecutionConfig.Headers {
-			headers.Add(key, value.GetValue())
+			resolved := resolveTemplateValue(value.GetValue(), requestHeaders)
+			headers.Add(key, resolved)
 		}
 		callRequest.Header = headers
 	}
@@ -669,6 +678,46 @@ func (m *ToolsManager) UpdateConfig(config *schemas.MCPToolManagerConfig) {
 	}
 
 	m.logger.Info("%s tool manager configuration updated with tool execution timeout: %v, max agent depth: %d, and code mode binding level: %s", MCPLogPrefix, config.ToolExecutionTimeout, config.MaxAgentDepth, config.CodeModeBindingLevel)
+}
+
+// resolveTemplateValue resolves template variables in a header value string.
+// Supports:
+//   - {{req.header.<name>}} → value from incoming request headers (federated auth)
+//   - {{env.<VAR>}} → environment variable
+//
+// If the entire value is a single template, it's replaced entirely.
+// If the value contains templates inline, each template is substituted.
+func resolveTemplateValue(value string, requestHeaders map[string]string) string {
+	if !strings.Contains(value, "{{") {
+		return value
+	}
+
+	result := value
+	for {
+		start := strings.Index(result, "{{")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(result[start:], "}}")
+		if end == -1 {
+			break
+		}
+		end += start + 2
+
+		template := strings.TrimSpace(result[start+2 : end-2])
+
+		var replacement string
+		if after, ok := strings.CutPrefix(template, "req.header."); ok {
+			headerKey := strings.ToLower(strings.TrimSpace(after))
+			if requestHeaders != nil {
+				replacement = requestHeaders[headerKey]
+			}
+		} else if after, ok := strings.CutPrefix(template, "env."); ok {
+			replacement, _ = os.LookupEnv(strings.TrimSpace(after))
+		}
+		result = result[:start] + replacement + result[end:]
+	}
+	return result
 }
 
 // GetCodeModeBindingLevel returns the current code mode binding level.
