@@ -81,9 +81,21 @@ func NewLogExportService(baseDir string, cfg *LogExportsConfig, provider LogSear
 		return nil, nil
 	}
 
+	// Normalize baseDir to absolute path to prevent file lookup failures on CWD changes
+	absBaseDir := baseDir
+	if !filepath.IsAbs(baseDir) {
+		if abs, err := filepath.Abs(baseDir); err == nil {
+			absBaseDir = abs
+		}
+	}
+
 	basePath := strings.TrimSpace(cfg.StoragePath)
 	if basePath == "" {
-		basePath = filepath.Join(baseDir, "exports")
+		basePath = filepath.Join(absBaseDir, "exports")
+	} else if !filepath.IsAbs(basePath) {
+		if abs, err := filepath.Abs(basePath); err == nil {
+			basePath = abs
+		}
 	}
 	if err := os.MkdirAll(basePath, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create export directory: %w", err)

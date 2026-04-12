@@ -189,10 +189,20 @@ export interface LogExportsResponse {
 	warnings?: ClusterAggregationWarning[];
 }
 
+export interface LogExportFilters {
+	providers?: string[];
+	models?: string[];
+	status?: string[];
+	virtual_key_ids?: string[];
+	start_time?: string;
+	end_time?: string;
+}
+
 export interface CreateLogExportRequest {
 	format?: "jsonl" | "csv";
 	compression?: "" | "gzip";
 	max_rows?: number;
+	log_filters?: LogExportFilters;
 }
 
 export interface VaultStatus {

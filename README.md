@@ -620,6 +620,19 @@ Current cluster auto-sync scope now includes:
   - `npm exec next build -- --no-lint`
   - `npm exec tsc -- --noEmit`
 
+### 2026-04-12 | Base Commit 8090a43 | 日志导出下载修复 + 时间窗口支持
+
+- **日志导出 (Log Exports) 下载 500 错误修复**
+  - 根因：`NewLogExportService` 使用相对路径（`./bifrost-data/exports`）存储导出文件，导出任务的 `file_path` 存储的是相对路径。当应用工作目录变化或重启后，`os.Open(relativePath)` 找不到文件，返回 500 Internal Server Error。
+  - 修复：在 `NewLogExportService` 中将 `baseDir` 和 `StoragePath` 规范化为绝对路径（`filepath.Abs`），确保导出文件路径始终是绝对路径。
+  - 修改文件：`transports/bifrost-http/enterprise/exports.go`
+
+- **日志导出新增时间窗口 (Time Window) 过滤**
+  - 在导出表单中新增 Start Time 和 End Time 日期时间选择器。
+  - 导出请求通过 `log_filters.start_time` / `log_filters.end_time` 传递给后端 `SearchFilters`，后端已支持按时间范围过滤（`timestamp >= start_time AND timestamp <= end_time`）。
+  - 前端类型 `CreateLogExportRequest` 新增 `log_filters` 字段，包含 `start_time`、`end_time`、`providers`、`models`、`status`、`virtual_key_ids` 等过滤条件。
+  - 修改文件：`ui/app/workspace/log-exports/page.tsx`、`ui/lib/types/enterprise.ts`
+
 ### 2026-04-12 | Base Commit b388fea | 护栏系统 + RBAC + 日志导出修复 + MCP 工具组增强
 
 - **日志导出 (Log Exports) 服务自动启用修复**

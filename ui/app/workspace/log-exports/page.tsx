@@ -40,6 +40,8 @@ export default function LogExportsPage() {
 	const [exportFormat, setExportFormat] = useState<"jsonl" | "csv">("jsonl");
 	const [compression, setCompression] = useState<"" | "gzip">("");
 	const [maxRows, setMaxRows] = useState(10000);
+	const [startTime, setStartTime] = useState("");
+	const [endTime, setEndTime] = useState("");
 
 	const {
 		data: exportsResponse,
@@ -59,11 +61,18 @@ export default function LogExportsPage() {
 
 	const handleExport = async () => {
 		try {
-			const payload = {
+			const logFilters: Record<string, any> = {};
+			if (startTime) logFilters.start_time = new Date(startTime).toISOString();
+			if (endTime) logFilters.end_time = new Date(endTime).toISOString();
+
+			const payload: any = {
 				format: exportFormat,
 				compression: compression || undefined,
 				max_rows: maxRows > 0 ? maxRows : undefined,
 			};
+			if (Object.keys(logFilters).length > 0) {
+				payload.log_filters = logFilters;
+			}
 			if (exportScope === "mcp_logs") {
 				await createMCPLogExport(payload).unwrap();
 			} else {
@@ -116,7 +125,27 @@ export default function LogExportsPage() {
 					<CardTitle className="text-base">Create New Export</CardTitle>
 				</CardHeader>
 				<CardContent className="space-y-4">
-					<div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+					<div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+						<div className="space-y-2">
+							<Label>Start Time</Label>
+							<Input
+								type="datetime-local"
+								value={startTime}
+								onChange={(e) => setStartTime(e.target.value)}
+								placeholder="Start of time window"
+							/>
+							<p className="text-muted-foreground text-xs">Leave empty for no lower bound</p>
+						</div>
+						<div className="space-y-2">
+							<Label>End Time</Label>
+							<Input
+								type="datetime-local"
+								value={endTime}
+								onChange={(e) => setEndTime(e.target.value)}
+								placeholder="End of time window"
+							/>
+							<p className="text-muted-foreground text-xs">Leave empty for no upper bound</p>
+						</div>
 						<div className="space-y-2">
 							<Label>Scope</Label>
 							<Select value={exportScope} onValueChange={(v) => setExportScope(v as ExportScope)}>
