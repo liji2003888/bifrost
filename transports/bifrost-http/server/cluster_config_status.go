@@ -32,14 +32,15 @@ type clusterConfigSyncReporter struct {
 }
 
 type clusterConfigFingerprint struct {
-	Client     string `json:"client,omitempty"`
-	Auth       string `json:"auth,omitempty"`
-	Framework  string `json:"framework,omitempty"`
-	Proxy      string `json:"proxy,omitempty"`
-	Providers  string `json:"providers,omitempty"`
-	Governance string `json:"governance,omitempty"`
-	MCP        string `json:"mcp,omitempty"`
-	Plugins    string `json:"plugins,omitempty"`
+	Client          string `json:"client,omitempty"`
+	Auth            string `json:"auth,omitempty"`
+	Framework       string `json:"framework,omitempty"`
+	Proxy           string `json:"proxy,omitempty"`
+	AdaptiveRouting string `json:"adaptive_routing,omitempty"`
+	Providers       string `json:"providers,omitempty"`
+	Governance      string `json:"governance,omitempty"`
+	MCP             string `json:"mcp,omitempty"`
+	Plugins         string `json:"plugins,omitempty"`
 }
 
 type clusterConfigResourceCounts struct {
@@ -229,6 +230,10 @@ func buildRuntimeClusterConfigFingerprint(server *BifrostHTTPServer) (clusterCon
 	if err != nil {
 		return clusterConfigFingerprint{}, clusterConfigResourceCounts{}, err
 	}
+	adaptiveRoutingHash, err := hashSortedValue(enterprisecfg.NormalizeLoadBalancerConfig(server.Config.LoadBalancerConfig))
+	if err != nil {
+		return clusterConfigFingerprint{}, clusterConfigResourceCounts{}, err
+	}
 	providersHash, providerCount, err := hashProvidersConfig(server.Config.SnapshotProviders())
 	if err != nil {
 		return clusterConfigFingerprint{}, clusterConfigResourceCounts{}, err
@@ -247,14 +252,15 @@ func buildRuntimeClusterConfigFingerprint(server *BifrostHTTPServer) (clusterCon
 	}
 
 	return clusterConfigFingerprint{
-			Client:     clientHash,
-			Auth:       authHash,
-			Framework:  frameworkHash,
-			Proxy:      proxyHash,
-			Providers:  providersHash,
-			Governance: governanceHash,
-			MCP:        mcpHash,
-			Plugins:    pluginsHash,
+			Client:          clientHash,
+			Auth:            authHash,
+			Framework:       frameworkHash,
+			Proxy:           proxyHash,
+			AdaptiveRouting: adaptiveRoutingHash,
+			Providers:       providersHash,
+			Governance:      governanceHash,
+			MCP:             mcpHash,
+			Plugins:         pluginsHash,
 		},
 		clusterConfigResourceCounts{
 			CustomerCount:    governanceCounts.CustomerCount,
@@ -302,6 +308,10 @@ func buildStoreClusterConfigFingerprint(ctx context.Context, store configstore.C
 	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 		return clusterConfigFingerprint{}, err
 	}
+	loadBalancerConfig, err := loadLoadBalancerConfigFromStore(ctx, store)
+	if err != nil {
+		return clusterConfigFingerprint{}, err
+	}
 	plugins, err := store.GetPlugins(ctx)
 	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
 		return clusterConfigFingerprint{}, err
@@ -323,6 +333,10 @@ func buildStoreClusterConfigFingerprint(ctx context.Context, store configstore.C
 	if err != nil {
 		return clusterConfigFingerprint{}, err
 	}
+	adaptiveRoutingHash, err := hashSortedValue(loadBalancerConfig)
+	if err != nil {
+		return clusterConfigFingerprint{}, err
+	}
 	providersHash, _, err := hashProvidersConfig(providersConfig)
 	if err != nil {
 		return clusterConfigFingerprint{}, err
@@ -341,14 +355,15 @@ func buildStoreClusterConfigFingerprint(ctx context.Context, store configstore.C
 	}
 
 	return clusterConfigFingerprint{
-		Client:     clientHash,
-		Auth:       authHash,
-		Framework:  frameworkHash,
-		Proxy:      proxyHash,
-		Providers:  providersHash,
-		Governance: governanceHash,
-		MCP:        mcpHash,
-		Plugins:    pluginsHash,
+		Client:          clientHash,
+		Auth:            authHash,
+		Framework:       frameworkHash,
+		Proxy:           proxyHash,
+		AdaptiveRouting: adaptiveRoutingHash,
+		Providers:       providersHash,
+		Governance:      governanceHash,
+		MCP:             mcpHash,
+		Plugins:         pluginsHash,
 	}, nil
 }
 
@@ -409,6 +424,9 @@ func (f clusterConfigFingerprint) DriftDomains(other clusterConfigFingerprint) [
 	}
 	if f.Proxy != other.Proxy {
 		drift = append(drift, "proxy")
+	}
+	if f.AdaptiveRouting != other.AdaptiveRouting {
+		drift = append(drift, "adaptive_routing")
 	}
 	if f.Providers != other.Providers {
 		drift = append(drift, "providers")

@@ -19,7 +19,8 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-type loadBalancerStatusProvider interface {
+type LoadBalancerStatusProvider interface {
+	Enabled() bool
 	ListSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.RouteStatus
 	ListDirectionSnapshots(provider schemas.ModelProvider, model string) []loadbalancer.DirectionStatus
 }
@@ -107,11 +108,11 @@ type EnterpriseHandler struct {
 	exports *enterprisecfg.LogExportService
 	alerts  *enterprisecfg.AlertManager
 	vault   *enterprisecfg.VaultService
-	lb      loadBalancerStatusProvider
+	lb      func() LoadBalancerStatusProvider
 	config  ClusterConfigApplier
 }
 
-func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager, vault *enterprisecfg.VaultService, lb loadBalancerStatusProvider, config ClusterConfigApplier) *EnterpriseHandler {
+func NewEnterpriseHandler(cluster *enterprisecfg.ClusterService, audit *enterprisecfg.AuditService, exports *enterprisecfg.LogExportService, alerts *enterprisecfg.AlertManager, vault *enterprisecfg.VaultService, lb func() LoadBalancerStatusProvider, config ClusterConfigApplier) *EnterpriseHandler {
 	if cluster == nil && audit == nil && exports == nil && alerts == nil && vault == nil && lb == nil && config == nil {
 		return nil
 	}
@@ -158,9 +159,7 @@ func (h *EnterpriseHandler) RegisterRoutes(r *router.Router, middlewares ...sche
 		if h.alerts != nil {
 			r.GET(clusterAlertsEndpoint, h.getInternalAlerts)
 		}
-		if h.lb != nil {
-			r.GET(clusterAdaptiveRoutingEndpoint, h.getInternalAdaptiveRoutingStatus)
-		}
+		r.GET(clusterAdaptiveRoutingEndpoint, h.getInternalAdaptiveRoutingStatus)
 	}
 }
 
@@ -422,7 +421,8 @@ func (h *EnterpriseHandler) getVaultStatus(ctx *fasthttp.RequestCtx) {
 }
 
 func (h *EnterpriseHandler) getAdaptiveRoutingStatus(ctx *fasthttp.RequestCtx) {
-	if h.lb == nil {
+	lb := h.currentLoadBalancer()
+	if lb == nil || !lb.Enabled() {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "adaptive routing is not enabled")
 		return
 	}
@@ -433,7 +433,8 @@ func (h *EnterpriseHandler) getAdaptiveRoutingStatus(ctx *fasthttp.RequestCtx) {
 }
 
 func (h *EnterpriseHandler) getInternalAdaptiveRoutingStatus(ctx *fasthttp.RequestCtx) {
-	if h.lb == nil {
+	lb := h.currentLoadBalancer()
+	if lb == nil || !lb.Enabled() {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "adaptive routing is not enabled")
 		return
 	}
@@ -643,6 +644,7 @@ func (h *EnterpriseHandler) collectExportJobs(ctx context.Context, includeCluste
 }
 
 func (h *EnterpriseHandler) collectAdaptiveRoutingStatus(ctx context.Context, provider schemas.ModelProvider, model string, includeCluster bool) adaptiveRoutingStatusResponse {
+	lb := h.currentLoadBalancer()
 	response := adaptiveRoutingStatusResponse{
 		Cluster:    includeCluster && h.cluster != nil,
 		NodeID:     h.clusterNodeID(),
@@ -651,15 +653,15 @@ func (h *EnterpriseHandler) collectAdaptiveRoutingStatus(ctx context.Context, pr
 	}
 
 	localNodeID := h.clusterNodeID()
-	if h.lb != nil {
-		for _, route := range h.lb.ListSnapshots(provider, model) {
+	if lb != nil {
+		for _, route := range lb.ListSnapshots(provider, model) {
 			response.Routes = append(response.Routes, clusterRouteStatus{
 				RouteStatus: route,
 				NodeID:      localNodeID,
 				Source:      localClusterSource,
 			})
 		}
-		for _, direction := range h.lb.ListDirectionSnapshots(provider, model) {
+		for _, direction := range lb.ListDirectionSnapshots(provider, model) {
 			response.Directions = append(response.Directions, clusterDirectionStatus{
 				DirectionStatus: direction,
 				NodeID:          localNodeID,
@@ -717,6 +719,13 @@ func (h *EnterpriseHandler) collectAdaptiveRoutingStatus(ctx context.Context, pr
 	sortClusterDirections(response.Directions)
 	sortClusterWarnings(response.Warnings)
 	return response
+}
+
+func (h *EnterpriseHandler) currentLoadBalancer() LoadBalancerStatusProvider {
+	if h == nil || h.lb == nil {
+		return nil
+	}
+	return h.lb()
 }
 
 const (
@@ -952,6 +961,10 @@ func clusterConfigChangeSummary(change *ClusterConfigChange) string {
 	case ClusterConfigScopeProvider:
 		if change.Provider != "" {
 			parts = append(parts, fmt.Sprintf("provider=%s", change.Provider))
+		}
+	case ClusterConfigScopeLoadBalancer:
+		if change.LoadBalancerConfig != nil {
+			parts = append(parts, fmt.Sprintf("adaptive_routing_enabled=%t", change.LoadBalancerConfig.Enabled))
 		}
 	case ClusterConfigScopeVirtualKey:
 		if change.VirtualKeyID != "" {

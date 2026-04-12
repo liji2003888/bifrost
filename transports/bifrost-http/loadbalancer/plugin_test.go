@@ -3,9 +3,13 @@ package loadbalancer
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/bytedance/sonic"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/maximhq/bifrost/framework/modelcatalog"
 	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 )
 
@@ -20,6 +24,7 @@ func TestSelectorFallsBackToStaticWeightsWithoutMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
 
 	keys := []schemas.Key{
 		{ID: "key-a", Name: "key-a", Weight: 9},
@@ -52,6 +57,7 @@ func TestSelectorPrefersHealthyKeyAfterFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
 
 	keys := []schemas.Key{
 		{ID: "key-a", Name: "key-a", Weight: 1},
@@ -82,6 +88,7 @@ func TestPostLLMHookRecordsRouteMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
 
 	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 	ctx.SetValue(schemas.BifrostContextKeySelectedKeyID, "key-a")
@@ -143,6 +150,7 @@ func TestListSnapshotsFiltersByProviderAndModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
 
 	plugin.tracker.Observe(schemas.OpenAI, "gpt-4o", "key-a", 100, true)
 	plugin.tracker.Observe(schemas.Anthropic, "claude-sonnet", "key-b", 200, true)
@@ -163,7 +171,8 @@ func TestListSnapshotsFiltersByProviderAndModel(t *testing.T) {
 
 func TestPreLLMHookReordersFallbacksUsingDirectionMetrics(t *testing.T) {
 	plugin, err := Init(&enterprisecfg.LoadBalancerConfig{
-		Enabled: true,
+		Enabled:                 true,
+		DirectionRoutingEnabled: schemas.Ptr(true),
 		TrackerConfig: &enterprisecfg.LoadBalancerTrackerConfig{
 			MinimumSamples:   1,
 			ExplorationRatio: 0,
@@ -173,6 +182,7 @@ func TestPreLLMHookReordersFallbacksUsingDirectionMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
 
 	for range 10 {
 		plugin.tracker.ObserveDirection(schemas.OpenAI, "gpt-4.1", 1200, false)
@@ -210,6 +220,7 @@ func TestListDirectionSnapshotsFiltersByProviderAndModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
 
 	plugin.tracker.ObserveDirection(schemas.OpenAI, "gpt-4o", 100, true)
 	plugin.tracker.ObserveDirection(schemas.Anthropic, "claude-sonnet", 200, true)
@@ -225,5 +236,209 @@ func TestListDirectionSnapshotsFiltersByProviderAndModel(t *testing.T) {
 	modelSnapshots := plugin.ListDirectionSnapshots("", "claude-sonnet")
 	if len(modelSnapshots) != 1 || modelSnapshots[0].Provider != schemas.Anthropic {
 		t.Fatalf("unexpected direction filtered snapshots: %+v", modelSnapshots)
+	}
+}
+
+func TestListSnapshotsExposePrecomputedStateAndWeights(t *testing.T) {
+	plugin, err := Init(&enterprisecfg.LoadBalancerConfig{
+		Enabled: true,
+		TrackerConfig: &enterprisecfg.LoadBalancerTrackerConfig{
+			MinimumSamples:            1,
+			ExplorationRatio:          0,
+			JitterRatio:               0,
+			FailedConsecutiveFailures: 3,
+		},
+	}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
+
+	for range 6 {
+		plugin.tracker.Observe(schemas.OpenAI, "gpt-4o", "key-a", 950, false)
+	}
+	plugin.tracker.recomputeProfiles(time.Now(), true)
+
+	statuses := plugin.ListSnapshots(schemas.OpenAI, "gpt-4o")
+	if len(statuses) != 1 {
+		t.Fatalf("expected one route status, got %+v", statuses)
+	}
+	if statuses[0].State != HealthStateFailed {
+		t.Fatalf("expected route to be marked failed, got %+v", statuses[0])
+	}
+	if statuses[0].Weight != 0 {
+		t.Fatalf("expected failed route weight to trip circuit breaker, got %+v", statuses[0])
+	}
+	if statuses[0].Score <= 0 {
+		t.Fatalf("expected failed route score to be populated, got %+v", statuses[0])
+	}
+}
+
+func TestHTTPTransportPreHookSelectsProviderForBareModel(t *testing.T) {
+	plugin, err := Init(&enterprisecfg.LoadBalancerConfig{
+		Enabled:                 true,
+		DirectionRoutingEnabled: schemas.Ptr(true),
+		TrackerConfig: &enterprisecfg.LoadBalancerTrackerConfig{
+			MinimumSamples:   1,
+			ExplorationRatio: 0,
+			JitterRatio:      0,
+		},
+	}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
+
+	catalog := modelcatalog.NewTestCatalog(map[string]string{"gpt-4o": "gpt-4o"})
+	catalog.UpsertModelDataForProvider(schemas.OpenAI, &schemas.BifrostListModelsResponse{
+		Data: []schemas.Model{{ID: "openai/gpt-4o"}},
+	}, nil, nil)
+	catalog.UpsertModelDataForProvider(schemas.Anthropic, &schemas.BifrostListModelsResponse{
+		Data: []schemas.Model{{ID: "anthropic/gpt-4o"}},
+	}, nil, nil)
+
+	plugin.BindRoutingSources(catalog, func(provider schemas.ModelProvider) (configstore.ProviderConfig, bool) {
+		return configstore.ProviderConfig{
+			Keys: []schemas.Key{{ID: string(provider) + "-key", Name: string(provider) + "-key", Weight: 1}},
+		}, true
+	})
+
+	for range 10 {
+		plugin.tracker.ObserveDirection(schemas.OpenAI, "gpt-4o", 900, false)
+		plugin.tracker.ObserveDirection(schemas.Anthropic, "gpt-4o", 120, true)
+	}
+	plugin.tracker.recomputeProfiles(time.Now(), true)
+
+	body, err := sonic.Marshal(map[string]any{
+		"model": "gpt-4o",
+		"messages": []map[string]any{
+			{"role": "user", "content": "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	req := &schemas.HTTPRequest{
+		Method: "POST",
+		Path:   "/v1/chat/completions",
+		Headers: map[string]string{
+			"Content-Type": "application/json",
+		},
+		Body: body,
+	}
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	if _, err := plugin.HTTPTransportPreHook(ctx, req); err != nil {
+		t.Fatalf("HTTPTransportPreHook() error = %v", err)
+	}
+
+	var mutated map[string]any
+	if err := sonic.Unmarshal(req.Body, &mutated); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if mutated["model"] != "anthropic/gpt-4o" {
+		t.Fatalf("expected adaptive routing to select healthiest provider, got %v", mutated["model"])
+	}
+	fallbacks, ok := mutated["fallbacks"].([]any)
+	if !ok || len(fallbacks) != 1 || fallbacks[0] != "openai/gpt-4o" {
+		t.Fatalf("expected fallback list to be generated, got %#v", mutated["fallbacks"])
+	}
+}
+
+func TestUpdateConfigPreservesMetricsAndDisablesDirectionRoutingInPlace(t *testing.T) {
+	plugin, err := Init(&enterprisecfg.LoadBalancerConfig{
+		Enabled:                 true,
+		DirectionRoutingEnabled: schemas.Ptr(true),
+		TrackerConfig: &enterprisecfg.LoadBalancerTrackerConfig{
+			MinimumSamples:   1,
+			ExplorationRatio: 0,
+			JitterRatio:      0,
+		},
+	}, bifrost.NewNoOpLogger())
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	t.Cleanup(func() { _ = plugin.Cleanup() })
+
+	plugin.tracker.Observe(schemas.OpenAI, "gpt-4o", "key-a", 120, true)
+	for range 5 {
+		plugin.tracker.ObserveDirection(schemas.OpenAI, "gpt-4o", 900, false)
+		plugin.tracker.ObserveDirection(schemas.Anthropic, "gpt-4o", 120, true)
+	}
+
+	if _, ok := plugin.Snapshot(schemas.OpenAI, "gpt-4o", "key-a"); !ok {
+		t.Fatal("expected route snapshot before config update")
+	}
+	if _, ok := plugin.DirectionSnapshot(schemas.Anthropic, "gpt-4o"); !ok {
+		t.Fatal("expected direction snapshot before config update")
+	}
+
+	if err := plugin.UpdateConfig(&enterprisecfg.LoadBalancerConfig{
+		Enabled:                 true,
+		KeyBalancingEnabled:     schemas.Ptr(true),
+		DirectionRoutingEnabled: schemas.Ptr(false),
+		TrackerConfig: &enterprisecfg.LoadBalancerTrackerConfig{
+			MinimumSamples:   1,
+			ExplorationRatio: 0,
+			JitterRatio:      0,
+		},
+	}); err != nil {
+		t.Fatalf("UpdateConfig() error = %v", err)
+	}
+
+	routeSnapshot, ok := plugin.Snapshot(schemas.OpenAI, "gpt-4o", "key-a")
+	if !ok || routeSnapshot.Samples == 0 {
+		t.Fatalf("expected route snapshot to survive config update, got %+v", routeSnapshot)
+	}
+	directionSnapshot, ok := plugin.DirectionSnapshot(schemas.Anthropic, "gpt-4o")
+	if !ok || directionSnapshot.Samples == 0 {
+		t.Fatalf("expected direction snapshot to survive config update, got %+v", directionSnapshot)
+	}
+
+	catalog := modelcatalog.NewTestCatalog(map[string]string{"gpt-4o": "gpt-4o"})
+	catalog.UpsertModelDataForProvider(schemas.OpenAI, &schemas.BifrostListModelsResponse{
+		Data: []schemas.Model{{ID: "openai/gpt-4o"}},
+	}, nil, nil)
+	catalog.UpsertModelDataForProvider(schemas.Anthropic, &schemas.BifrostListModelsResponse{
+		Data: []schemas.Model{{ID: "anthropic/gpt-4o"}},
+	}, nil, nil)
+	plugin.BindRoutingSources(catalog, func(provider schemas.ModelProvider) (configstore.ProviderConfig, bool) {
+		return configstore.ProviderConfig{
+			Keys: []schemas.Key{{ID: string(provider) + "-key", Name: string(provider) + "-key", Weight: 1}},
+		}, true
+	})
+
+	body, err := sonic.Marshal(map[string]any{
+		"model": "gpt-4o",
+		"messages": []map[string]any{
+			{"role": "user", "content": "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	req := &schemas.HTTPRequest{
+		Method: "POST",
+		Path:   "/v1/chat/completions",
+		Headers: map[string]string{
+			"Content-Type": "application/json",
+		},
+		Body: body,
+	}
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	if _, err := plugin.HTTPTransportPreHook(ctx, req); err != nil {
+		t.Fatalf("HTTPTransportPreHook() error = %v", err)
+	}
+
+	var mutated map[string]any
+	if err := sonic.Unmarshal(req.Body, &mutated); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if mutated["model"] != "gpt-4o" {
+		t.Fatalf("expected provider direction routing to stay off after config update, got %v", mutated["model"])
+	}
+	if _, ok := mutated["fallbacks"]; ok {
+		t.Fatalf("expected no adaptive fallback generation when direction routing is disabled, got %#v", mutated["fallbacks"])
 	}
 }

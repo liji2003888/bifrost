@@ -10,6 +10,7 @@ const (
 	ConfigProxyKey                  = "proxy_config"
 	ConfigRestartRequiredKey        = "restart_required"
 	ConfigHeaderFilterKey           = "header_filter_config"
+	ConfigLoadBalancerKey           = "load_balancer_config"
 )
 
 // RestartRequiredConfig represents the restart required configuration

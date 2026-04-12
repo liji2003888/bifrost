@@ -29,6 +29,7 @@ var clusterConfigSelfHealDomainOrder = []string{
 	"auth",
 	"framework",
 	"proxy",
+	"adaptive_routing",
 	"providers",
 	"governance",
 }
@@ -248,6 +249,10 @@ func (s *BifrostHTTPServer) ControlledSelfHealConfigFromStore(ctx context.Contex
 		case "proxy":
 			if err := s.ReloadProxyConfigFromConfigStore(ctx); err != nil {
 				return fmt.Errorf("failed to self-heal proxy config: %w", err)
+			}
+		case "adaptive_routing":
+			if err := s.ReloadLoadBalancerConfigFromConfigStore(ctx); err != nil {
+				return fmt.Errorf("failed to self-heal adaptive routing config: %w", err)
 			}
 		case "providers":
 			if err := s.ReconcileProvidersFromConfigStore(ctx); err != nil {

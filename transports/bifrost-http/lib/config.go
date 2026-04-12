@@ -517,7 +517,7 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 	}
 	// 4. Client config (store → file → defaults)
 	loadClientConfig(ctx, config, &configData)
-	loadEnterpriseConfig(config, &configData)
+	loadEnterpriseConfig(ctx, config, &configData)
 	config.SetHeaderMatcher(NewHeaderMatcher(config.ClientConfig.HeaderFilterConfig))
 	// 5. Providers (store → file → auto-detect)
 	if err := loadProviders(ctx, config, &configData); err != nil {
@@ -830,17 +830,56 @@ func processProvider(
 	return nil
 }
 
-func loadEnterpriseConfig(config *Config, configData *ConfigData) {
+func loadEnterpriseConfig(ctx context.Context, config *Config, configData *ConfigData) {
 	if config == nil || configData == nil {
 		return
 	}
 
 	config.ClusterConfig = configData.ClusterConfig
-	config.LoadBalancerConfig = configData.LoadBalancerConfig
+	config.LoadBalancerConfig = resolveLoadBalancerConfig(ctx, config, configData.LoadBalancerConfig)
 	config.AuditLogsConfig = configData.AuditLogsConfig
 	config.AlertsConfig = configData.AlertsConfig
 	config.LogExportsConfig = configData.LogExportsConfig
 	config.VaultConfig = configData.VaultConfig
+}
+
+func resolveLoadBalancerConfig(ctx context.Context, config *Config, fileConfig *enterprisecfg.LoadBalancerConfig) *enterprisecfg.LoadBalancerConfig {
+	if config == nil {
+		return enterprisecfg.NormalizeLoadBalancerConfig(fileConfig)
+	}
+
+	normalizedFileConfig := enterprisecfg.NormalizeLoadBalancerConfig(fileConfig)
+	if config.ConfigStore == nil {
+		return normalizedFileConfig
+	}
+
+	row, err := config.ConfigStore.GetConfig(ctx, configstoreTables.ConfigLoadBalancerKey)
+	if err == nil && row != nil {
+		var storedConfig enterprisecfg.LoadBalancerConfig
+		if decodeErr := sonic.Unmarshal([]byte(row.Value), &storedConfig); decodeErr != nil {
+			logger.Warn("failed to decode adaptive routing config from store: %v", decodeErr)
+		} else {
+			return enterprisecfg.NormalizeLoadBalancerConfig(&storedConfig)
+		}
+	} else if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+		logger.Warn("failed to get adaptive routing config from store: %v", err)
+	}
+
+	if fileConfig != nil {
+		encoded, marshalErr := sonic.MarshalString(normalizedFileConfig)
+		if marshalErr != nil {
+			logger.Warn("failed to encode adaptive routing config for store sync: %v", marshalErr)
+			return normalizedFileConfig
+		}
+		if updateErr := config.ConfigStore.UpdateConfig(ctx, &configstoreTables.TableGovernanceConfig{
+			Key:   configstoreTables.ConfigLoadBalancerKey,
+			Value: encoded,
+		}); updateErr != nil {
+			logger.Warn("failed to persist adaptive routing config into store: %v", updateErr)
+		}
+	}
+
+	return normalizedFileConfig
 }
 
 // mergeProviderWithHash merges provider config using hash-based reconciliation

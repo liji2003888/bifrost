@@ -20,6 +20,7 @@ import (
 	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/plugins/litellmcompat"
+	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -52,6 +53,7 @@ type ConfigManager interface {
 	RemovePlugin(ctx context.Context, name string) error
 	ReloadProxyConfig(ctx context.Context, config *configstoreTables.GlobalProxyConfig) error
 	ReloadHeaderFilterConfig(ctx context.Context, config *configstoreTables.GlobalHeaderFilterConfig) error
+	ReloadLoadBalancerConfig(ctx context.Context, config *enterprisecfg.LoadBalancerConfig) error
 }
 
 // ConfigHandler manages runtime configuration updates for Bifrost.
@@ -193,6 +195,27 @@ func (h *ConfigHandler) getConfig(ctx *fasthttp.RequestCtx) {
 			mapConfig["restart_required"] = restartConfig
 		}
 	}
+	if query := string(ctx.QueryArgs().Peek("from_db")); query == "true" {
+		loadBalancerConfig := enterprisecfg.NormalizeLoadBalancerConfig(nil)
+		if h.store.ConfigStore != nil {
+			row, err := h.store.ConfigStore.GetConfig(ctx, configstoreTables.ConfigLoadBalancerKey)
+			if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to get adaptive routing config from store: %v", err))
+				return
+			}
+			if row != nil {
+				var storedConfig enterprisecfg.LoadBalancerConfig
+				if err := json.Unmarshal([]byte(row.Value), &storedConfig); err != nil {
+					SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to decode adaptive routing config from store: %v", err))
+					return
+				}
+				loadBalancerConfig = enterprisecfg.NormalizeLoadBalancerConfig(&storedConfig)
+			}
+		}
+		mapConfig["load_balancer_config"] = loadBalancerConfig
+	} else {
+		mapConfig["load_balancer_config"] = enterprisecfg.NormalizeLoadBalancerConfig(h.store.LoadBalancerConfig)
+	}
 	SendJSON(ctx, mapConfig)
 }
 
@@ -206,9 +229,10 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	}
 
 	payload := struct {
-		ClientConfig    configstore.ClientConfig               `json:"client_config"`
-		FrameworkConfig configstoreTables.TableFrameworkConfig `json:"framework_config"`
-		AuthConfig      *configstore.AuthConfig                `json:"auth_config"`
+		ClientConfig       configstore.ClientConfig               `json:"client_config"`
+		FrameworkConfig    configstoreTables.TableFrameworkConfig `json:"framework_config"`
+		AuthConfig         *configstore.AuthConfig                `json:"auth_config"`
+		LoadBalancerConfig *enterprisecfg.LoadBalancerConfig      `json:"load_balancer_config"`
 	}{}
 
 	if err := json.Unmarshal(ctx.PostBody(), &payload); err != nil {
@@ -651,6 +675,32 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 			Scope:         ClusterConfigScopeAuth,
 			AuthConfig:    propagatedAuthConfig,
 			FlushSessions: propagatedAuthShouldWipe,
+		})
+	}
+	if payload.LoadBalancerConfig != nil {
+		normalizedLoadBalancerConfig := enterprisecfg.NormalizeLoadBalancerConfig(payload.LoadBalancerConfig)
+		payloadValue, err := json.Marshal(normalizedLoadBalancerConfig)
+		if err != nil {
+			logger.Warn("failed to encode adaptive routing config: %v", err)
+			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to encode adaptive routing config: %v", err))
+			return
+		}
+		if err := h.store.ConfigStore.UpdateConfig(ctx, &configstoreTables.TableGovernanceConfig{
+			Key:   configstoreTables.ConfigLoadBalancerKey,
+			Value: string(payloadValue),
+		}); err != nil {
+			logger.Warn("failed to save adaptive routing config: %v", err)
+			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to save adaptive routing config: %v", err))
+			return
+		}
+		if err := h.configManager.ReloadLoadBalancerConfig(ctx, normalizedLoadBalancerConfig); err != nil {
+			logger.Warn("failed to reload adaptive routing config: %v", err)
+			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to reload adaptive routing config: %v", err))
+			return
+		}
+		h.propagateClusterConfigChange(ctx, &ClusterConfigChange{
+			Scope:              ClusterConfigScopeLoadBalancer,
+			LoadBalancerConfig: normalizedLoadBalancerConfig,
 		})
 	}
 

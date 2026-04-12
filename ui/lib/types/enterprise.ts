@@ -61,6 +61,11 @@ export interface AdaptiveRouteStatus {
 	provider: string;
 	model: string;
 	key_id: string;
+	state: "healthy" | "degraded" | "failed" | "recovering";
+	score: number;
+	weight: number;
+	expected_traffic_share: number;
+	actual_traffic_share: number;
 	samples: number;
 	successes: number;
 	failures: number;
@@ -76,7 +81,11 @@ export interface AdaptiveDirectionStatus {
 	source?: string;
 	provider: string;
 	model: string;
+	state: "healthy" | "degraded" | "failed" | "recovering";
 	score: number;
+	weight: number;
+	expected_traffic_share: number;
+	actual_traffic_share: number;
 	samples: number;
 	successes: number;
 	failures: number;

@@ -74,7 +74,7 @@ export const configApi = baseApi.injectEndpoints({
 				method: "PUT",
 				body: IS_ENTERPRISE ? { ...data, auth_config: undefined } : data,
 			}),
-			invalidatesTags: ["Config"],
+			invalidatesTags: ["Config", "AdaptiveRouting", "ClusterNodes"],
 		}),
 
 		// Update proxy configuration

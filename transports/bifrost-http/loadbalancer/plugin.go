@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"slices"
-	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
@@ -24,42 +23,64 @@ const startTimeKey schemas.BifrostContextKey = "bf-loadbalancer-start-time"
 type Config = enterprisecfg.LoadBalancerConfig
 
 type Plugin struct {
-	cfg     trackerConfig
-	tracker *Tracker
-	logger  schemas.Logger
+	mu             sync.RWMutex
+	cfg            trackerConfig
+	policy         runtimePolicy
+	tracker        *Tracker
+	logger         schemas.Logger
+	catalog        modelsCatalog
+	providerLookup providerConfigLookup
+}
+
+type runtimePolicy struct {
+	enabled                       bool
+	keyBalancingEnabled           bool
+	directionRoutingEnabled       bool
+	directionRoutingForVirtualKey bool
+	providerAllowlist             map[schemas.ModelProvider]struct{}
+	modelAllowlist                map[string]struct{}
 }
 
 type RouteSnapshot struct {
-	Samples             int64
-	Successes           int64
-	Failures            int64
-	ConsecutiveFailures int64
-	ErrorEWMA           float64
-	LatencyEWMA         float64
-	LastUpdated         time.Time
+	Samples             int64     `json:"samples"`
+	Successes           int64     `json:"successes"`
+	Failures            int64     `json:"failures"`
+	ConsecutiveFailures int64     `json:"consecutive_failures"`
+	ErrorEWMA           float64   `json:"error_ewma"`
+	LatencyEWMA         float64   `json:"latency_ewma"`
+	LastUpdated         time.Time `json:"last_updated"`
 }
 
 type RouteStatus struct {
-	Provider schemas.ModelProvider `json:"provider"`
-	Model    string                `json:"model"`
-	KeyID    string                `json:"key_id"`
+	Provider             schemas.ModelProvider `json:"provider"`
+	Model                string                `json:"model"`
+	KeyID                string                `json:"key_id"`
+	State                HealthState           `json:"state"`
+	Score                float64               `json:"score"`
+	Weight               int                   `json:"weight"`
+	ExpectedTrafficShare float64               `json:"expected_traffic_share"`
+	ActualTrafficShare   float64               `json:"actual_traffic_share"`
 	RouteSnapshot
 }
 
 type DirectionSnapshot struct {
-	Samples             int64
-	Successes           int64
-	Failures            int64
-	ConsecutiveFailures int64
-	ErrorEWMA           float64
-	LatencyEWMA         float64
-	LastUpdated         time.Time
+	Samples             int64     `json:"samples"`
+	Successes           int64     `json:"successes"`
+	Failures            int64     `json:"failures"`
+	ConsecutiveFailures int64     `json:"consecutive_failures"`
+	ErrorEWMA           float64   `json:"error_ewma"`
+	LatencyEWMA         float64   `json:"latency_ewma"`
+	LastUpdated         time.Time `json:"last_updated"`
 }
 
 type DirectionStatus struct {
-	Provider schemas.ModelProvider `json:"provider"`
-	Model    string                `json:"model"`
-	Score    float64               `json:"score"`
+	Provider             schemas.ModelProvider `json:"provider"`
+	Model                string                `json:"model"`
+	State                HealthState           `json:"state"`
+	Score                float64               `json:"score"`
+	Weight               int                   `json:"weight"`
+	ExpectedTrafficShare float64               `json:"expected_traffic_share"`
+	ActualTrafficShare   float64               `json:"actual_traffic_share"`
 	DirectionSnapshot
 }
 
@@ -80,8 +101,12 @@ type routeStats struct {
 	successes           int64
 	failures            int64
 	consecutiveFailures int64
+	recoverySuccesses   int64
 	errorEWMA           float64
 	latencyEWMA         float64
+	lastSuccess         time.Time
+	lastFailure         time.Time
+	recoveryStarted     time.Time
 	lastUpdated         time.Time
 }
 
@@ -95,25 +120,45 @@ type trackerConfig struct {
 	jitterRatio               float64
 	minWeightMultiplier       float64
 	maxWeightMultiplier       float64
+	recomputeInterval         time.Duration
+	degradedErrorThreshold    float64
+	failedErrorThreshold      float64
+	failedConsecutiveFailures int64
+	recoveryHalfLife          time.Duration
+	weightFloor               int
+	weightCeiling             int
+	explorationFloorRatio     float64
+	recoverySuccessThreshold  int64
 }
 
 type Tracker struct {
-	cfg        trackerConfig
-	routes     sync.Map
-	directions sync.Map
+	cfg                 trackerConfig
+	routes              sync.Map
+	directions          sync.Map
+	routeProfiles       sync.Map
+	directionProfiles   sync.Map
+	recomputeMu         sync.Mutex
+	lastRecomputeUnixNs int64
+	dirty               uint32
+	stopCh              chan struct{}
+	stopOnce            sync.Once
+	wg                  sync.WaitGroup
 }
 
 func Init(config *enterprisecfg.LoadBalancerConfig, logger schemas.Logger) (*Plugin, error) {
-	if config == nil {
+	normalizedConfig := enterprisecfg.NormalizeLoadBalancerConfig(config)
+	if normalizedConfig == nil {
 		return nil, fmt.Errorf("load balancer config is required")
 	}
 
-	cfg := normalizeTrackerConfig(config.TrackerConfig)
-	tracker := &Tracker{cfg: cfg}
-	seedBootstrapMetrics(tracker, config.Bootstrap)
+	cfg := normalizeTrackerConfig(normalizedConfig.TrackerConfig)
+	tracker := newTracker(cfg)
+	seedBootstrapMetrics(tracker, normalizedConfig.Bootstrap)
+	tracker.recomputeProfiles(time.Now(), true)
 
 	return &Plugin{
 		cfg:     cfg,
+		policy:  normalizeRuntimePolicy(normalizedConfig),
 		tracker: tracker,
 		logger:  logger,
 	}, nil
@@ -124,7 +169,11 @@ func (p *Plugin) GetName() string {
 }
 
 func (p *Plugin) Cleanup() error {
-	return nil
+	tracker := p.currentTracker()
+	if tracker == nil {
+		return nil
+	}
+	return tracker.cleanup()
 }
 
 func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
@@ -150,41 +199,244 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 
 	keyID := strings.TrimSpace(bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeySelectedKeyID))
 	latencyMs := extractLatencyMillis(ctx, resp)
-	p.tracker.ObserveDirection(provider, model, latencyMs, bifrostErr == nil)
+	tracker := p.currentTracker()
+	if tracker == nil {
+		return resp, bifrostErr, nil
+	}
+	tracker.ObserveDirection(provider, model, latencyMs, bifrostErr == nil)
 	if keyID != "" {
-		p.tracker.Observe(provider, model, keyID, latencyMs, bifrostErr == nil)
+		tracker.Observe(provider, model, keyID, latencyMs, bifrostErr == nil)
 	}
 
 	return resp, bifrostErr, nil
 }
 
 func (p *Plugin) GetKeySelector() schemas.KeySelector {
-	return p.tracker.SelectKey
+	return p.selectKey
+}
+
+func (p *Plugin) Enabled() bool {
+	return p.policySnapshot().enabled
+}
+
+func (p *Plugin) UpdateConfig(config *enterprisecfg.LoadBalancerConfig) error {
+	if p == nil {
+		return nil
+	}
+
+	normalizedConfig := enterprisecfg.NormalizeLoadBalancerConfig(config)
+	if normalizedConfig == nil {
+		return fmt.Errorf("load balancer config is required")
+	}
+
+	cfg := normalizeTrackerConfig(normalizedConfig.TrackerConfig)
+	newTracker := newTracker(cfg)
+	if previous := p.currentTracker(); previous != nil {
+		previous.copyInto(newTracker)
+	}
+	seedBootstrapMetrics(newTracker, normalizedConfig.Bootstrap)
+	newTracker.recomputeProfiles(time.Now(), true)
+
+	p.mu.Lock()
+	previousTracker := p.tracker
+	p.cfg = cfg
+	p.policy = normalizeRuntimePolicy(normalizedConfig)
+	p.tracker = newTracker
+	p.mu.Unlock()
+
+	if previousTracker != nil {
+		return previousTracker.cleanup()
+	}
+	return nil
 }
 
 func (p *Plugin) Snapshot(provider schemas.ModelProvider, model, keyID string) (RouteSnapshot, bool) {
-	return p.tracker.Snapshot(provider, model, keyID)
+	tracker := p.currentTracker()
+	if tracker == nil {
+		return RouteSnapshot{}, false
+	}
+	return tracker.Snapshot(provider, model, keyID)
 }
 
 func (p *Plugin) ListSnapshots(provider schemas.ModelProvider, model string) []RouteStatus {
-	if p == nil || p.tracker == nil {
+	tracker := p.currentTracker()
+	if tracker == nil {
 		return nil
 	}
-	return p.tracker.ListSnapshots(provider, model)
+	return tracker.ListSnapshots(provider, model)
 }
 
 func (p *Plugin) DirectionSnapshot(provider schemas.ModelProvider, model string) (DirectionSnapshot, bool) {
-	if p == nil || p.tracker == nil {
+	tracker := p.currentTracker()
+	if tracker == nil {
 		return DirectionSnapshot{}, false
 	}
-	return p.tracker.DirectionSnapshot(provider, model)
+	return tracker.DirectionSnapshot(provider, model)
 }
 
 func (p *Plugin) ListDirectionSnapshots(provider schemas.ModelProvider, model string) []DirectionStatus {
-	if p == nil || p.tracker == nil {
+	tracker := p.currentTracker()
+	if tracker == nil {
 		return nil
 	}
-	return p.tracker.ListDirectionSnapshots(provider, model)
+	return tracker.ListDirectionSnapshots(provider, model)
+}
+
+func (p *Plugin) currentTracker() *Tracker {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.tracker
+}
+
+func (p *Plugin) currentTrackerConfig() trackerConfig {
+	if p == nil {
+		return trackerConfig{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.cfg
+}
+
+func (p *Plugin) policySnapshot() runtimePolicy {
+	if p == nil {
+		return runtimePolicy{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	policy := p.policy
+	if len(policy.providerAllowlist) > 0 {
+		policy.providerAllowlist = mapsClone(policy.providerAllowlist)
+	}
+	if len(policy.modelAllowlist) > 0 {
+		policy.modelAllowlist = mapStringSetClone(policy.modelAllowlist)
+	}
+	return policy
+}
+
+func (p *Plugin) selectKey(ctx *schemas.BifrostContext, keys []schemas.Key, provider schemas.ModelProvider, model string) (schemas.Key, error) {
+	policy := p.policySnapshot()
+	if !policy.shouldUseKeyBalancing(provider, model) {
+		return bifrost.WeightedRandomKeySelector(ctx, keys, provider, model)
+	}
+
+	tracker := p.currentTracker()
+	if tracker == nil {
+		return bifrost.WeightedRandomKeySelector(ctx, keys, provider, model)
+	}
+	return tracker.SelectKey(ctx, keys, provider, model)
+}
+
+func normalizeRuntimePolicy(cfg *enterprisecfg.LoadBalancerConfig) runtimePolicy {
+	normalized := enterprisecfg.NormalizeLoadBalancerConfig(cfg)
+	if normalized == nil {
+		return runtimePolicy{}
+	}
+
+	policy := runtimePolicy{
+		enabled:                       normalized.Enabled,
+		keyBalancingEnabled:           boolValue(normalized.KeyBalancingEnabled, true),
+		directionRoutingEnabled:       boolValue(normalized.DirectionRoutingEnabled, false),
+		directionRoutingForVirtualKey: boolValue(normalized.DirectionRoutingForVirtualKeys, false),
+	}
+	if len(normalized.ProviderAllowlist) > 0 {
+		policy.providerAllowlist = make(map[schemas.ModelProvider]struct{}, len(normalized.ProviderAllowlist))
+		for _, provider := range normalized.ProviderAllowlist {
+			trimmed := strings.TrimSpace(strings.ToLower(provider))
+			if trimmed == "" {
+				continue
+			}
+			policy.providerAllowlist[schemas.ModelProvider(trimmed)] = struct{}{}
+		}
+	}
+	if len(normalized.ModelAllowlist) > 0 {
+		policy.modelAllowlist = make(map[string]struct{}, len(normalized.ModelAllowlist))
+		for _, model := range normalized.ModelAllowlist {
+			_, parsedModel := schemas.ParseModelString(strings.TrimSpace(model), "")
+			normalizedModel := strings.TrimSpace(parsedModel)
+			if normalizedModel == "" {
+				normalizedModel = strings.TrimSpace(model)
+			}
+			if normalizedModel == "" {
+				continue
+			}
+			policy.modelAllowlist[normalizedModel] = struct{}{}
+		}
+	}
+	return policy
+}
+
+func (p runtimePolicy) shouldUseKeyBalancing(provider schemas.ModelProvider, model string) bool {
+	return p.enabled && p.keyBalancingEnabled && p.allowsProvider(provider) && p.allowsModel(model)
+}
+
+func (p runtimePolicy) shouldUseDirectionRouting(ctx *schemas.BifrostContext, model string) bool {
+	if !p.enabled || !p.directionRoutingEnabled || !p.allowsModel(model) {
+		return false
+	}
+	if !p.directionRoutingForVirtualKey && hasGovernanceVirtualKey(ctx) {
+		return false
+	}
+	return true
+}
+
+func (p runtimePolicy) allowsProvider(provider schemas.ModelProvider) bool {
+	if len(p.providerAllowlist) == 0 {
+		return true
+	}
+	_, ok := p.providerAllowlist[provider]
+	return ok
+}
+
+func (p runtimePolicy) allowsModel(model string) bool {
+	if len(p.modelAllowlist) == 0 {
+		return true
+	}
+	_, parsedModel := schemas.ParseModelString(strings.TrimSpace(model), "")
+	normalizedModel := strings.TrimSpace(parsedModel)
+	if normalizedModel == "" {
+		normalizedModel = strings.TrimSpace(model)
+	}
+	_, ok := p.modelAllowlist[normalizedModel]
+	return ok
+}
+
+func boolValue(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func hasGovernanceVirtualKey(ctx *schemas.BifrostContext) bool {
+	if ctx == nil {
+		return false
+	}
+	if strings.TrimSpace(bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyGovernanceVirtualKeyID)) != "" {
+		return true
+	}
+	if strings.TrimSpace(bifrost.GetStringFromContext(ctx, schemas.BifrostContextKeyVirtualKey)) != "" {
+		return true
+	}
+	return false
+}
+
+func mapsClone[K comparable, V any](source map[K]V) map[K]V {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[K]V, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func mapStringSetClone(source map[string]struct{}) map[string]struct{} {
+	return mapsClone(source)
 }
 
 func (t *Tracker) Observe(provider schemas.ModelProvider, model, keyID string, latencyMs float64, success bool) {
@@ -196,6 +448,7 @@ func (t *Tracker) Observe(provider schemas.ModelProvider, model, keyID string, l
 	stats.mu.Lock()
 	defer stats.mu.Unlock()
 	observeStats(stats, t.cfg, latencyMs, success)
+	atomic.StoreUint32(&t.dirty, 1)
 }
 
 func (t *Tracker) ObserveDirection(provider schemas.ModelProvider, model string, latencyMs float64, success bool) {
@@ -208,6 +461,7 @@ func (t *Tracker) ObserveDirection(provider schemas.ModelProvider, model string,
 	defer stats.mu.Unlock()
 
 	observeStats(stats, t.cfg, latencyMs, success)
+	atomic.StoreUint32(&t.dirty, 1)
 }
 
 func (t *Tracker) Snapshot(provider schemas.ModelProvider, model, keyID string) (RouteSnapshot, bool) {
@@ -248,146 +502,6 @@ func (t *Tracker) DirectionSnapshot(provider schemas.ModelProvider, model string
 		LatencyEWMA:         stats.latencyEWMA,
 		LastUpdated:         stats.lastUpdated,
 	}, true
-}
-
-func (t *Tracker) ListSnapshots(provider schemas.ModelProvider, model string) []RouteStatus {
-	if t == nil {
-		return nil
-	}
-
-	snapshots := make([]RouteStatus, 0)
-	t.routes.Range(func(key, value any) bool {
-		route, ok := key.(routeKey)
-		if !ok {
-			return true
-		}
-		if provider != "" && route.provider != provider {
-			return true
-		}
-		if model != "" && route.model != model {
-			return true
-		}
-
-		stats, ok := value.(*routeStats)
-		if !ok {
-			return true
-		}
-		stats.mu.RLock()
-		snapshots = append(snapshots, RouteStatus{
-			Provider: route.provider,
-			Model:    route.model,
-			KeyID:    route.keyID,
-			RouteSnapshot: RouteSnapshot{
-				Samples:             stats.samples,
-				Successes:           stats.successes,
-				Failures:            stats.failures,
-				ConsecutiveFailures: stats.consecutiveFailures,
-				ErrorEWMA:           stats.errorEWMA,
-				LatencyEWMA:         stats.latencyEWMA,
-				LastUpdated:         stats.lastUpdated,
-			},
-		})
-		stats.mu.RUnlock()
-		return true
-	})
-
-	slices.SortFunc(snapshots, func(a, b RouteStatus) int {
-		if cmp := strings.Compare(string(a.Provider), string(b.Provider)); cmp != 0 {
-			return cmp
-		}
-		if cmp := strings.Compare(a.Model, b.Model); cmp != 0 {
-			return cmp
-		}
-		return strings.Compare(a.KeyID, b.KeyID)
-	})
-
-	return snapshots
-}
-
-func (t *Tracker) ListDirectionSnapshots(provider schemas.ModelProvider, model string) []DirectionStatus {
-	if t == nil {
-		return nil
-	}
-
-	statuses := make([]DirectionStatus, 0)
-	t.directions.Range(func(key, value any) bool {
-		direction, ok := key.(directionKey)
-		if !ok {
-			return true
-		}
-		if provider != "" && direction.provider != provider {
-			return true
-		}
-		if model != "" && direction.model != model {
-			return true
-		}
-
-		stats, ok := value.(*routeStats)
-		if !ok {
-			return true
-		}
-		stats.mu.RLock()
-		statuses = append(statuses, DirectionStatus{
-			Provider: direction.provider,
-			Model:    direction.model,
-			DirectionSnapshot: DirectionSnapshot{
-				Samples:             stats.samples,
-				Successes:           stats.successes,
-				Failures:            stats.failures,
-				ConsecutiveFailures: stats.consecutiveFailures,
-				ErrorEWMA:           stats.errorEWMA,
-				LatencyEWMA:         stats.latencyEWMA,
-				LastUpdated:         stats.lastUpdated,
-			},
-		})
-		stats.mu.RUnlock()
-		return true
-	})
-
-	baselineLatency := 0.0
-	for _, status := range statuses {
-		if status.LatencyEWMA <= 0 {
-			continue
-		}
-		if baselineLatency == 0 || status.LatencyEWMA < baselineLatency {
-			baselineLatency = status.LatencyEWMA
-		}
-	}
-	for i := range statuses {
-		statuses[i].Score = t.directionScore(statuses[i].DirectionSnapshot, baselineLatency)
-	}
-
-	slices.SortFunc(statuses, func(a, b DirectionStatus) int {
-		if cmp := strings.Compare(string(a.Provider), string(b.Provider)); cmp != 0 {
-			return cmp
-		}
-		return strings.Compare(a.Model, b.Model)
-	})
-
-	return statuses
-}
-
-func (t *Tracker) SelectKey(ctx *schemas.BifrostContext, keys []schemas.Key, providerKey schemas.ModelProvider, model string) (schemas.Key, error) {
-	if len(keys) == 0 {
-		return schemas.Key{}, fmt.Errorf("no keys available for provider %s", providerKey)
-	}
-	if len(keys) == 1 {
-		return keys[0], nil
-	}
-
-	if rand.Float64() < t.cfg.explorationRatio {
-		return bifrost.WeightedRandomKeySelector(ctx, keys, providerKey, model)
-	}
-
-	weightedKeys := make([]schemas.Key, len(keys))
-	copy(weightedKeys, keys)
-
-	baselineLatency := t.findBaselineLatency(providerKey, model, keys)
-	for i := range weightedKeys {
-		weightedKeys[i].Weight = t.adjustedWeight(providerKey, model, keys[i], baselineLatency)
-	}
-
-	return bifrost.WeightedRandomKeySelector(ctx, weightedKeys, providerKey, model)
 }
 
 func (t *Tracker) adjustedWeight(provider schemas.ModelProvider, model string, key schemas.Key, baselineLatency float64) float64 {
@@ -444,72 +558,6 @@ func (t *Tracker) findBaselineLatency(provider schemas.ModelProvider, model stri
 	return best
 }
 
-func (t *Tracker) ReorderFallbacks(fallbacks []schemas.Fallback) ([]schemas.Fallback, bool) {
-	if t == nil || len(fallbacks) < 2 {
-		return fallbacks, false
-	}
-
-	type fallbackCandidate struct {
-		index    int
-		fallback schemas.Fallback
-		snapshot DirectionSnapshot
-		known    bool
-		score    float64
-	}
-
-	candidates := make([]fallbackCandidate, 0, len(fallbacks))
-	baselineLatency := 0.0
-	knownCount := 0
-	for i, fallback := range fallbacks {
-		snapshot, ok := t.DirectionSnapshot(fallback.Provider, fallback.Model)
-		if ok {
-			knownCount++
-			if snapshot.LatencyEWMA > 0 && (baselineLatency == 0 || snapshot.LatencyEWMA < baselineLatency) {
-				baselineLatency = snapshot.LatencyEWMA
-			}
-		}
-		candidates = append(candidates, fallbackCandidate{
-			index:    i,
-			fallback: fallback,
-			snapshot: snapshot,
-			known:    ok,
-		})
-	}
-
-	if knownCount < 2 {
-		return fallbacks, false
-	}
-	for i := range candidates {
-		if !candidates[i].known {
-			continue
-		}
-		candidates[i].score = t.directionScore(candidates[i].snapshot, baselineLatency)
-	}
-
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].known != candidates[j].known {
-			return candidates[i].known && !candidates[j].known
-		}
-		if !candidates[i].known {
-			return candidates[i].index < candidates[j].index
-		}
-		if candidates[i].score == candidates[j].score {
-			return candidates[i].index < candidates[j].index
-		}
-		return candidates[i].score > candidates[j].score
-	})
-
-	reordered := make([]schemas.Fallback, len(candidates))
-	changed := false
-	for i, candidate := range candidates {
-		reordered[i] = candidate.fallback
-		if candidate.index != i {
-			changed = true
-		}
-	}
-	return reordered, changed
-}
-
 func (t *Tracker) get(route routeKey) (*routeStats, bool) {
 	value, ok := t.routes.Load(route)
 	if !ok {
@@ -559,10 +607,19 @@ func normalizeTrackerConfig(cfg *enterprisecfg.LoadBalancerTrackerConfig) tracke
 		latencyPenalty:            0.6,
 		consecutiveFailurePenalty: 0.15,
 		minimumSamples:            10,
-		explorationRatio:          0.15,
+		explorationRatio:          0.25,
 		jitterRatio:               0.05,
 		minWeightMultiplier:       0.1,
 		maxWeightMultiplier:       4.0,
+		recomputeInterval:         5 * time.Second,
+		degradedErrorThreshold:    0.02,
+		failedErrorThreshold:      0.05,
+		failedConsecutiveFailures: 5,
+		recoveryHalfLife:          30 * time.Second,
+		weightFloor:               1,
+		weightCeiling:             1000,
+		explorationFloorRatio:     0.1,
+		recoverySuccessThreshold:  3,
 	}
 
 	if cfg == nil {
@@ -595,6 +652,27 @@ func normalizeTrackerConfig(cfg *enterprisecfg.LoadBalancerTrackerConfig) tracke
 	}
 	if cfg.MaxWeightMultiplier > 0 {
 		normalized.maxWeightMultiplier = cfg.MaxWeightMultiplier
+	}
+	if cfg.RecomputeIntervalSeconds > 0 {
+		normalized.recomputeInterval = time.Duration(cfg.RecomputeIntervalSeconds) * time.Second
+	}
+	if cfg.DegradedErrorThreshold > 0 && cfg.DegradedErrorThreshold < 1 {
+		normalized.degradedErrorThreshold = cfg.DegradedErrorThreshold
+	}
+	if cfg.FailedErrorThreshold > 0 && cfg.FailedErrorThreshold < 1 {
+		normalized.failedErrorThreshold = cfg.FailedErrorThreshold
+	}
+	if cfg.FailedConsecutiveFailures > 0 {
+		normalized.failedConsecutiveFailures = int64(cfg.FailedConsecutiveFailures)
+	}
+	if cfg.RecoveryHalfLifeSeconds > 0 {
+		normalized.recoveryHalfLife = time.Duration(cfg.RecoveryHalfLifeSeconds) * time.Second
+	}
+	if cfg.WeightFloor > 0 {
+		normalized.weightFloor = cfg.WeightFloor
+	}
+	if cfg.WeightCeiling > 0 {
+		normalized.weightCeiling = cfg.WeightCeiling
 	}
 
 	return normalized
@@ -687,7 +765,15 @@ func maxInt64(value, floor int64) int64 {
 	return value
 }
 
+func maxInt(value, floor int) int {
+	if value < floor {
+		return floor
+	}
+	return value
+}
+
 func observeStats(stats *routeStats, cfg trackerConfig, latencyMs float64, success bool) {
+	now := time.Now()
 	errorSample := 0.0
 	if !success {
 		errorSample = 1.0
@@ -707,12 +793,22 @@ func observeStats(stats *routeStats, cfg trackerConfig, latencyMs float64, succe
 	stats.samples++
 	if success {
 		stats.successes++
+		stats.lastSuccess = now
+		if stats.consecutiveFailures > 0 || !stats.lastFailure.IsZero() {
+			if stats.recoveryStarted.IsZero() {
+				stats.recoveryStarted = now
+			}
+			stats.recoverySuccesses++
+		}
 		stats.consecutiveFailures = 0
 	} else {
 		stats.failures++
+		stats.lastFailure = now
 		stats.consecutiveFailures++
+		stats.recoveryStarted = time.Time{}
+		stats.recoverySuccesses = 0
 	}
-	stats.lastUpdated = time.Now()
+	stats.lastUpdated = now
 }
 
 func applyBootstrapSnapshot(stats *routeStats, snapshot DirectionSnapshot) {
@@ -803,19 +899,22 @@ func (t *Tracker) directionScore(snapshot DirectionSnapshot, baselineLatency flo
 }
 
 func (p *Plugin) reorderFallbacks(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) {
-	if p == nil || p.tracker == nil || req == nil {
+	tracker := p.currentTracker()
+	if tracker == nil || req == nil {
 		return
 	}
 	if ctx != nil && bifrost.GetIntFromContext(ctx, schemas.BifrostContextKeyFallbackIndex) > 0 {
 		return
 	}
-
 	primaryProvider, primaryModel, fallbacks := req.GetRequestFields()
+	if !p.policySnapshot().shouldUseDirectionRouting(ctx, primaryModel) {
+		return
+	}
 	if len(fallbacks) < 2 {
 		return
 	}
 
-	reordered, changed := p.tracker.ReorderFallbacks(fallbacks)
+	reordered, changed := tracker.ReorderFallbacks(fallbacks)
 	if !changed {
 		return
 	}

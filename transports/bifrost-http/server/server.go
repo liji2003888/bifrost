@@ -108,6 +108,7 @@ type ServerCallbacks interface {
 	ForceReloadPricing(ctx context.Context) error
 	// Proxy related callbacks
 	ReloadProxyConfig(ctx context.Context, config *tables.GlobalProxyConfig) error
+	ReloadLoadBalancerConfig(ctx context.Context, config *enterprisecfg.LoadBalancerConfig) error
 	// Client config related callbacks
 	ReloadHeaderFilterConfig(ctx context.Context, config *tables.GlobalHeaderFilterConfig) error
 	UpdateDropExcessRequests(ctx context.Context, value bool)
@@ -1092,10 +1093,12 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	if loggerPlugin != nil {
 		loggingHandler = handlers.NewLoggingHandler(loggerPlugin.GetPluginLogManager(), s, s.Config)
 	}
-	loadBalancerPlugin, _ := lib.FindPluginAs[*loadbalancer.Plugin](s.Config, loadbalancer.PluginName)
 	clusterPropagator, _ := callbacks.(handlers.ClusterConfigPropagator)
 	clusterConfigApplier, _ := callbacks.(handlers.ClusterConfigApplier)
-	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager, s.VaultService, loadBalancerPlugin, clusterConfigApplier)
+	enterpriseHandler := handlers.NewEnterpriseHandler(s.ClusterService, s.AuditService, s.LogExportService, s.AlertManager, s.VaultService, func() handlers.LoadBalancerStatusProvider {
+		plugin, _ := lib.FindPluginAs[*loadbalancer.Plugin](s.Config, loadbalancer.PluginName)
+		return plugin
+	}, clusterConfigApplier)
 	var governanceHandler *handlers.GovernanceHandler
 	governancePluginName := governance.PluginName
 	if name, ok := ctx.Value(schemas.BifrostContextKeyGovernancePluginName).(string); ok && name != "" {

@@ -7,6 +7,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 )
 
 const ClusterConfigReloadEndpoint = "/_cluster/config/reload"
@@ -19,6 +20,7 @@ const (
 	ClusterConfigScopeCustomer           ClusterConfigScope = "customer"
 	ClusterConfigScopeFolder             ClusterConfigScope = "folder"
 	ClusterConfigScopeFramework          ClusterConfigScope = "framework"
+	ClusterConfigScopeLoadBalancer       ClusterConfigScope = "load_balancer"
 	ClusterConfigScopeMCPClient          ClusterConfigScope = "mcp_client"
 	ClusterConfigScopeModelConfig        ClusterConfigScope = "model_config"
 	ClusterConfigScopeOAuthConfig        ClusterConfigScope = "oauth_config"
@@ -71,6 +73,7 @@ type ClusterConfigChange struct {
 	ClientConfig       *configstore.ClientConfig               `json:"client_config,omitempty"`
 	AuthConfig         *configstore.AuthConfig                 `json:"auth_config,omitempty"`
 	FrameworkConfig    *configstoreTables.TableFrameworkConfig `json:"framework_config,omitempty"`
+	LoadBalancerConfig *enterprisecfg.LoadBalancerConfig       `json:"load_balancer_config,omitempty"`
 	MCPClientConfig    *schemas.MCPClientConfig                `json:"mcp_client_config,omitempty"`
 	ProxyConfig        *configstoreTables.GlobalProxyConfig    `json:"proxy_config,omitempty"`
 	ProviderConfig     *configstore.ProviderConfig             `json:"provider_config,omitempty"`

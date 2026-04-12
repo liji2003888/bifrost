@@ -639,9 +639,39 @@ export const coreConfigSchema = z.object({
 	mcp_code_mode_binding_level: z.enum(["server", "tool"]).default("server"),
 });
 
+export const loadBalancerTrackerConfigSchema = z.object({
+	ewma_alpha: z.number().min(0).max(1).optional(),
+	error_penalty: z.number().min(0).optional(),
+	latency_penalty: z.number().min(0).optional(),
+	consecutive_failure_penalty: z.number().min(0).optional(),
+	minimum_samples: z.number().int().min(1).optional(),
+	exploration_ratio: z.number().min(0).max(1).optional(),
+	jitter_ratio: z.number().min(0).max(1).optional(),
+	min_weight_multiplier: z.number().min(0).optional(),
+	max_weight_multiplier: z.number().min(0).optional(),
+	recompute_interval_seconds: z.number().int().min(1).optional(),
+	degraded_error_threshold: z.number().min(0).max(1).optional(),
+	failed_error_threshold: z.number().min(0).max(1).optional(),
+	failed_consecutive_failures: z.number().int().min(1).optional(),
+	recovery_half_life_seconds: z.number().int().min(1).optional(),
+	weight_floor: z.number().int().min(1).optional(),
+	weight_ceiling: z.number().int().min(1).optional(),
+});
+
+export const loadBalancerConfigSchema = z.object({
+	enabled: z.boolean().default(false),
+	key_balancing_enabled: z.boolean().default(true),
+	direction_routing_enabled: z.boolean().default(false),
+	direction_routing_for_virtual_keys: z.boolean().default(false),
+	provider_allowlist: z.array(z.string()).default([]),
+	model_allowlist: z.array(z.string()).default([]),
+	tracker_config: loadBalancerTrackerConfigSchema.optional(),
+});
+
 // Bifrost config schema
 export const bifrostConfigSchema = z.object({
 	client_config: coreConfigSchema,
+	load_balancer_config: loadBalancerConfigSchema.optional(),
 	is_db_connected: z.boolean(),
 	is_cache_connected: z.boolean(),
 	is_logs_connected: z.boolean(),

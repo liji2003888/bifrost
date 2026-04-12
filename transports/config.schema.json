@@ -3377,6 +3377,32 @@
           "type": "boolean",
           "description": "Whether load balancing is enabled"
         },
+        "key_balancing_enabled": {
+          "type": "boolean",
+          "description": "Whether adaptive key-level balancing is enabled for provider keys"
+        },
+        "direction_routing_enabled": {
+          "type": "boolean",
+          "description": "Whether provider-level direction routing is allowed for bare-model HTTP requests"
+        },
+        "direction_routing_for_virtual_keys": {
+          "type": "boolean",
+          "description": "Whether provider-level direction routing is allowed when governance virtual keys are present"
+        },
+        "provider_allowlist": {
+          "type": "array",
+          "description": "Optional provider allowlist for adaptive routing decisions",
+          "items": {
+            "type": "string"
+          }
+        },
+        "model_allowlist": {
+          "type": "array",
+          "description": "Optional model allowlist for adaptive routing decisions",
+          "items": {
+            "type": "string"
+          }
+        },
         "tracker_config": {
           "type": "object",
           "description": "Configuration for tracking route metrics and computing adaptive key weights",
@@ -3428,6 +3454,43 @@
               "type": "number",
               "minimum": 0,
               "description": "Upper bound multiplier applied to the static key weight"
+            },
+            "recompute_interval_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "How often adaptive route and direction weights are recomputed asynchronously"
+            },
+            "degraded_error_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Error-rate threshold at which a route becomes degraded"
+            },
+            "failed_error_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Error-rate threshold at which a route is treated as failed"
+            },
+            "failed_consecutive_failures": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Consecutive failure count that trips the failed state"
+            },
+            "recovery_half_life_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Time window used to reduce penalties for recovering routes"
+            },
+            "weight_floor": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Minimum precomputed adaptive route weight"
+            },
+            "weight_ceiling": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Maximum precomputed adaptive route weight"
             }
           },
           "additionalProperties": false

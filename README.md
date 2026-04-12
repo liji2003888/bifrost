@@ -619,3 +619,151 @@ Current cluster auto-sync scope now includes:
   - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
   - `npm exec next build -- --no-lint`
   - `npm exec tsc -- --noEmit`
+
+### 2026-04-12 09:55:48 CST | Base Commit 90fbe5f7c | Adaptive Load Balancing 官网设计对齐增强
+
+- 本轮重新对照了官网 `Adaptive Load Balancing` / `Provider Routing` 设计，并基于当前企业版 fork 的现有实现做了“最小破坏式”增强。
+  - 没有去重写推理主链，也没有改动现有 cluster / governance / vault / audit 的核心执行路径。
+  - 增强全部收口在现有 `transports/bifrost-http/loadbalancer` 插件、企业状态接口和自适应路由页面。
+
+- 自适应路由核心能力从“即时按请求算分”升级为“异步预计算 + 状态机”。
+  - 为 route（provider/model/key）和 direction（provider/model）新增了预计算 profile：
+    - `state`
+    - `score`
+    - `weight`
+    - `actual_traffic_share`
+    - `expected_traffic_share`
+  - 增加了 4 种健康状态：
+    - `healthy`
+    - `degraded`
+    - `failed`
+    - `recovering`
+  - 增加了后台异步重计算循环，默认每 `5s` 重算一次 adaptive 权重与状态，而不是在热路径中每次请求都完整扫描。
+
+- 补齐了官网设计里最关键的两层负载均衡能力。
+  - `Level 1 - Direction`
+    - `loadbalancer` 现在同时实现了 `HTTPTransportPlugin`。
+    - 当请求体里的 `model` 仍是裸模型名、且 governance/routing rule 没有提前固定 provider 时，插件会在 HTTPTransportPreHook 阶段：
+      - 根据 Model Catalog 找出可用 provider
+      - 基于 direction profile 选择当前最优 provider
+      - 自动生成 fallback provider 列表
+      - 将请求体改写成后续 handler 可继续处理的 `provider/model` 形式
+    - 这样保持了与当前 handler 体系兼容，不需要大范围改写请求解析器。
+  - `Level 2 - Route`
+    - key 级选择不再只依赖即时 EWMA，而是优先读取预计算 route profile。
+    - 预计算权重范围收口到 `1-1000`。
+    - 对 failed 路由启用 circuit-breaker 风格的 `0` 权重，并在探索流量路径中保留最小探测流量。
+
+- 对齐官网设计补上了探索与恢复机制。
+  - `exploration_ratio` 默认提升到 `25%`。
+  - 增加 `recovery_half_life_seconds` 概念，用于在 recovering 状态下逐步降低惩罚。
+  - 引入 `failed_error_threshold`、`degraded_error_threshold`、`failed_consecutive_failures` 等阈值，避免所有差路由都被同一种线性权重处理。
+
+- 配置面也同步增强。
+  - `load_balancer_config.tracker_config` 新增：
+    - `recompute_interval_seconds`
+    - `degraded_error_threshold`
+    - `failed_error_threshold`
+    - `failed_consecutive_failures`
+    - `recovery_half_life_seconds`
+    - `weight_floor`
+    - `weight_ceiling`
+  - `transports/config.schema.json` 已同步补齐 schema 定义。
+
+- 企业状态接口和前端页面已对齐新指标。
+  - `/api/adaptive-routing/status` 现在会返回 route / direction 的：
+    - `state`
+    - `score`
+    - `weight`
+    - `actual_traffic_share`
+    - `expected_traffic_share`
+  - Adaptive Routing 页面新增：
+    - 状态列
+    - 预计算权重列
+    - 实际/期望流量占比列
+  - 这样 Dashboard 上可以直接看到 route 是否 degraded/failed/recovering，以及 adaptive 权重是否已收敛。
+
+- 稳定性与兼容性说明。
+  - 本轮没有改动已有 provider API 调用路径。
+  - 也没有改动 governance 已经负责的 routing rule / virtual key provider selection 语义。
+  - 当 governance 已经给请求固定 provider，adaptive direction 级选择会自动跳过，避免双重改写。
+  - 当请求已经显式带了 `fallbacks`，adaptive 不会强行覆盖，优先尊重显式配置。
+
+- 本轮验证通过：
+  - `go test ./transports/bifrost-http/loadbalancer`
+  - `go test ./transports/bifrost-http/server ./transports/bifrost-http/handlers ./transports/bifrost-http/enterprise`
+  - `go test ./transports/bifrost-http/lib -run TestConfigDataUnmarshalEnterpriseFields`
+  - `go test ./transports/bifrost-http/integrations ./transports/bifrost-http/websocket`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+### 2026-04-12 11:11:19 CST | Base Commit 820fdc3a4 | Adaptive Routing 配置面板与集群安全作用域收口
+
+- 本轮把 Adaptive Routing 从“只有观测页”补成了“可配置 + 可集群同步 + 默认更安全”的完整闭环。
+  - 新增了 Adaptive Routing 页面上的配置面板。
+  - 后端 `/api/config` 已接入 `load_balancer_config` 的读取、保存与热更新。
+  - Cluster config sync / drift fingerprint / controlled self-heal 也已经把 adaptive routing 纳入一致性范围。
+
+- 为了适配企业内网私有化模型、按 provider / virtual key / team 管理的场景，本轮刻意把 Adaptive Routing 的默认行为收紧成“保守模式”。
+  - `enabled = false`
+  - `key_balancing_enabled = true`
+  - `direction_routing_enabled = false`
+  - `direction_routing_for_virtual_keys = false`
+  - 这意味着默认只会在“同 provider / 同 model 的多个 key”之间做自适应 key balancing。
+  - 不会默认对裸模型请求做全局 provider 改写。
+  - 也不会默认对 virtual key 治理流量做跨 provider 重选。
+
+- 新增了更细粒度的 Adaptive Routing 作用域控制项：
+  - `key_balancing_enabled`
+  - `direction_routing_enabled`
+  - `direction_routing_for_virtual_keys`
+  - `provider_allowlist`
+  - `model_allowlist`
+  - 这样可以把 Adaptive Routing 限定在指定 provider / model 上启用，而不是一刀切全局生效。
+
+- 热更新路径也做了“最小破坏式”处理，避免影响现有运行中的插件链路。
+  - 不再通过替换整条插件链来切换 Adaptive Routing 配置。
+  - 而是始终保留同一个 built-in `loadbalancer` 插件实例，并在实例内原地更新 runtime policy。
+  - 这样可以避免：
+    - 现有 `KeySelector` 指针失效
+    - 状态接口拿到旧插件实例
+    - 集群节点保存配置后本地没真正热生效
+  - route / direction 的历史指标会在配置热更新时复制到新的 tracker，不会因为改参数把当前统计全部清空。
+
+- 前端 Adaptive Routing 页面已补充可直接操作的配置项：
+  - 总开关
+  - Key Balancing 开关
+  - Provider Direction Routing 开关
+  - Virtual Key 流量是否允许 Direction Routing
+  - Provider / Model allowlist
+  - 关键 tracker tuning 参数
+  - 页面文案也明确提示了企业部署下的推荐配置：默认开启 key balancing、默认关闭 provider direction routing。
+
+- 集群一致性方面，本轮已经补齐：
+  - `ClusterConfigScopeLoadBalancer`
+  - ConfigStore 持久化键：`load_balancer_config`
+  - cluster fanout 后 peer 自动热更新
+  - cluster config drift 指纹中新增 `adaptive_routing`
+  - controlled self-heal 在检测到 `adaptive_routing` drift 时会低频触发从 ConfigStore 自愈 reload
+  - Web UI 保存配置后也会触发 `Config / AdaptiveRouting / ClusterNodes` 的前端缓存失效，避免页面停留在旧状态
+
+- 本轮新增回归覆盖：
+  - `/api/config` 更新 Adaptive Routing 配置后，会：
+    - 落库
+    - 调用 runtime reload
+    - 广播 cluster config change
+  - Adaptive Routing 插件热更新后：
+    - 历史 route / direction 指标仍保留
+    - 关闭 direction routing 后，裸模型请求不会再被自动改写 provider
+
+- 本轮验证通过：
+  - `go test ./transports/bifrost-http/loadbalancer`
+  - `go test ./transports/bifrost-http/handlers`
+  - `go test ./transports/bifrost-http/server`
+  - `go test ./transports/bifrost-http/lib -run TestConfigDataUnmarshalEnterpriseFields`
+  - `go test ./transports/bifrost-http/integrations`
+  - `go test ./transports/bifrost-http/websocket`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec tsc -- --noEmit`
+  - `npm exec next build -- --no-lint`

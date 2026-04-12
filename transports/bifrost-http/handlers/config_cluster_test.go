@@ -3,14 +3,17 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
+	"gorm.io/gorm"
 )
 
 type clusterConfigHandlerStore struct {
@@ -19,6 +22,7 @@ type clusterConfigHandlerStore struct {
 	clientConfig         *configstore.ClientConfig
 	frameworkConfig      *configstoreTables.TableFrameworkConfig
 	authConfig           *configstore.AuthConfig
+	configs              map[string]string
 	flushSessionsCalled  bool
 	restartRequiredValue *configstoreTables.RestartRequiredConfig
 }
@@ -51,8 +55,31 @@ func (m *clusterConfigHandlerStore) SetRestartRequiredConfig(_ context.Context, 
 	return nil
 }
 
+func (m *clusterConfigHandlerStore) UpdateConfig(_ context.Context, row *configstoreTables.TableGovernanceConfig, _ ...*gorm.DB) error {
+	if row == nil {
+		return nil
+	}
+	if m.configs == nil {
+		m.configs = make(map[string]string)
+	}
+	m.configs[row.Key] = row.Value
+	return nil
+}
+
+func (m *clusterConfigHandlerStore) GetConfig(_ context.Context, key string) (*configstoreTables.TableGovernanceConfig, error) {
+	if m == nil || len(m.configs) == 0 {
+		return nil, configstore.ErrNotFound
+	}
+	value, ok := m.configs[key]
+	if !ok {
+		return nil, configstore.ErrNotFound
+	}
+	return &configstoreTables.TableGovernanceConfig{Key: key, Value: value}, nil
+}
+
 type fakeConfigHandlerManager struct {
-	store *clusterConfigHandlerStore
+	store                  *clusterConfigHandlerStore
+	lastLoadBalancerConfig *enterprisecfg.LoadBalancerConfig
 }
 
 func (m *fakeConfigHandlerManager) UpdateAuthConfig(_ context.Context, authConfig *configstore.AuthConfig) error {
@@ -82,6 +109,13 @@ func (m *fakeConfigHandlerManager) ReloadProxyConfig(_ context.Context, _ *confi
 	return nil
 }
 func (m *fakeConfigHandlerManager) ReloadHeaderFilterConfig(_ context.Context, _ *configstoreTables.GlobalHeaderFilterConfig) error {
+	return nil
+}
+func (m *fakeConfigHandlerManager) ReloadLoadBalancerConfig(_ context.Context, cfg *enterprisecfg.LoadBalancerConfig) error {
+	if m == nil {
+		return nil
+	}
+	m.lastLoadBalancerConfig = enterprisecfg.CloneLoadBalancerConfig(cfg)
 	return nil
 }
 
@@ -174,5 +208,93 @@ func TestUpdateConfigPropagatesAuthConfigWithoutSessionFlushWhenOnlyInferenceFla
 	}
 	if authChange.AuthConfig.AdminPassword == nil || authChange.AuthConfig.AdminPassword.GetValue() != "stored-hash" {
 		t.Fatalf("expected redacted password to resolve to stored hash, got %+v", authChange.AuthConfig.AdminPassword)
+	}
+}
+
+func TestUpdateConfigReloadsAndPropagatesLoadBalancerConfig(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	store := &clusterConfigHandlerStore{}
+	manager := &fakeConfigHandlerManager{store: store}
+	propagator := &fakeClusterConfigPropagator{}
+	handler := NewConfigHandler(manager, &lib.Config{
+		ConfigStore: store,
+		ClientConfig: &configstore.ClientConfig{
+			LogRetentionDays: 30,
+		},
+	}, propagator)
+
+	body, err := json.Marshal(map[string]any{
+		"client_config": map[string]any{
+			"log_retention_days": 30,
+		},
+		"framework_config": map[string]any{},
+		"load_balancer_config": map[string]any{
+			"enabled":                            true,
+			"key_balancing_enabled":              true,
+			"direction_routing_enabled":          false,
+			"direction_routing_for_virtual_keys": false,
+			"provider_allowlist":                 []string{"openai", "vllm"},
+			"model_allowlist":                    []string{"gpt-4o", "qwen-max"},
+			"tracker_config": map[string]any{
+				"minimum_samples":            20,
+				"recompute_interval_seconds": 5,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(fasthttp.MethodPut)
+	ctx.Request.SetRequestURI("/api/config")
+	ctx.Request.SetBody(body)
+
+	handler.updateConfig(ctx)
+
+	if ctx.Response.StatusCode() != fasthttp.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	}
+	if manager.lastLoadBalancerConfig == nil {
+		t.Fatal("expected adaptive routing config reload to be invoked")
+	}
+	if !manager.lastLoadBalancerConfig.Enabled {
+		t.Fatalf("expected adaptive routing to remain enabled, got %+v", manager.lastLoadBalancerConfig)
+	}
+	if manager.lastLoadBalancerConfig.DirectionRoutingEnabled == nil || *manager.lastLoadBalancerConfig.DirectionRoutingEnabled {
+		t.Fatalf("expected direction routing to stay disabled by default for enterprise safety, got %+v", manager.lastLoadBalancerConfig)
+	}
+	if manager.lastLoadBalancerConfig.KeyBalancingEnabled == nil || !*manager.lastLoadBalancerConfig.KeyBalancingEnabled {
+		t.Fatalf("expected key balancing to stay enabled, got %+v", manager.lastLoadBalancerConfig)
+	}
+	if len(manager.lastLoadBalancerConfig.ProviderAllowlist) != 2 || manager.lastLoadBalancerConfig.ProviderAllowlist[0] != "openai" {
+		t.Fatalf("expected provider allowlist to be preserved, got %+v", manager.lastLoadBalancerConfig.ProviderAllowlist)
+	}
+
+	storedConfigRow, err := store.GetConfig(context.Background(), configstoreTables.ConfigLoadBalancerKey)
+	if err != nil {
+		t.Fatalf("GetConfig(load_balancer_config) error = %v", err)
+	}
+	if !strings.Contains(storedConfigRow.Value, "\"enabled\":true") {
+		t.Fatalf("expected stored adaptive routing config payload, got %s", storedConfigRow.Value)
+	}
+
+	var loadBalancerChange *ClusterConfigChange
+	for _, change := range propagator.changes {
+		if change.Scope != ClusterConfigScopeLoadBalancer {
+			continue
+		}
+		loadBalancerChange = change
+		break
+	}
+	if loadBalancerChange == nil {
+		t.Fatalf("expected adaptive routing config propagation, got %+v", propagator.changes)
+	}
+	if loadBalancerChange.LoadBalancerConfig == nil || !loadBalancerChange.LoadBalancerConfig.Enabled {
+		t.Fatalf("expected propagated adaptive routing config, got %+v", loadBalancerChange.LoadBalancerConfig)
+	}
+	if loadBalancerChange.LoadBalancerConfig.DirectionRoutingEnabled == nil || *loadBalancerChange.LoadBalancerConfig.DirectionRoutingEnabled {
+		t.Fatalf("expected propagated direction routing to remain disabled, got %+v", loadBalancerChange.LoadBalancerConfig)
 	}
 }

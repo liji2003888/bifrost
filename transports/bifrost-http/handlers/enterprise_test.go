@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fasthttp/router"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/kvstore"
 	"github.com/maximhq/bifrost/framework/logstore"
 	enterprisecfg "github.com/maximhq/bifrost/transports/bifrost-http/enterprise"
 	"github.com/maximhq/bifrost/transports/bifrost-http/loadbalancer"
-	"github.com/fasthttp/router"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/fasthttputil"
 )
@@ -26,6 +26,7 @@ import (
 type fakeLoadBalancerStatusProvider struct {
 	routes     []loadbalancer.RouteStatus
 	directions []loadbalancer.DirectionStatus
+	enabled    bool
 }
 
 type fakeClusterConfigApplier struct {
@@ -70,6 +71,16 @@ func (f *fakeLoadBalancerStatusProvider) ListDirectionSnapshots(provider schemas
 		result = append(result, direction)
 	}
 	return result
+}
+
+func (f *fakeLoadBalancerStatusProvider) Enabled() bool {
+	if f == nil {
+		return false
+	}
+	if !f.enabled && len(f.routes) == 0 && len(f.directions) == 0 {
+		return false
+	}
+	return true
 }
 
 func TestRegisterRoutesExposesDisabledEnterpriseStatusEndpoints(t *testing.T) {
@@ -215,21 +226,24 @@ func TestCollectAdaptiveRoutingStatusAggregatesPeerResponses(t *testing.T) {
 	}
 	defer cluster.Close()
 
-	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, &fakeLoadBalancerStatusProvider{
-		routes: []loadbalancer.RouteStatus{
-			{
-				Provider: schemas.ModelProvider("openai"),
-				Model:    "gpt-4",
-				KeyID:    "local-key",
+	handler := NewEnterpriseHandler(cluster, nil, nil, nil, nil, func() LoadBalancerStatusProvider {
+		return &fakeLoadBalancerStatusProvider{
+			routes: []loadbalancer.RouteStatus{
+				{
+					Provider: schemas.ModelProvider("openai"),
+					Model:    "gpt-4",
+					KeyID:    "local-key",
+				},
 			},
-		},
-		directions: []loadbalancer.DirectionStatus{
-			{
-				Provider: schemas.ModelProvider("openai"),
-				Model:    "gpt-4",
-				Score:    0.82,
+			directions: []loadbalancer.DirectionStatus{
+				{
+					Provider: schemas.ModelProvider("openai"),
+					Model:    "gpt-4",
+					Score:    0.82,
+				},
 			},
-		},
+			enabled: true,
+		}
 	}, nil)
 
 	response := handler.collectAdaptiveRoutingStatus(context.Background(), schemas.ModelProvider("openai"), "gpt-4", true)

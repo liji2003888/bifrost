@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/plugins/litellmcompat"
 	"github.com/maximhq/bifrost/plugins/logging"
@@ -86,7 +87,15 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal load balancer config: %w", err)
 		}
-		return loadbalancer.Init(loadBalancerConfig, logger)
+		plugin, err := loadbalancer.Init(loadBalancerConfig, logger)
+		if err != nil {
+			return nil, err
+		}
+		plugin.BindRoutingSources(bifrostConfig.ModelCatalog, func(provider schemas.ModelProvider) (configstore.ProviderConfig, bool) {
+			cfg, ok := bifrostConfig.Providers[provider]
+			return cfg, ok
+		})
+		return plugin, nil
 
 	case maxim.PluginName:
 		maximConfig, err := MarshalPluginConfig[maxim.Config](pluginConfig)
@@ -191,10 +200,14 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 	}
 	s.Config.SetPluginOrderInfo(governance.PluginName, builtinPlacement, schemas.Ptr(3))
 
-	// 4. Adaptive load balancer (if enabled)
-	if s.Config.LoadBalancerConfig != nil && s.Config.LoadBalancerConfig.Enabled {
-		s.registerPluginWithStatus(ctx, loadbalancer.PluginName, nil, s.Config.LoadBalancerConfig, false)
-	} else {
+	// 4. Adaptive load balancer (always register a stable wrapper; runtime config controls behavior)
+	if s.Config.LoadBalancerConfig == nil {
+		s.Config.LoadBalancerConfig = &loadbalancer.Config{}
+	}
+	if err := s.registerPluginWithStatus(ctx, loadbalancer.PluginName, nil, s.Config.LoadBalancerConfig, false); err != nil {
+		return err
+	}
+	if !s.Config.LoadBalancerConfig.Enabled {
 		s.markPluginDisabled(loadbalancer.PluginName)
 	}
 	s.Config.SetPluginOrderInfo(loadbalancer.PluginName, builtinPlacement, schemas.Ptr(4))

@@ -50,9 +50,14 @@ type ClusterDiscoveryConfig struct {
 }
 
 type LoadBalancerConfig struct {
-	Enabled       bool                       `json:"enabled"`
-	TrackerConfig *LoadBalancerTrackerConfig `json:"tracker_config,omitempty"`
-	Bootstrap     *LoadBalancerBootstrap     `json:"bootstrap,omitempty"`
+	Enabled                        bool                       `json:"enabled"`
+	KeyBalancingEnabled            *bool                      `json:"key_balancing_enabled,omitempty"`
+	DirectionRoutingEnabled        *bool                      `json:"direction_routing_enabled,omitempty"`
+	DirectionRoutingForVirtualKeys *bool                      `json:"direction_routing_for_virtual_keys,omitempty"`
+	ProviderAllowlist              []string                   `json:"provider_allowlist,omitempty"`
+	ModelAllowlist                 []string                   `json:"model_allowlist,omitempty"`
+	TrackerConfig                  *LoadBalancerTrackerConfig `json:"tracker_config,omitempty"`
+	Bootstrap                      *LoadBalancerBootstrap     `json:"bootstrap,omitempty"`
 }
 
 type LoadBalancerTrackerConfig struct {
@@ -65,6 +70,13 @@ type LoadBalancerTrackerConfig struct {
 	JitterRatio               float64 `json:"jitter_ratio,omitempty"`
 	MinWeightMultiplier       float64 `json:"min_weight_multiplier,omitempty"`
 	MaxWeightMultiplier       float64 `json:"max_weight_multiplier,omitempty"`
+	RecomputeIntervalSeconds  int     `json:"recompute_interval_seconds,omitempty"`
+	DegradedErrorThreshold    float64 `json:"degraded_error_threshold,omitempty"`
+	FailedErrorThreshold      float64 `json:"failed_error_threshold,omitempty"`
+	FailedConsecutiveFailures int     `json:"failed_consecutive_failures,omitempty"`
+	RecoveryHalfLifeSeconds   int     `json:"recovery_half_life_seconds,omitempty"`
+	WeightFloor               int     `json:"weight_floor,omitempty"`
+	WeightCeiling             int     `json:"weight_ceiling,omitempty"`
 }
 
 type LoadBalancerBootstrap struct {

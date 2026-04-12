@@ -455,12 +455,69 @@ export interface RestartRequiredConfig {
 	reason?: string;
 }
 
+export interface LoadBalancerTrackerConfig {
+	ewma_alpha?: number;
+	error_penalty?: number;
+	latency_penalty?: number;
+	consecutive_failure_penalty?: number;
+	minimum_samples?: number;
+	exploration_ratio?: number;
+	jitter_ratio?: number;
+	min_weight_multiplier?: number;
+	max_weight_multiplier?: number;
+	recompute_interval_seconds?: number;
+	degraded_error_threshold?: number;
+	failed_error_threshold?: number;
+	failed_consecutive_failures?: number;
+	recovery_half_life_seconds?: number;
+	weight_floor?: number;
+	weight_ceiling?: number;
+}
+
+export interface LoadBalancerConfig {
+	enabled: boolean;
+	key_balancing_enabled: boolean;
+	direction_routing_enabled: boolean;
+	direction_routing_for_virtual_keys: boolean;
+	provider_allowlist?: string[];
+	model_allowlist?: string[];
+	tracker_config?: LoadBalancerTrackerConfig;
+}
+
+export const DefaultLoadBalancerConfig: LoadBalancerConfig = {
+	enabled: false,
+	key_balancing_enabled: true,
+	direction_routing_enabled: false,
+	direction_routing_for_virtual_keys: false,
+	provider_allowlist: [],
+	model_allowlist: [],
+	tracker_config: {
+		ewma_alpha: 0.25,
+		error_penalty: 1.5,
+		latency_penalty: 0.6,
+		consecutive_failure_penalty: 0.15,
+		minimum_samples: 10,
+		exploration_ratio: 0.25,
+		jitter_ratio: 0.05,
+		min_weight_multiplier: 0.1,
+		max_weight_multiplier: 4.0,
+		recompute_interval_seconds: 5,
+		degraded_error_threshold: 0.02,
+		failed_error_threshold: 0.05,
+		failed_consecutive_failures: 5,
+		recovery_half_life_seconds: 30,
+		weight_floor: 1,
+		weight_ceiling: 1000,
+	},
+};
+
 // Bifrost Config
 export interface BifrostConfig {
 	client_config: CoreConfig;
 	framework_config: FrameworkConfig;
 	auth_config?: AuthConfig;
 	proxy_config?: GlobalProxyConfig;
+	load_balancer_config?: LoadBalancerConfig;
 	restart_required?: RestartRequiredConfig;
 	is_db_connected: boolean;
 	is_cache_connected: boolean;

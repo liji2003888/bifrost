@@ -21,6 +21,7 @@ type clusterConfigStatusStore struct {
 
 	authConfig   *configstore.AuthConfig
 	clientConfig *configstore.ClientConfig
+	configs      map[string]string
 }
 
 func (s *clusterConfigStatusStore) GetAuthConfig(_ context.Context) (*configstore.AuthConfig, error) {
@@ -53,6 +54,20 @@ func (s *clusterConfigStatusStore) GetProxyConfig(_ context.Context) (*configsto
 
 func (s *clusterConfigStatusStore) GetPlugins(_ context.Context) ([]*configstoreTables.TablePlugin, error) {
 	return nil, nil
+}
+
+func (s *clusterConfigStatusStore) GetConfig(_ context.Context, key string) (*configstoreTables.TableGovernanceConfig, error) {
+	if s == nil || len(s.configs) == 0 {
+		return nil, configstore.ErrNotFound
+	}
+	value, ok := s.configs[key]
+	if !ok {
+		return nil, configstore.ErrNotFound
+	}
+	return &configstoreTables.TableGovernanceConfig{
+		Key:   key,
+		Value: value,
+	}, nil
 }
 
 func (s *clusterConfigStatusStore) DB() *gorm.DB {

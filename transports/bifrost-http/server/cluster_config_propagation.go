@@ -86,6 +86,8 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		err = s.ApplyClusterFolderConfig(ctx, change.FolderID, change.FolderConfig, change.Delete)
 	case handlers.ClusterConfigScopeFramework:
 		err = s.ApplyClusterFrameworkConfig(ctx, change.FrameworkConfig)
+	case handlers.ClusterConfigScopeLoadBalancer:
+		err = s.ApplyClusterLoadBalancerConfig(ctx, change.LoadBalancerConfig)
 	case handlers.ClusterConfigScopeMCPClient:
 		err = s.ApplyClusterMCPClientConfig(ctx, change.MCPClientID, change.MCPClientConfig, change.Delete)
 	case handlers.ClusterConfigScopeModelConfig:
@@ -153,6 +155,8 @@ func clusterConfigChangeTags(change *handlers.ClusterConfigChange) []string {
 	switch change.Scope {
 	case handlers.ClusterConfigScopeClient, handlers.ClusterConfigScopeAuth, handlers.ClusterConfigScopeFramework, handlers.ClusterConfigScopeProxy:
 		tags = append(tags, "Config")
+	case handlers.ClusterConfigScopeLoadBalancer:
+		tags = append(tags, "Config", "AdaptiveRouting")
 	case handlers.ClusterConfigScopeCustomer, handlers.ClusterConfigScopeTeam, handlers.ClusterConfigScopeVirtualKey, handlers.ClusterConfigScopeModelConfig, handlers.ClusterConfigScopeProviderGovernance, handlers.ClusterConfigScopeRoutingRule:
 		tags = append(tags, "Customers", "Teams", "VirtualKeys", "Budgets", "RateLimits", "UsageStats", "DebugStats", "HealthCheck", "ModelConfigs", "ProviderGovernance", "RoutingRules")
 	case handlers.ClusterConfigScopeMCPClient:
