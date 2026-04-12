@@ -982,3 +982,120 @@ Current cluster auto-sync scope now includes:
   - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
   - `npm exec tsc -- --noEmit`
   - `npm exec next build -- --no-lint`
+
+### 2026-04-12 | Commit 628940d | Adaptive Load Balancing 架构重设计：从路由规则解耦为全局配置
+
+> **核心变更**：Adaptive Load Balancing 从错误的"路由规则内嵌"架构重设计为正确的"全局系统级配置"架构，对齐官方文档的两层自适应设计（Direction + Route）。
+
+- **问题诊断**
+
+  此前的实现将 Adaptive Load Balancing 作为 Routing Rules 的一种 `rule_type="adaptive"` 嵌入，带来以下架构问题：
+  1. 选择 Adaptive 规则后，Provider Allowlist / Model Allowlist 的作用不明确——到底是匹配路由还是限定自适应范围？
+  2. 自适应规则的 targets 和 routing rule 的 target provider 产生冲突——配了 adaptive rule 后外层还需要配 target provider 吗？
+  3. 多条 adaptive 规则的配置需要通过 `AggregateAdaptiveRules()` 合并，逻辑复杂且容易不一致。
+  4. 集群同步将 adaptive config 作为 routing rule 的一部分传播（`ClusterConfigScopeRoutingRule`），而非独立配置范围。
+  5. 与官方文档设计不符——官方设计中 Adaptive LB 是自动作用于所有已配置 provider/key 的全局系统功能，不是路由规则概念。
+
+- **后端架构重设计（Go）**
+
+  - **移除路由规则中的自适应字段**：
+    - 从 `TableRoutingRule` 结构体中移除 `RuleType`、`AdaptiveConfig`、`ParsedAdaptiveConfig` 字段
+    - 路由规则回归纯粹的请求路由职责——只有 Direct（静态加权路由）模式
+    - 移除 BeforeSave/AfterFind 中的 adaptive config 序列化/反序列化逻辑
+    - DB migration `add_routing_rule_adaptive_columns` 标记为 legacy no-op，保持已有数据库兼容
+
+  - **移除规则聚合机制**：
+    - 从 `enterprise/load_balancer_config.go` 中移除 `RuleAdaptiveConfig` 结构体
+    - 移除 `AggregateAdaptiveRules()` 函数（原来扫描所有 adaptive 规则合并为单一配置）
+    - 从 `server/load_balancer_config.go` 中移除 `ReloadLoadBalancerFromAdaptiveRules()` 函数
+    - 从 `server.go` 的 `ReloadRoutingRule()` 和 `RemoveRoutingRule()` 中移除自适应规则重聚合逻辑
+
+  - **移除 API 中的自适应规则类型**：
+    - `CreateRoutingRuleRequest` / `UpdateRoutingRuleRequest` 移除 `rule_type` 和 `adaptive_config` 字段
+    - 创建路由规则时不再区分 direct/adaptive，统一要求 targets（加权路由目标）
+    - 更新路由规则时移除 rule_type 切换和 adaptive_config 更新逻辑
+
+  - **新增独立的 Adaptive Routing Config API**：
+    - `GET /api/adaptive-routing/config` — 获取当前全局自适应路由配置
+    - `PUT /api/adaptive-routing/config` — 更新全局自适应路由配置（持久化 + 热更新 + 集群传播）
+    - 新增 `LoadBalancerConfigManager` 接口，提供 `GetLoadBalancerConfig()` / `ReloadLoadBalancerConfig()` / `ApplyClusterLoadBalancerConfig()` 方法
+    - `EnterpriseHandler` 扩展：增加 `lbConfig LoadBalancerConfigManager` 和 `propagate ClusterConfigPropagator` 依赖
+
+  - **集群同步修复**：
+    - 配置更新通过 `ClusterConfigScopeLoadBalancer` 独立传播，不再与路由规则混淆
+    - 更新 API 保存后自动调用 `PropagateClusterConfigChange()`，确保所有节点实时同步
+    - 配置持久化在 `governance_config` 表的 `load_balancer_config` 键下
+
+- **前端架构重设计（React/TypeScript）**
+
+  - **路由规则表单简化**：
+    - 移除 "Rule Type" 选择器（Direct / Adaptive 下拉框）
+    - 移除 Adaptive 配置面板（Enable、Key Balancing、Direction Routing、VK Direction Routing 开关 + Provider/Model Allowlist）
+    - 路由规则表格移除 "Type" 列
+    - 表单验证简化：所有规则统一要求 targets，weights 必须求和为 1
+    - 修改文件：`routingRuleSheet.tsx`、`routingRulesTable.tsx`
+
+  - **Adaptive Routing 页面新增配置面板**：
+    - 页面标题从 "Live Metrics" 更名为 "Adaptive Load Balancing"，反映其作为配置+监控的统一入口
+    - 页面顶部新增 Configuration 卡片，包含：
+      - **4 个功能开关**（2×2 网格）：Enable（总开关）、Key Balancing、Direction Routing、VK Direction Routing
+      - **Provider / Model Allowlist**：文本域，逗号分隔，空值表示全部
+      - **Advanced Tracker Settings**：可折叠区域，12 个高级调参项（EWMA Alpha、Error/Latency/Consecutive Failure Penalty、Minimum Samples、Exploration/Jitter Ratio、Recompute Interval、Degraded/Failed Error Threshold、Weight Floor/Ceiling）
+      - **Unsaved Changes 提示**：实时对比本地编辑与服务端配置，有变更时显示 amber 警告
+      - **Save 按钮**：一键保存并传播到集群所有节点
+    - 提示信息更新：未启用时提示"Enable adaptive routing in the configuration panel above"而非"Create an adaptive routing rule"
+    - 修改文件：`ui/app/workspace/adaptive-routing/page.tsx`
+
+  - **TypeScript 类型重构**：
+    - 新增 `ui/lib/types/adaptiveRouting.ts`：独立的 `AdaptiveRoutingConfig`、`AdaptiveRoutingTrackerConfig`、`DEFAULT_ADAPTIVE_ROUTING_CONFIG` 类型定义
+    - 从 `ui/lib/types/routingRules.ts` 移除：`RoutingRuleType`、`AdaptiveConfig`、`DEFAULT_ADAPTIVE_CONFIG` 及所有 adaptive 相关字段
+    - `RoutingRule`、`CreateRoutingRuleRequest`、`RoutingRuleFormData` 等接口中移除 `rule_type` 和 `adaptive_config`
+
+  - **RTK Query API 扩展**：
+    - `enterpriseApi` 新增 `getAdaptiveRoutingConfig` query endpoint（`GET /api/adaptive-routing/config`）
+    - `enterpriseApi` 新增 `updateAdaptiveRoutingConfig` mutation endpoint（`PUT /api/adaptive-routing/config`）
+    - 导出 `useGetAdaptiveRoutingConfigQuery` / `useUpdateAdaptiveRoutingConfigMutation` hooks
+    - 缓存标签：`AdaptiveRouting`，更新后自动失效状态和配置查询
+
+- **配置数据流对比**
+
+  ```
+  旧架构（已移除）：
+  Routing Rule (rule_type=adaptive, adaptive_config={...})
+    → AggregateAdaptiveRules() 扫描所有规则
+    → 合并为 LoadBalancerConfig
+    → 更新 loadbalancer 插件
+    → 集群通过 ClusterConfigScopeRoutingRule 传播
+
+  新架构：
+  PUT /api/adaptive-routing/config
+    → 持久化到 governance_config 表 (key=load_balancer_config)
+    → ReloadLoadBalancerConfig() 热更新插件
+    → ClusterConfigScopeLoadBalancer 传播到所有节点
+  ```
+
+- **修改文件清单**
+
+  | 文件 | 变更说明 |
+  |------|----------|
+  | `framework/configstore/tables/routing_rules.go` | 移除 RuleType、AdaptiveConfig 字段 |
+  | `framework/configstore/migrations.go` | 标记 adaptive columns migration 为 legacy no-op |
+  | `transports/bifrost-http/enterprise/load_balancer_config.go` | 移除 RuleAdaptiveConfig、AggregateAdaptiveRules |
+  | `transports/bifrost-http/server/load_balancer_config.go` | 移除 ReloadLoadBalancerFromAdaptiveRules，新增 GetLoadBalancerConfig |
+  | `transports/bifrost-http/server/server.go` | 移除规则聚合调用，传入新接口参数 |
+  | `transports/bifrost-http/handlers/enterprise.go` | 新增 LoadBalancerConfigManager 接口、GET/PUT config 端点 |
+  | `transports/bifrost-http/handlers/governance.go` | 移除 adaptive 相关请求/响应字段和验证 |
+  | `transports/bifrost-http/handlers/enterprise_test.go` | 更新 NewEnterpriseHandler 调用签名 |
+  | `transports/bifrost-http/server/cluster_config_propagation_test.go` | 更新 NewEnterpriseHandler 调用签名 |
+  | `ui/app/workspace/adaptive-routing/page.tsx` | 新增 Configuration 面板组件 |
+  | `ui/app/workspace/routing-rules/views/routingRuleSheet.tsx` | 移除 adaptive 规则类型和配置面板 |
+  | `ui/app/workspace/routing-rules/views/routingRulesTable.tsx` | 移除 Type 列 |
+  | `ui/lib/types/adaptiveRouting.ts` | 新建：独立的 adaptive routing 类型 |
+  | `ui/lib/types/routingRules.ts` | 移除 adaptive 相关类型 |
+  | `ui/lib/store/apis/enterpriseApi.ts` | 新增 config query/mutation endpoints |
+
+- **验证通过**
+  - `go build ./...`（framework + transports）✓
+  - `go test ./bifrost-http/handlers` ✓
+  - `go test ./bifrost-http/loadbalancer` ✓
+  - `npx tsc --noEmit` ✓
