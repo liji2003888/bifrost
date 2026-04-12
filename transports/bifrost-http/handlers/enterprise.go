@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -378,19 +379,30 @@ func (h *EnterpriseHandler) downloadExportJob(ctx *fasthttp.RequestCtx) {
 		}
 		return
 	}
-	defer file.Close()
 
 	info, err := file.Stat()
 	if err != nil {
+		file.Close()
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to stat export file: %v", err))
+		return
+	}
+
+	// Read the entire file into memory so we can close the file handle before returning.
+	// SetBodyStream with an *os.File is unreliable because fasthttp reads from the stream
+	// asynchronously after the handler returns, at which point defer would have closed the file.
+	fileSize := info.Size()
+	body := make([]byte, fileSize)
+	_, err = io.ReadFull(file, body)
+	file.Close()
+	if err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to read export file: %v", err))
 		return
 	}
 
 	ctx.Response.Header.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sanitizeAttachmentName(h.exports.DownloadFileName(job))))
 	ctx.SetContentType(h.exports.DownloadContentType(job))
 	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.Response.Header.Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	ctx.Response.SetBodyStream(file, int(info.Size()))
+	ctx.Response.SetBody(body)
 }
 
 func (h *EnterpriseHandler) getAlerts(ctx *fasthttp.RequestCtx) {
