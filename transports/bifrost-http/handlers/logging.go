@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -508,7 +509,7 @@ func (h *LoggingHandler) getAvailableFilterData(ctx *fasthttp.RequestCtx) {
 		virtualKeys    []logging.KeyPair
 		routingRules   []logging.KeyPair
 		routingEngines []string
-		metadataKeys   map[string][]string
+		metadataKeys   []string
 		mu             sync.Mutex
 	)
 
@@ -646,7 +647,21 @@ func (h *LoggingHandler) getAvailableFilterData(ctx *fasthttp.RequestCtx) {
 	}
 
 	if metadataKeys == nil {
-		metadataKeys = make(map[string][]string)
+		metadataKeys = []string{}
+	}
+	if h != nil && h.config != nil {
+		for _, configuredHeader := range h.config.ClientConfig.LoggingHeaders {
+			headerKey := strings.ToLower(strings.TrimSpace(configuredHeader))
+			if headerKey == "" {
+				continue
+			}
+			if !containsString(metadataKeys, headerKey) {
+				metadataKeys = append(metadataKeys, headerKey)
+			}
+		}
+	}
+	if len(metadataKeys) > 1 {
+		sort.Strings(metadataKeys)
 	}
 	SendJSON(ctx, map[string]interface{}{"models": models, "selected_keys": selectedKeysArray, "virtual_keys": virtualKeysArray, "routing_rules": routingRulesArray, "routing_engines": routingEngines, "metadata_keys": metadataKeys})
 }
@@ -818,6 +833,15 @@ func parseCommaSeparated(s string) []string {
 	}
 
 	return result
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // parseMetadataFilters extracts metadata_* query params and sets them on the filters.

@@ -43,6 +43,11 @@ type MCPConfig struct {
 	// ReleasePluginPipeline releases a plugin pipeline back to the pool.
 	// This should be called after the plugin pipeline is no longer needed.
 	ReleasePluginPipeline func(pipeline interface{}) `json:"-"`
+
+	// PersistDiscoveredTools persists discovered MCP tools and tool-name mappings for a client.
+	// This is used by transports to make tool discovery survive restarts without adding work
+	// to the inference hot path.
+	PersistDiscoveredTools func(ctx context.Context, clientID string, tools map[string]ChatTool, toolNameMapping map[string]string) error `json:"-"`
 }
 
 type MCPToolManagerConfig struct {
@@ -75,7 +80,7 @@ const (
 
 // MCPClientConfig defines tool filtering for an MCP client.
 type MCPClientConfig struct {
-	ID               string            `json:"client_id"`                          // Client ID
+	ID               string            `json:"client_id"`                   // Client ID
 	Name             string            `json:"name"`                        // Client name
 	IsCodeModeClient bool              `json:"is_code_mode_client"`         // Whether the client is a code mode client
 	ConnectionType   MCPConnectionType `json:"connection_type"`             // How to connect (HTTP, STDIO, SSE, or InProcess)
@@ -103,6 +108,11 @@ type MCPClientConfig struct {
 	ToolSyncInterval time.Duration      `json:"tool_sync_interval,omitempty"` // Per-client override for tool sync interval (0 = use global, negative = disabled)
 	ToolPricing      map[string]float64 `json:"tool_pricing,omitempty"`       // Tool pricing for each tool (cost per execution)
 	ConfigHash       string             `json:"-"`                            // Config hash for reconciliation (not serialized)
+
+	// Persisted discovered tools and sanitized-name mapping. These are operational snapshots,
+	// not user-editable config, so they are intentionally excluded from JSON responses.
+	DiscoveredTools           map[string]ChatTool `json:"-"`
+	DiscoveredToolNameMapping map[string]string   `json:"-"`
 }
 
 // NewMCPClientConfigFromMap creates a new MCP client config from a map[string]any.

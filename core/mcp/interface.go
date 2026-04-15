@@ -63,6 +63,8 @@ type MCPManagerInterface interface {
 	// Tool Registration
 	// RegisterTool registers a local tool with the MCP server
 	RegisterTool(name, description string, toolFunction MCPToolFunction[any], toolSchema schemas.ChatTool) error
+	RegisterToolWithContext(name, description string, toolFunction MCPToolContextFunction[any], toolSchema schemas.ChatTool) error
+	RemoveTool(name string) error
 
 	// Lifecycle
 	// Cleanup performs cleanup of all MCP resources

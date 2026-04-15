@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"time"
 
@@ -151,7 +152,13 @@ func (cts *ClientToolSyncer) performSync() {
 
 	clientState.ToolMap = newTools
 	clientState.ToolNameMapping = newMapping
+	if clientState.ExecutionConfig != nil {
+		clientState.ExecutionConfig.DiscoveredTools = cloneChatToolMap(newTools)
+		clientState.ExecutionConfig.DiscoveredToolNameMapping = maps.Clone(newMapping)
+	}
 	cts.manager.mu.Unlock()
+
+	cts.manager.persistDiscoveredToolState(cts.clientID, newTools, newMapping)
 
 	if oldToolCount != newToolCount {
 		cts.logger.Info("%s Tool sync completed for %s: %d -> %d tools", MCPLogPrefix, cts.clientID, oldToolCount, newToolCount)

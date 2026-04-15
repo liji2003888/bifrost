@@ -767,7 +767,7 @@ export default function LogsPage() {
 	const { data: filterData } = useGetAvailableFilterDataQuery();
 	const metadataKeys = useMemo(() => {
 		if (!filterData?.metadata_keys) return [];
-		return Object.keys(filterData.metadata_keys).sort();
+		return [...filterData.metadata_keys].sort();
 	}, [filterData?.metadata_keys]);
 
 	const columns = useMemo(() => createColumns(handleDelete, hasDeleteAccess, metadataKeys), [handleDelete, hasDeleteAccess, metadataKeys]);

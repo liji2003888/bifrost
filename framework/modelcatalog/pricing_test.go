@@ -51,6 +51,12 @@ func makeChatResponse(provider schemas.ModelProvider, model string, usage *schem
 	}
 }
 
+func makeChatResponseWithTier(provider schemas.ModelProvider, model string, usage *schemas.BifrostLLMUsage, tier string) *schemas.BifrostResponse {
+	resp := makeChatResponse(provider, model, usage)
+	resp.ChatResponse.ServiceTier = &tier
+	return resp
+}
+
 // makeEmbeddingResponse builds a minimal BifrostResponse for an embedding request.
 func makeEmbeddingResponse(provider schemas.ModelProvider, model string, usage *schemas.BifrostLLMUsage) *schemas.BifrostResponse {
 	return &schemas.BifrostResponse{
@@ -105,20 +111,20 @@ func TestComputeTextCost_BasicInputOutput(t *testing.T) {
 		CompletionTokens: 500,
 		TotalTokens:      1500,
 	}
-	cost := computeTextCost(&p, usage)
+	cost := computeTextCost(&p, usage, serviceTier{})
 	// 1000 * 0.000005 + 500 * 0.000015 = 0.005 + 0.0075 = 0.0125
 	assert.InDelta(t, 0.0125, cost, 1e-12)
 }
 
 func TestComputeTextCost_NilUsage(t *testing.T) {
 	p := chatPricing(0.000005, 0.000015)
-	assert.Equal(t, 0.0, computeTextCost(&p, nil))
+	assert.Equal(t, 0.0, computeTextCost(&p, nil, serviceTier{}))
 }
 
 func TestComputeTextCost_ZeroTokens(t *testing.T) {
 	p := chatPricing(0.000005, 0.000015)
 	usage := &schemas.BifrostLLMUsage{}
-	assert.Equal(t, 0.0, computeTextCost(&p, usage))
+	assert.Equal(t, 0.0, computeTextCost(&p, usage, serviceTier{}))
 }
 
 func TestComputeTextCost_WithCachedPromptTokens(t *testing.T) {
@@ -137,7 +143,7 @@ func TestComputeTextCost_WithCachedPromptTokens(t *testing.T) {
 		},
 	}
 
-	cost := computeTextCost(&p, usage)
+	cost := computeTextCost(&p, usage, serviceTier{})
 
 	// Both cached read and write tokens are input-side deductions from promptTokens.
 	// Input: (2000-1500-200)*0.000003 + 1500*0.0000003 + 200*0.00000375 = 0.0009 + 0.00045 + 0.00075 = 0.0021
@@ -158,7 +164,7 @@ func TestComputeTextCost_Tiered200k(t *testing.T) {
 		TotalTokens:      210000, // Above 200k threshold
 	}
 
-	cost := computeTextCost(&p, usage)
+	cost := computeTextCost(&p, usage, serviceTier{})
 
 	// Uses tiered rate since total > 200k
 	// 180000 * 0.000006 + 30000 * 0.00003 = 1.08 + 0.90 = 1.98
@@ -176,7 +182,7 @@ func TestComputeTextCost_Below200kUsesBaseRate(t *testing.T) {
 		TotalTokens:      1500, // Below 200k
 	}
 
-	cost := computeTextCost(&p, usage)
+	cost := computeTextCost(&p, usage, serviceTier{})
 
 	// Uses base rate since total < 200k
 	// 1000 * 0.000003 + 500 * 0.000015 = 0.003 + 0.0075 = 0.0105
@@ -197,7 +203,7 @@ func TestComputeTextCost_SearchQueryCost(t *testing.T) {
 		},
 	}
 
-	cost := computeTextCost(&p, usage)
+	cost := computeTextCost(&p, usage, serviceTier{})
 
 	// 1000*0.000003 + 500*0.000015 + 3*0.01 = 0.003 + 0.0075 + 0.03 = 0.0405
 	assert.InDelta(t, 0.0405, cost, 1e-12)
@@ -216,13 +222,84 @@ func TestComputeTextCost_NoCacheRateFallsBackToBaseInputRate(t *testing.T) {
 		},
 	}
 
-	cost := computeTextCost(&p, usage)
+	cost := computeTextCost(&p, usage, serviceTier{})
 
 	// Non-cached prompt: (1000-400)*0.000005 = 600*0.000005 = 0.003
 	// Cached prompt: 400 tokens at base input rate (no cache rate set) = 400*0.000005 = 0.002
 	// Output: 500*0.000015 = 0.0075
 	// Total: 0.003 + 0.002 + 0.0075 = 0.0125
 	assert.InDelta(t, 0.0125, cost, 1e-12)
+}
+
+func TestComputeTextCost_Tiered272k(t *testing.T) {
+	p := chatPricing(0.000003, 0.000015)
+	p.InputCostPerTokenAbove200kTokens = ptr(0.000006)
+	p.OutputCostPerTokenAbove200kTokens = ptr(0.00003)
+	p.InputCostPerTokenAbove272kTokens = ptr(0.000009)
+	p.OutputCostPerTokenAbove272kTokens = ptr(0.000045)
+
+	usage := &schemas.BifrostLLMUsage{
+		PromptTokens:     250000,
+		CompletionTokens: 30000,
+		TotalTokens:      280000,
+	}
+
+	cost := computeTextCost(&p, usage, serviceTier{})
+	assert.InDelta(t, 3.60, cost, 1e-9)
+}
+
+func TestComputeTextCost_PriorityTier(t *testing.T) {
+	p := chatPricing(0.000003, 0.000015)
+	p.InputCostPerTokenPriority = ptr(0.000006)
+	p.OutputCostPerTokenPriority = ptr(0.00003)
+
+	usage := &schemas.BifrostLLMUsage{
+		PromptTokens:     1000,
+		CompletionTokens: 500,
+		TotalTokens:      1500,
+	}
+
+	cost := computeTextCost(&p, usage, serviceTier{isPriority: true})
+	assert.InDelta(t, 0.021, cost, 1e-12)
+}
+
+func TestComputeTextCost_FlexIgnoresTokenTiers(t *testing.T) {
+	p := chatPricing(0.000003, 0.000015)
+	p.InputCostPerTokenFlex = ptr(0.0000015)
+	p.OutputCostPerTokenFlex = ptr(0.0000075)
+	p.InputCostPerTokenAbove272kTokens = ptr(0.000009)
+	p.OutputCostPerTokenAbove272kTokens = ptr(0.000045)
+
+	usage := &schemas.BifrostLLMUsage{
+		PromptTokens:     250000,
+		CompletionTokens: 30000,
+		TotalTokens:      280000,
+	}
+
+	cost := computeTextCost(&p, usage, serviceTier{isFlex: true})
+	assert.InDelta(t, 0.60, cost, 1e-9)
+}
+
+func TestTieredCacheReadRate_FlexWinsOverTieredRates(t *testing.T) {
+	p := chatPricing(0.000003, 0.000015)
+	p.CacheReadInputTokenCost = ptr(0.0000003)
+	p.CacheReadInputTokenCostFlex = ptr(0.0000005)
+	p.CacheReadInputTokenCostAbove272kTokens = ptr(0.0000009)
+	p.CacheReadInputTokenCostAbove272kTokensPriority = ptr(0.0000012)
+
+	assert.Equal(t, 0.0000005, tieredCacheReadInputTokenRate(&p, 280000, serviceTier{isFlex: true}))
+}
+
+func TestTierFromString(t *testing.T) {
+	priority := "priority"
+	assert.Equal(t, serviceTier{isPriority: true}, tierFromString(&priority))
+
+	flex := "flex"
+	assert.Equal(t, serviceTier{isFlex: true}, tierFromString(&flex))
+
+	auto := "auto"
+	assert.Equal(t, serviceTier{}, tierFromString(&auto))
+	assert.Equal(t, serviceTier{}, tierFromString(nil))
 }
 
 // =========================================================================
@@ -239,14 +316,14 @@ func TestComputeEmbeddingCost_Basic(t *testing.T) {
 		PromptTokens: 5000,
 		TotalTokens:  5000,
 	}
-	cost := computeEmbeddingCost(&p, usage)
+	cost := computeEmbeddingCost(&p, usage, serviceTier{})
 	// 5000 * 0.0000001 = 0.0005
 	assert.InDelta(t, 0.0005, cost, 1e-12)
 }
 
 func TestComputeEmbeddingCost_NilUsage(t *testing.T) {
 	p := configstoreTables.TableModelPricing{InputCostPerToken: 0.0000001}
-	assert.Equal(t, 0.0, computeEmbeddingCost(&p, nil))
+	assert.Equal(t, 0.0, computeEmbeddingCost(&p, nil, serviceTier{}))
 }
 
 // =========================================================================
@@ -263,7 +340,7 @@ func TestComputeRerankCost_Basic(t *testing.T) {
 		CompletionTokens: 100,
 		TotalTokens:      2100,
 	}
-	cost := computeRerankCost(&p, usage)
+	cost := computeRerankCost(&p, usage, serviceTier{})
 	// 2000*0.000001 + 100*0.000002 = 0.002 + 0.0002 = 0.0022
 	assert.InDelta(t, 0.0022, cost, 1e-12)
 }
@@ -280,13 +357,13 @@ func TestComputeRerankCost_WithSearchCost(t *testing.T) {
 			NumSearchQueries: &numQueries,
 		},
 	}
-	cost := computeRerankCost(&p, usage)
+	cost := computeRerankCost(&p, usage, serviceTier{})
 	assert.InDelta(t, 0.005, cost, 1e-12)
 }
 
 func TestComputeRerankCost_NilUsage(t *testing.T) {
 	p := configstoreTables.TableModelPricing{InputCostPerToken: 0.001}
-	assert.Equal(t, 0.0, computeRerankCost(&p, nil))
+	assert.Equal(t, 0.0, computeRerankCost(&p, nil, serviceTier{}))
 }
 
 // =========================================================================
@@ -306,7 +383,7 @@ func TestComputeSpeechCost_TokensPreferredOverDuration(t *testing.T) {
 		CompletionTokens: 200,
 		TotalTokens:      300,
 	}
-	cost := computeSpeechCost(&p, usage, &seconds, 0)
+	cost := computeSpeechCost(&p, usage, &seconds, 0, serviceTier{})
 	// Input: 100 text tokens * $0.0000025 = $0.00025
 	// Output: 200 audio tokens present → uses token rate $0.00001, NOT per-second
 	//         200 * $0.00001 = $0.002
@@ -323,7 +400,7 @@ func TestComputeSpeechCost_OutputFallsBackToPerSecond(t *testing.T) {
 	}
 	seconds := 120
 	usage := &schemas.BifrostLLMUsage{PromptTokens: 500}
-	cost := computeSpeechCost(&p, usage, &seconds, 0)
+	cost := computeSpeechCost(&p, usage, &seconds, 0, serviceTier{})
 	// Input: 500 * $0.000001 = $0.0005
 	// Output: no CompletionTokens → falls back to 120 * $0.0001 = $0.012
 	// Total: $0.0125
@@ -342,7 +419,7 @@ func TestComputeSpeechCost_OutputAudioTokenRate(t *testing.T) {
 		CompletionTokens: 100,
 		TotalTokens:      300,
 	}
-	cost := computeSpeechCost(&p, usage, nil, 0)
+	cost := computeSpeechCost(&p, usage, nil, 0, serviceTier{})
 	// Input: 200 * $0.000001 = $0.0002
 	// Output: 100 * $0.00005 = $0.005 (OutputCostPerAudioToken preferred)
 	// Total: $0.0052
@@ -356,14 +433,14 @@ func TestComputeSpeechCost_TokenFallback(t *testing.T) {
 		CompletionTokens: 500,
 		TotalTokens:      1500,
 	}
-	cost := computeSpeechCost(&p, usage, nil, 0) // No audio seconds → token fallback
+	cost := computeSpeechCost(&p, usage, nil, 0, serviceTier{}) // No audio seconds → token fallback
 	// 1000*0.000005 + 500*0.000015 = 0.005 + 0.0075 = 0.0125
 	assert.InDelta(t, 0.0125, cost, 1e-12)
 }
 
 func TestComputeSpeechCost_NilUsageNilSeconds(t *testing.T) {
 	p := chatPricing(0.000005, 0.000015)
-	assert.Equal(t, 0.0, computeSpeechCost(&p, nil, nil, 0))
+	assert.Equal(t, 0.0, computeSpeechCost(&p, nil, nil, 0, serviceTier{}))
 }
 
 // =========================================================================
@@ -378,7 +455,7 @@ func TestComputeTranscriptionCost_DurationBased(t *testing.T) {
 		InputCostPerSecond: ptr(0.00010278),
 	}
 	seconds := 300 // 5 minutes
-	cost := computeTranscriptionCost(&p, nil, &seconds, nil)
+	cost := computeTranscriptionCost(&p, nil, &seconds, nil, serviceTier{})
 	// 300 * 0.00010278 = 0.030834
 	assert.InDelta(t, 0.030834, cost, 1e-9)
 }
@@ -398,7 +475,7 @@ func TestComputeTranscriptionCost_AudioTokenDetails(t *testing.T) {
 		AudioTokens: 1500,
 		TextTokens:  500,
 	}
-	cost := computeTranscriptionCost(&p, usage, nil, audioDetails)
+	cost := computeTranscriptionCost(&p, usage, nil, audioDetails, serviceTier{})
 	// Audio: 1500*0.00001 = 0.015
 	// Text:  500*0.000005 = 0.0025
 	// Output: 500*0.000015 = 0.0075
@@ -413,7 +490,7 @@ func TestComputeTranscriptionCost_TokenFallback(t *testing.T) {
 		CompletionTokens: 200,
 		TotalTokens:      1200,
 	}
-	cost := computeTranscriptionCost(&p, usage, nil, nil)
+	cost := computeTranscriptionCost(&p, usage, nil, nil, serviceTier{})
 	// 1000*0.000005 + 200*0.000015 = 0.005 + 0.003 = 0.008
 	assert.InDelta(t, 0.008, cost, 1e-12)
 }
@@ -431,7 +508,7 @@ func TestComputeTranscriptionCost_TokenDetailsPreferredOverDuration(t *testing.T
 		AudioTokens: 5000,
 		TextTokens:  1000,
 	}
-	cost := computeTranscriptionCost(&p, nil, &seconds, audioDetails)
+	cost := computeTranscriptionCost(&p, nil, &seconds, audioDetails, serviceTier{})
 	// Input: audio token details present → tokens preferred over per-second
 	//   5000 audio * $0.00001 = $0.05
 	//   1000 text  * $0.000005 = $0.005
@@ -452,7 +529,7 @@ func TestComputeTranscriptionCost_DurationFallbackWhenNoTokens(t *testing.T) {
 		CompletionTokens: 200,
 		TotalTokens:      200,
 	}
-	cost := computeTranscriptionCost(&p, usage, &seconds, nil)
+	cost := computeTranscriptionCost(&p, usage, &seconds, nil, serviceTier{})
 	// Input: no audio details, PromptTokens=0 → falls back to 60 * $0.0001 = $0.006
 	// Output: 200 * $0.000015 = $0.003
 	// Total: $0.009
@@ -475,7 +552,7 @@ func TestComputeImageCost_PerImage(t *testing.T) {
 			NImages: 2,
 		},
 	}
-	cost := computeImageCost(&p, usage, "", "")
+	cost := computeImageCost(&p, usage, "", "", serviceTier{})
 	// 2 * 0.052 = 0.104
 	assert.InDelta(t, 0.104, cost, 1e-12)
 }
@@ -485,7 +562,7 @@ func TestComputeImageCost_PerImageDefaultsToOne(t *testing.T) {
 		OutputCostPerImage: ptr(0.052),
 	}
 	usage := &schemas.ImageUsage{} // No token details → defaults to 1 image
-	cost := computeImageCost(&p, usage, "", "")
+	cost := computeImageCost(&p, usage, "", "", serviceTier{})
 	assert.InDelta(t, 0.052, cost, 1e-12)
 }
 
@@ -499,7 +576,7 @@ func TestComputeImageCost_TokenBased(t *testing.T) {
 		OutputTokens: 500,
 		TotalTokens:  1500,
 	}
-	cost := computeImageCost(&p, usage, "", "")
+	cost := computeImageCost(&p, usage, "", "", serviceTier{})
 	// 1000*0.000005 + 500*0.000015 = 0.005 + 0.0075 = 0.0125
 	assert.InDelta(t, 0.0125, cost, 1e-12)
 }
@@ -522,7 +599,7 @@ func TestComputeImageCost_TokenBasedWithDetails(t *testing.T) {
 			ImageTokens: 800,
 		},
 	}
-	cost := computeImageCost(&p, usage, "", "")
+	cost := computeImageCost(&p, usage, "", "", serviceTier{})
 	// Input: (500+1500)*0.000005 = 2000*0.000005 = 0.01
 	// Output: (200+800)*0.000015 = 1000*0.000015 = 0.015
 	// Total: 0.025
@@ -531,7 +608,7 @@ func TestComputeImageCost_TokenBasedWithDetails(t *testing.T) {
 
 func TestComputeImageCost_NilUsage(t *testing.T) {
 	p := configstoreTables.TableModelPricing{OutputCostPerImage: ptr(0.05)}
-	assert.Equal(t, 0.0, computeImageCost(&p, nil, "", ""))
+	assert.Equal(t, 0.0, computeImageCost(&p, nil, "", "", serviceTier{}))
 }
 
 func TestComputeImageCost_InputAndOutputPerImage(t *testing.T) {
@@ -543,7 +620,7 @@ func TestComputeImageCost_InputAndOutputPerImage(t *testing.T) {
 		NumInputImages:      3,
 		OutputTokensDetails: &schemas.ImageTokenDetails{NImages: 2},
 	}
-	cost := computeImageCost(&p, usage, "", "")
+	cost := computeImageCost(&p, usage, "", "", serviceTier{})
 	// 3 input * $0.01 + 2 output * $0.05 = $0.03 + $0.10 = $0.13
 	assert.InDelta(t, 0.13, cost, 1e-12)
 }
@@ -555,7 +632,7 @@ func TestComputeImageCost_PerPixelOutput(t *testing.T) {
 	usage := &schemas.ImageUsage{
 		OutputTokensDetails: &schemas.ImageTokenDetails{NImages: 1},
 	}
-	cost := computeImageCost(&p, usage, "1024x1024", "")
+	cost := computeImageCost(&p, usage, "1024x1024", "", serviceTier{})
 	// 1024*1024 * 1 * 0.000000019 = 1048576 * 0.000000019 ≈ 0.01992
 	assert.InDelta(t, 1048576*0.000000019, cost, 1e-12)
 }
@@ -569,7 +646,7 @@ func TestComputeImageCost_PerPixelInputAndOutput(t *testing.T) {
 		NumInputImages:      2,
 		OutputTokensDetails: &schemas.ImageTokenDetails{NImages: 3},
 	}
-	cost := computeImageCost(&p, usage, "512x512", "")
+	cost := computeImageCost(&p, usage, "512x512", "", serviceTier{})
 	pixels := 512 * 512 // 262144
 	// Input: 262144 * 2 * 0.00000001 = 0.00524288
 	// Output: 262144 * 3 * 0.00000002 = 0.01572864
@@ -589,7 +666,7 @@ func TestComputeImageCost_TokensPreferredOverPixels(t *testing.T) {
 		OutputTokens: 500,
 		TotalTokens:  1500,
 	}
-	cost := computeImageCost(&p, usage, "1024x1024", "")
+	cost := computeImageCost(&p, usage, "1024x1024", "", serviceTier{})
 	// Tokens should win: 1000*0.000005 + 500*0.000015 = 0.0125
 	assert.InDelta(t, 0.0125, cost, 1e-12)
 }
@@ -602,7 +679,7 @@ func TestComputeImageCost_PixelsPreferredOverPerImage(t *testing.T) {
 	usage := &schemas.ImageUsage{
 		OutputTokensDetails: &schemas.ImageTokenDetails{NImages: 1},
 	}
-	cost := computeImageCost(&p, usage, "256x256", "")
+	cost := computeImageCost(&p, usage, "256x256", "", serviceTier{})
 	// Per-pixel should win: 65536 * 1 * 0.00000002 = 0.00131072
 	assert.InDelta(t, 65536*0.00000002, cost, 1e-12)
 }
@@ -615,7 +692,7 @@ func TestComputeImageCost_PerPixelFallsBackToPerImage_WhenNoSize(t *testing.T) {
 	usage := &schemas.ImageUsage{
 		OutputTokensDetails: &schemas.ImageTokenDetails{NImages: 2},
 	}
-	cost := computeImageCost(&p, usage, "", "")
+	cost := computeImageCost(&p, usage, "", "", serviceTier{})
 	// No size → pixels=0, falls through to per-image: 2 * $0.05 = $0.10
 	assert.InDelta(t, 0.10, cost, 1e-12)
 }
@@ -632,14 +709,14 @@ func TestComputeImageCost_QualityBasedRates(t *testing.T) {
 		OutputCostPerImageHighQuality:   ptr(0.04),
 		OutputCostPerImageAutoQuality:   ptr(0.05),
 	}
-	assert.InDelta(t, 0.02, computeImageCost(&p, usage, "", "low"), 1e-12)
-	assert.InDelta(t, 0.03, computeImageCost(&p, usage, "", "medium"), 1e-12)
-	assert.InDelta(t, 0.04, computeImageCost(&p, usage, "", "high"), 1e-12)
-	assert.InDelta(t, 0.05, computeImageCost(&p, usage, "", "auto"), 1e-12)
+	assert.InDelta(t, 0.02, computeImageCost(&p, usage, "", "low", serviceTier{}), 1e-12)
+	assert.InDelta(t, 0.03, computeImageCost(&p, usage, "", "medium", serviceTier{}), 1e-12)
+	assert.InDelta(t, 0.04, computeImageCost(&p, usage, "", "high", serviceTier{}), 1e-12)
+	assert.InDelta(t, 0.05, computeImageCost(&p, usage, "", "auto", serviceTier{}), 1e-12)
 	// "hd" does not match any quality case so perImageRate stays nil → size/base fallback.
-	assert.InDelta(t, 0.01, computeImageCost(&p, usage, "", "hd"), 1e-12)
+	assert.InDelta(t, 0.01, computeImageCost(&p, usage, "", "hd", serviceTier{}), 1e-12)
 	// Empty quality is treated as auto
-	assert.InDelta(t, 0.05, computeImageCost(&p, usage, "", ""), 1e-12)
+	assert.InDelta(t, 0.05, computeImageCost(&p, usage, "", "", serviceTier{}), 1e-12)
 }
 
 func TestParseImagePixels(t *testing.T) {
@@ -665,7 +742,7 @@ func TestComputeVideoCost_DurationBased(t *testing.T) {
 	}
 	seconds := 30
 	usage := &schemas.BifrostLLMUsage{PromptTokens: 500, TotalTokens: 500}
-	cost := computeVideoCost(&p, usage, &seconds)
+	cost := computeVideoCost(&p, usage, &seconds, serviceTier{})
 	// Output: 30 * 0.001 = 0.03
 	// Input:  500 * 0.000001 = 0.0005
 	// Total:  0.0305
@@ -679,7 +756,7 @@ func TestComputeVideoCost_OutputCostPerSecondFallback(t *testing.T) {
 		OutputCostPerSecond: ptr(0.002),
 	}
 	seconds := 10
-	cost := computeVideoCost(&p, nil, &seconds)
+	cost := computeVideoCost(&p, nil, &seconds, serviceTier{})
 	assert.InDelta(t, 0.02, cost, 1e-12)
 }
 
@@ -689,7 +766,7 @@ func TestComputeVideoCost_NilSeconds(t *testing.T) {
 		OutputCostPerVideoPerSecond: ptr(0.001),
 	}
 	usage := &schemas.BifrostLLMUsage{PromptTokens: 1000}
-	cost := computeVideoCost(&p, usage, nil)
+	cost := computeVideoCost(&p, usage, nil, serviceTier{})
 	// Only input tokens: 1000 * 0.000001 = 0.001
 	assert.InDelta(t, 0.001, cost, 1e-12)
 }
@@ -703,7 +780,7 @@ func TestTieredInputRate_BelowThreshold(t *testing.T) {
 		InputCostPerToken:                0.000003,
 		InputCostPerTokenAbove200kTokens: ptr(0.000006),
 	}
-	assert.Equal(t, 0.000003, tieredInputRate(&p, 100000))
+	assert.Equal(t, 0.000003, tieredInputRate(&p, 100000, serviceTier{}))
 }
 
 func TestTieredInputRate_AboveThreshold(t *testing.T) {
@@ -711,7 +788,7 @@ func TestTieredInputRate_AboveThreshold(t *testing.T) {
 		InputCostPerToken:                0.000003,
 		InputCostPerTokenAbove200kTokens: ptr(0.000006),
 	}
-	assert.Equal(t, 0.000006, tieredInputRate(&p, 210000))
+	assert.Equal(t, 0.000006, tieredInputRate(&p, 210000, serviceTier{}))
 }
 
 func TestTieredInputRate_AboveThresholdNoTieredRate(t *testing.T) {
@@ -719,7 +796,7 @@ func TestTieredInputRate_AboveThresholdNoTieredRate(t *testing.T) {
 		InputCostPerToken: 0.000003,
 	}
 	// Falls back to base rate when tiered field is nil
-	assert.Equal(t, 0.000003, tieredInputRate(&p, 300000))
+	assert.Equal(t, 0.000003, tieredInputRate(&p, 300000, serviceTier{}))
 }
 
 func TestTieredOutputRate_AboveThreshold(t *testing.T) {
@@ -727,7 +804,7 @@ func TestTieredOutputRate_AboveThreshold(t *testing.T) {
 		OutputCostPerToken:                0.000015,
 		OutputCostPerTokenAbove200kTokens: ptr(0.00003),
 	}
-	assert.Equal(t, 0.00003, tieredOutputRate(&p, 250000))
+	assert.Equal(t, 0.00003, tieredOutputRate(&p, 250000, serviceTier{}))
 }
 
 // =========================================================================
@@ -1350,6 +1427,74 @@ func TestCalculateCost_200kTier_EndToEnd(t *testing.T) {
 	assert.InDelta(t, 1.74, cost, 1e-9)
 }
 
+func TestCalculateCost_272kTier_EndToEnd(t *testing.T) {
+	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
+		makeKey("claude-3-7-sonnet", "anthropic", "chat"): {
+			Model: "claude-3-7-sonnet", Provider: "anthropic", Mode: "chat",
+			InputCostPerToken:                      0.000003,
+			OutputCostPerToken:                     0.000015,
+			InputCostPerTokenAbove200kTokens:       ptr(0.000006),
+			OutputCostPerTokenAbove200kTokens:      ptr(0.00003),
+			InputCostPerTokenAbove272kTokens:       ptr(0.000009),
+			OutputCostPerTokenAbove272kTokens:      ptr(0.000045),
+			CacheReadInputTokenCost:                ptr(0.0000003),
+			CacheReadInputTokenCostAbove200kTokens: ptr(0.0000006),
+			CacheReadInputTokenCostAbove272kTokens: ptr(0.0000009),
+		},
+	})
+
+	resp := makeChatResponse(schemas.Anthropic, "claude-3-7-sonnet", &schemas.BifrostLLMUsage{
+		PromptTokens:     250000,
+		CompletionTokens: 30000,
+		TotalTokens:      280000,
+	})
+
+	cost := mc.CalculateCost(resp)
+	assert.InDelta(t, 3.60, cost, 1e-9)
+}
+
+func TestCalculateCost_PriorityTier_EndToEnd(t *testing.T) {
+	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
+		makeKey("gpt-4o", "openai", "chat"): {
+			Model: "gpt-4o", Provider: "openai", Mode: "chat",
+			InputCostPerToken:          0.000005,
+			OutputCostPerToken:         0.000015,
+			InputCostPerTokenPriority:  ptr(0.000006),
+			OutputCostPerTokenPriority: ptr(0.00003),
+		},
+	})
+
+	resp := makeChatResponseWithTier(schemas.OpenAI, "gpt-4o", &schemas.BifrostLLMUsage{
+		PromptTokens:     1000,
+		CompletionTokens: 500,
+		TotalTokens:      1500,
+	}, "priority")
+
+	cost := mc.CalculateCost(resp)
+	assert.InDelta(t, 0.021, cost, 1e-12)
+}
+
+func TestCalculateCost_FlexTier_EndToEnd(t *testing.T) {
+	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
+		makeKey("gpt-4o", "openai", "chat"): {
+			Model: "gpt-4o", Provider: "openai", Mode: "chat",
+			InputCostPerToken:      0.000005,
+			OutputCostPerToken:     0.000015,
+			InputCostPerTokenFlex:  ptr(0.0000015),
+			OutputCostPerTokenFlex: ptr(0.0000075),
+		},
+	})
+
+	resp := makeChatResponseWithTier(schemas.OpenAI, "gpt-4o", &schemas.BifrostLLMUsage{
+		PromptTokens:     1000,
+		CompletionTokens: 500,
+		TotalTokens:      1500,
+	}, "flex")
+
+	cost := mc.CalculateCost(resp)
+	assert.InDelta(t, 0.00525, cost, 1e-12)
+}
+
 func TestCalculateCost_ProviderCostZeroTotalStillCalculates(t *testing.T) {
 	mc := testCatalogWithPricing(map[string]configstoreTables.TableModelPricing{
 		makeKey("gpt-4o", "openai", "chat"): chatPricing(0.000005, 0.000015),
@@ -1383,7 +1528,7 @@ func TestCalculateCost_AllCachedTokens(t *testing.T) {
 		},
 	}
 
-	cost := computeTextCost(&p, usage)
+	cost := computeTextCost(&p, usage, serviceTier{})
 	// Non-cached: 0, cached: 1000*0.0000005 = 0.0005
 	assert.InDelta(t, 0.0005, cost, 1e-12)
 }
@@ -1536,7 +1681,7 @@ func TestComputeImageCost_MixedInputTokensOutputPerImage(t *testing.T) {
 		InputTokens:         500,
 		OutputTokensDetails: &schemas.ImageTokenDetails{NImages: 2},
 	}
-	cost := computeImageCost(&p, usage, "", "")
+	cost := computeImageCost(&p, usage, "", "", serviceTier{})
 	// Input: 500 tokens * $0.000005 = $0.0025
 	// Output: no output tokens → falls back to 2 images * $0.04 = $0.08
 	assert.InDelta(t, 0.0825, cost, 1e-12)
@@ -1553,7 +1698,7 @@ func TestComputeImageCost_MixedInputPerImageOutputTokens(t *testing.T) {
 		NumInputImages: 3,
 		OutputTokens:   1000,
 	}
-	cost := computeImageCost(&p, usage, "", "")
+	cost := computeImageCost(&p, usage, "", "", serviceTier{})
 	// Input: no input tokens → falls back to 3 images * $0.01 = $0.03
 	// Output: 1000 tokens * $0.000015 = $0.015
 	assert.InDelta(t, 0.045, cost, 1e-12)
@@ -1573,7 +1718,7 @@ func TestComputeImageCost_BothHaveTokens_IgnoresPerImage(t *testing.T) {
 		TotalTokens:    1000,
 		NumInputImages: 3,
 	}
-	cost := computeImageCost(&p, usage, "", "")
+	cost := computeImageCost(&p, usage, "", "", serviceTier{})
 	// Input: 200 * $0.000005 = $0.001 (tokens present, per-image ignored)
 	// Output: 800 * $0.000015 = $0.012 (tokens present, per-image ignored)
 	assert.InDelta(t, 0.013, cost, 1e-12)

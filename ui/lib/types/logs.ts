@@ -431,6 +431,7 @@ export interface LogEntry {
 	timestamp: string; // ISO string format from Go time.Time
 	provider: string;
 	model: string;
+	alias?: string;
 	number_of_retries: number;
 	fallback_index: number;
 	selected_key_id: string;
@@ -476,6 +477,7 @@ export interface LogEntry {
 	error_details?: BifrostError;
 	stream: boolean; // true if this was a streaming response
 	created_at: string; // ISO string format from Go time.Time - when the log was first created
+	content_summary?: string;
 	raw_request?: string; // Raw provider request
 	raw_response?: string; // Raw provider response
 	is_large_payload_request?: boolean; // true if request used large payload streaming

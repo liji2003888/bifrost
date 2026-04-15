@@ -20,6 +20,7 @@ import (
 
 // Default sync interval and config key
 const (
+	TokenTierAbove272K = 272000
 	TokenTierAbove200K = 200000
 	TokenTierAbove128K = 128000
 )
@@ -77,6 +78,8 @@ type PricingEntry struct {
 	OutputCostPerTokenBatches  *float64 `json:"output_cost_per_token_batches,omitempty"`
 	InputCostPerTokenPriority  *float64 `json:"input_cost_per_token_priority,omitempty"`
 	OutputCostPerTokenPriority *float64 `json:"output_cost_per_token_priority,omitempty"`
+	InputCostPerTokenFlex      *float64 `json:"input_cost_per_token_flex,omitempty"`
+	OutputCostPerTokenFlex     *float64 `json:"output_cost_per_token_flex,omitempty"`
 	InputCostPerCharacter      *float64 `json:"input_cost_per_character,omitempty"`
 	// Costs - 128k Tier
 	InputCostPerTokenAbove128kTokens          *float64 `json:"input_cost_per_token_above_128k_tokens,omitempty"`
@@ -85,19 +88,30 @@ type PricingEntry struct {
 	InputCostPerAudioPerSecondAbove128kTokens *float64 `json:"input_cost_per_audio_per_second_above_128k_tokens,omitempty"`
 	OutputCostPerTokenAbove128kTokens         *float64 `json:"output_cost_per_token_above_128k_tokens,omitempty"`
 	// Costs - 200k Tier
-	InputCostPerTokenAbove200kTokens  *float64 `json:"input_cost_per_token_above_200k_tokens,omitempty"`
-	OutputCostPerTokenAbove200kTokens *float64 `json:"output_cost_per_token_above_200k_tokens,omitempty"`
+	InputCostPerTokenAbove200kTokens          *float64 `json:"input_cost_per_token_above_200k_tokens,omitempty"`
+	InputCostPerTokenAbove200kTokensPriority  *float64 `json:"input_cost_per_token_above_200k_tokens_priority,omitempty"`
+	OutputCostPerTokenAbove200kTokens         *float64 `json:"output_cost_per_token_above_200k_tokens,omitempty"`
+	OutputCostPerTokenAbove200kTokensPriority *float64 `json:"output_cost_per_token_above_200k_tokens_priority,omitempty"`
+	// Costs - 272k Tier
+	InputCostPerTokenAbove272kTokens          *float64 `json:"input_cost_per_token_above_272k_tokens,omitempty"`
+	InputCostPerTokenAbove272kTokensPriority  *float64 `json:"input_cost_per_token_above_272k_tokens_priority,omitempty"`
+	OutputCostPerTokenAbove272kTokens         *float64 `json:"output_cost_per_token_above_272k_tokens,omitempty"`
+	OutputCostPerTokenAbove272kTokensPriority *float64 `json:"output_cost_per_token_above_272k_tokens_priority,omitempty"`
 
 	// Costs - Cache
 	CacheCreationInputTokenCost                        *float64 `json:"cache_creation_input_token_cost,omitempty"`
 	CacheReadInputTokenCost                            *float64 `json:"cache_read_input_token_cost,omitempty"`
 	CacheCreationInputTokenCostAbove200kTokens         *float64 `json:"cache_creation_input_token_cost_above_200k_tokens,omitempty"`
 	CacheReadInputTokenCostAbove200kTokens             *float64 `json:"cache_read_input_token_cost_above_200k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove200kTokensPriority     *float64 `json:"cache_read_input_token_cost_above_200k_tokens_priority,omitempty"`
 	CacheCreationInputTokenCostAbove1hr                *float64 `json:"cache_creation_input_token_cost_above_1hr,omitempty"`
 	CacheCreationInputTokenCostAbove1hrAbove200kTokens *float64 `json:"cache_creation_input_token_cost_above_1hr_above_200k_tokens,omitempty"`
 	CacheCreationInputAudioTokenCost                   *float64 `json:"cache_creation_input_audio_token_cost,omitempty"`
 	CacheReadInputTokenCostPriority                    *float64 `json:"cache_read_input_token_cost_priority,omitempty"`
+	CacheReadInputTokenCostFlex                        *float64 `json:"cache_read_input_token_cost_flex,omitempty"`
 	CacheReadInputImageTokenCost                       *float64 `json:"cache_read_input_image_token_cost,omitempty"`
+	CacheReadInputTokenCostAbove272kTokens             *float64 `json:"cache_read_input_token_cost_above_272k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove272kTokensPriority     *float64 `json:"cache_read_input_token_cost_above_272k_tokens_priority,omitempty"`
 
 	// Costs - Image
 	InputCostPerImage                             *float64 `json:"input_cost_per_image,omitempty"`
@@ -234,15 +248,21 @@ func Init(ctx context.Context, config *Config, configStore configstore.ConfigSto
 			if err := mc.loadPricingFromDatabase(ctx); err != nil {
 				return nil, fmt.Errorf("failed to load initial pricing data: %w", err)
 			}
-			if err := mc.syncPricing(ctx); err != nil {
-				return nil, fmt.Errorf("failed to sync pricing data: %w", err)
-			}
-			// Sync model parameters asynchronously - not needed for startup
-			go func() {
-				if err := mc.syncModelParameters(ctx); err != nil {
-					mc.logger.Warn("failed to sync model parameters data: %v", err)
+			if mc.isRemotePricingSyncEnabled() {
+				if err := mc.syncPricing(ctx); err != nil {
+					return nil, fmt.Errorf("failed to sync pricing data: %w", err)
 				}
-			}()
+			} else {
+				mc.logger.Info("remote pricing sync disabled; skipping initial pricing datasheet fetch")
+			}
+			if mc.isRemotePricingSyncEnabled() {
+				// Sync model parameters asynchronously - not needed for startup
+				go func() {
+					if err := mc.syncModelParameters(ctx); err != nil {
+						mc.logger.Warn("failed to sync model parameters data: %v", err)
+					}
+				}()
+			}
 		} else {
 			lock, err := mc.distributedLockManager.NewLock("model_catalog_pricing_sync")
 			if err != nil {
@@ -256,20 +276,30 @@ func Init(ctx context.Context, config *Config, configStore configstore.ConfigSto
 			if err := mc.loadPricingFromDatabase(ctx); err != nil {
 				return nil, fmt.Errorf("failed to load initial pricing data: %w", err)
 			}
-			if err := mc.syncPricing(ctx); err != nil {
-				return nil, fmt.Errorf("failed to sync pricing data: %w", err)
-			}
-			// Sync model parameters asynchronously - not needed for startup
-			go func() {
-				if err := mc.syncModelParameters(ctx); err != nil {
-					mc.logger.Warn("failed to sync model parameters data: %v", err)
+			if mc.isRemotePricingSyncEnabled() {
+				if err := mc.syncPricing(ctx); err != nil {
+					return nil, fmt.Errorf("failed to sync pricing data: %w", err)
 				}
-			}()
+			} else {
+				mc.logger.Info("remote pricing sync disabled; skipping initial pricing datasheet fetch")
+			}
+			if mc.isRemotePricingSyncEnabled() {
+				// Sync model parameters asynchronously - not needed for startup
+				go func() {
+					if err := mc.syncModelParameters(ctx); err != nil {
+						mc.logger.Warn("failed to sync model parameters data: %v", err)
+					}
+				}()
+			}
 		}
 	} else {
 		// Load pricing data from config memory
-		if err := mc.loadPricingIntoMemory(ctx); err != nil {
-			return nil, fmt.Errorf("failed to load pricing data from config memory: %w", err)
+		if mc.isRemotePricingSyncEnabled() {
+			if err := mc.loadPricingIntoMemory(ctx); err != nil {
+				return nil, fmt.Errorf("failed to load pricing data from config memory: %w", err)
+			}
+		} else {
+			mc.logger.Info("remote pricing sync disabled; skipping in-memory pricing datasheet fetch")
 		}
 	}
 
@@ -311,6 +341,11 @@ func (mc *ModelCatalog) ReloadPricing(ctx context.Context, config *Config) error
 
 	mc.pricingMu.Unlock()
 
+	if !mc.isRemotePricingSyncEnabled() {
+		mc.logger.Info("remote pricing sync disabled; skipping pricing datasheet reload")
+		return nil
+	}
+
 	// Perform immediate sync with new configuration
 	if err := mc.syncPricing(ctx); err != nil {
 		return fmt.Errorf("failed to sync pricing data: %w", err)
@@ -325,6 +360,11 @@ func (mc *ModelCatalog) ReloadPricing(ctx context.Context, config *Config) error
 }
 
 func (mc *ModelCatalog) ForceReloadPricing(ctx context.Context) error {
+	if !mc.isRemotePricingSyncEnabled() {
+		mc.logger.Info("remote pricing sync disabled; ignoring force sync request")
+		return nil
+	}
+
 	mc.pricingMu.Lock()
 	// Reset the ticker so the next scheduled sync waits a full interval from now
 	if mc.syncTicker != nil {
@@ -366,6 +406,13 @@ func (mc *ModelCatalog) getPricingSyncInterval() time.Duration {
 	mc.pricingMu.RLock()
 	defer mc.pricingMu.RUnlock()
 	return mc.pricingSyncInterval
+}
+
+func (mc *ModelCatalog) isRemotePricingSyncEnabled() bool {
+	if mc == nil {
+		return false
+	}
+	return strings.TrimSpace(mc.getPricingURL()) != "" && mc.getPricingSyncInterval() > 0
 }
 
 // GetPricingEntryForModel returns the pricing data

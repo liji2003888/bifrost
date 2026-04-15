@@ -205,7 +205,7 @@ func (p *LoggerPlugin) updateLogEntry(
 	if routingEngineLogs != "" {
 		updates["routing_engine_logs"] = routingEngineLogs
 	}
-	contentLoggingEnabled := p.disableContentLogging == nil || !*p.disableContentLogging
+	contentLoggingEnabled := p.isContentLoggingEnabled()
 	tempEntry := &logstore.Log{}
 	needsSerialization := false
 
@@ -318,12 +318,12 @@ func (p *LoggerPlugin) updateLogEntry(
 	if data.IsLargePayloadResponse {
 		updates["is_large_payload_response"] = true
 		// Large payload preview is already a string — skip sonic.Marshal.
-		if p.disableContentLogging == nil || !*p.disableContentLogging {
+		if p.isContentLoggingEnabled() {
 			if str, ok := data.RawResponse.(string); ok {
 				updates["raw_response"] = str
 			}
 		}
-	} else if (p.disableContentLogging == nil || !*p.disableContentLogging) && data.RawResponse != nil {
+	} else if p.isContentLoggingEnabled() && data.RawResponse != nil {
 		rawResponseBytes, err := sonic.Marshal(data.RawResponse)
 		if err != nil {
 			p.logger.Error("failed to marshal raw response: %v", err)
@@ -423,7 +423,7 @@ func (p *LoggerPlugin) updateStreamingLogEntry(
 		updates["status"] = "success"
 	}
 
-	contentLoggingEnabled := p.disableContentLogging == nil || !*p.disableContentLogging
+	contentLoggingEnabled := p.isContentLoggingEnabled()
 	if contentLoggingEnabled {
 		// Handle transcription output from stream updates
 		if streamResponse.Data.TranscriptionOutput != nil {
@@ -525,6 +525,13 @@ func (p *LoggerPlugin) applyStreamingOutputToEntry(entry *logstore.Log, streamRe
 		return
 	}
 
+	requestedModel := entry.Model
+	resolvedModel := streamResponse.Model
+	if resolvedModel == "" {
+		resolvedModel = streamResponse.Data.Model
+	}
+	applyModelAlias(entry, requestedModel, resolvedModel)
+
 	// Handle error case first
 	if streamResponse.Data.ErrorDetails != nil {
 		entry.Status = "error"
@@ -559,7 +566,7 @@ func (p *LoggerPlugin) applyStreamingOutputToEntry(entry *logstore.Log, streamRe
 		entry.Cost = streamResponse.Data.Cost
 	}
 
-	if p.disableContentLogging == nil || !*p.disableContentLogging {
+	if p.isContentLoggingEnabled() {
 		// Transcription output
 		if streamResponse.Data.TranscriptionOutput != nil {
 			entry.TranscriptionOutputParsed = streamResponse.Data.TranscriptionOutput
@@ -611,6 +618,17 @@ func (p *LoggerPlugin) applyNonStreamingOutputToEntry(entry *logstore.Log, resul
 	if result == nil {
 		return
 	}
+	extraFields := result.GetExtraFields()
+	requestedModel := entry.Model
+	if extraFields.OriginalModelRequested != "" {
+		requestedModel = extraFields.OriginalModelRequested
+	}
+	resolvedModel := extraFields.ResolvedModelUsed
+	if resolvedModel == "" {
+		resolvedModel = result.GetModelUsed()
+	}
+	applyModelAlias(entry, requestedModel, resolvedModel)
+
 	// Token usage
 	var usage *schemas.BifrostLLMUsage
 	switch {
@@ -655,8 +673,7 @@ func (p *LoggerPlugin) applyNonStreamingOutputToEntry(entry *logstore.Log, resul
 	}
 
 	// Extract raw request/response and output content
-	extraFields := result.GetExtraFields()
-	if p.disableContentLogging == nil || !*p.disableContentLogging {
+	if p.isContentLoggingEnabled() {
 		if extraFields.RawRequest != nil {
 			rawRequestBytes, err := sonic.Marshal(extraFields.RawRequest)
 			if err == nil {

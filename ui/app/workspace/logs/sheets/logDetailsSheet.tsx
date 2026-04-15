@@ -261,6 +261,9 @@ export function LogDetailSheet({ log, open, onOpenChange, handleDelete, onNaviga
 								}
 							/>
 							{!isContainer && <LogEntryDetailsView className="w-full" label="Model" value={displayLog.model} />}
+							{!isContainer && displayLog.alias && (
+								<LogEntryDetailsView className="w-full" label="Requested Model" value={displayLog.alias} />
+							)}
 							<LogEntryDetailsView
 								className="w-full"
 								label="Type"

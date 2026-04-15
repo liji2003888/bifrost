@@ -1176,3 +1176,1439 @@ Current cluster auto-sync scope now includes:
   - `adaptive` rule 命中后返回 rule-scoped adaptive decision，而不是直接 target rewrite
   - remote adaptive snapshots 会合并到 cluster-aware status，但不会污染 local-only internal peer status
   - internal `/_cluster/adaptive-routing/status` 永远只暴露本节点原始快照
+
+### 2026-04-14 | Working Tree | 选择性回迁 `transports/v1.5.0-prerelease3` 第一批安全增量
+
+> **说明**：这一轮没有整包合并上游 `prerelease3`，而是只回迁了对当前企业版 fork 收益高、且对现有 cluster / governance / vault / audit 定制影响最小的三组能力：`async user values` 透传、`model alias tracking`、以及 `streaming transport post-hook` 的安全收口。
+
+- **Async User Values 透传**
+
+  - `framework/logstore.AsyncJobExecutor` 的 `SubmitJob` 现在会携带当前请求的 user values 快照
+  - 异步任务执行时会把这些值重新写回新的 `BifrostContext`
+  - 这样 async 场景下：
+    - governance / virtual key 相关上下文
+    - request-scoped 自定义上下文
+    - `BifrostIsAsyncRequest`
+    都能在后台执行链里保持一致
+  - 同时对传入 map 做了一层浅拷贝，避免 goroutine 与外层调用方共享同一个 map 引起状态漂移
+
+- **Model Alias Tracking**
+
+  - 为响应与错误的 extra fields 增加：
+    - `original_model_requested`
+    - `resolved_model_used`
+  - 日志表 `logs` 新增 `alias` 列，用于单独保留“请求时写的模型别名”
+  - 日志写入逻辑现在区分：
+    - `model`：真正执行落到的 resolved model
+    - `alias`：原始请求模型名 / alias
+  - 这样在 provider routing / adaptive routing / model alias 场景下，更容易排查：
+    - 用户请求的是什么
+    - 最终实际跑到的是什么
+  - UI 日志详情页也同步展示了 `Requested Model`
+
+- **Streaming Transport Post-Hook 安全收口**
+
+  - streaming 请求现在不再依赖流结束后仍然访问原始 `fasthttp.RequestCtx` 做 transport post-hook
+  - 中间件会在响应写回前捕获 `HTTPRequest / HTTPResponse` 快照
+  - stream 结束时再通过 deferred completer 安全执行 transport post-hook
+  - 这一步主要是为了降低 streaming 场景下：
+    - ctx 生命周期结束
+    - trace completion 顺序
+    - post-hook 读取已失效 transport 对象
+    这类问题的风险
+
+- **本轮验证**
+
+  - `go test ./framework/logstore`
+  - `go test ./plugins/logging`
+  - `go test ./transports/bifrost-http/handlers`
+  - `go test ./transports/bifrost-http/integrations`
+  - `go test ./transports/bifrost-http/server`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+- **说明**
+
+  - `go test ./transports/bifrost-http/...` 本轮再次出现长时间无输出的现象，因此没有把它作为“整包通过”的结论依据
+  - README 中记录的都是实际完成并确认通过的分层验证结果
+
+### 2026-04-14 | Working Tree | MCP Auth Config 管理页落地 + OAuth MCP 管理链增强
+
+> **说明**：这一轮把原本还是占位态的 `MCP Auth Config` 页面补成了真实可用的管理页，同时对齐了当前 fork 已经存在的 OAuth-backed MCP 后端能力。实现重点放在 **OAuth 配置管理、幂等撤销、集群状态同步**，没有去改动已有的 MCP tool execution / cluster / governance 主执行链。
+
+- **MCP Auth Config 页面正式可用**
+
+  - `ui/app/workspace/mcp-auth-config/page.tsx` 不再指向 enterprise 占位页
+  - 新增真实管理页：
+    - `ui/app/workspace/mcp-auth-config/views/mcpAuthConfigView.tsx`
+  - 页面现在支持：
+    - 查看 OAuth MCP auth configs 列表
+    - 搜索与按状态筛选
+    - 查看 linked MCP client / pending MCP client
+    - 查看 token 到期时间与 scopes
+    - 执行 `Complete OAuth`
+    - 执行 `Cancel / Revoke`
+    - 复制 `oauth_config_id`
+  - 页面说明也明确了产品边界：
+    - **新建** OAuth MCP Server 仍从 `MCP Registry` 发起
+    - 当前页负责 **管理和完成** 已存在的 OAuth 配置
+
+- **新增 OAuth Config 管理 API**
+
+  - `GET /api/oauth/configs`
+    - 支持 `limit / offset / search / status`
+    - 返回 OAuth config 基础信息、token 元数据、linked MCP client / pending MCP client 摘要
+  - 后端实现落在：
+    - `transports/bifrost-http/handlers/oauth2.go`
+    - `framework/configstore/store.go`
+    - `framework/configstore/rdb.go`
+  - 前端 RTK Query 已接入：
+    - `ui/lib/store/apis/mcpApi.ts`
+    - `ui/lib/types/mcp.ts`
+
+- **OAuth 撤销语义补成幂等**
+
+  - 之前 `DELETE /api/oauth/config/{id}` 在 `oauth_config.token_id == nil` 时会直接失败
+  - 现在即使是：
+    - `pending`
+    - `failed`
+    - `expired`
+    - `authorized 但 token 缺失`
+    的 OAuth config，也可以安全撤销
+  - 撤销行为现在统一为：
+    - 标记 `status = revoked`
+    - 清空 `MCPClientConfigJSON`
+    - 如果存在 token，则删除 token
+  - 这样 `MCP Auth Config` 页面上的 `Cancel / Revoke` 在单节点和多节点下都具备一致语义
+  - 关键实现：
+    - `framework/oauth2/main.go`
+
+- **集群同步保持可用**
+
+  - OAuth config / token 的 cluster propagation 继续沿用现有 sync hook 与 cluster config change 机制
+  - 本轮新增的管理动作没有绕开原有同步链
+  - 也就是说：
+    - 任一节点发起 revoke/cancel
+    - OAuth config / token 状态会继续通过已有 cluster sync 传播
+    - `MCP Auth Config` 页面轮询看到的是共享 ConfigStore + 集群同步后的状态
+
+- **吸收 `prerelease3` 的 OAuth MCP 返回增强**
+
+  - `POST /api/mcp/client` 在返回 `pending_oauth` 时，新增：
+    - `status_url`
+    - `complete_url`
+    - `next_steps`
+  - 这样前端或外部客户端在处理 OAuth MCP 创建流程时，不再只有 `authorize_url`，还会拿到后续完成授权所需的完整引导信息
+  - 这部分是和 `transports/v1.5.0-prerelease3` 最贴近、也最安全的 MCP 增量回迁之一
+
+- **当前边界说明**
+
+  - 本轮补齐的是 **OAuth-backed MCP server 配置管理**
+  - 还没有把官方 `MCP with Federated Auth` 文档中那条“把普通企业 API（Postman/OpenAPI/cURL/内置 UI）直接动态转换成 MCP tools”的完整 data plane 做完
+  - 也就是说：
+    - **MCP Auth Config 页面可用了**
+    - **OAuth MCP server 管理链可用了**
+    - 但“普通私有 API -> hosted MCP tools”的完整后端执行面仍然不是完整闭环
+
+- **本轮验证**
+
+  - `go test ./framework/oauth2`
+  - `go test ./framework/configstore/...`
+  - `go test ./transports/bifrost-http/handlers`
+  - `go test ./transports/bifrost-http/server`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+### 2026-04-14 23:59:51 CST | Base Commit 3eb9c7364 | 日志过滤、Model Catalog 时间范围与 Pricing 远端同步停用
+
+- **LLM Logs：logging headers 过滤增强**
+
+  - 后端 `GET /api/logs/filterdata` 现在会把 `client.logging_headers` 中配置的 header key 一并返回到 `metadata_keys`
+  - 即使某个 logging header 目前还没有 distinct values，也会在前端过滤面板中显示出来，便于直接按 `header key + custom value` 做过滤
+  - 这让后续按项目标识、用户标识、租户标识等自定义 header 统计日志成为可用路径
+  - 关键实现：
+    - `transports/bifrost-http/handlers/logging.go`
+    - `ui/components/filters/filterPopover.tsx`
+
+- **Logs Settings：`enable_logging=false` 改为“元数据日志模式”**
+
+  - 之前 `enable_logging=false` 会让 logging plugin 整体不注册，导致连 token / latency / status / routing context 这类统计数据也没有
+  - 现在调整为：
+    - `enable_logging=true`：记录完整内容日志
+    - `enable_logging=false`：仍记录运营与统计日志，但不记录输入/输出正文
+  - 也就是说，以下数据在关闭 full content logs 后仍然会保留：
+    - status
+    - latency
+    - token usage
+    - routing / provider / key / virtual key 等上下文
+    - configured logging headers
+    - cost（若有）
+  - `disable_content_logging=true` 与 `enable_logging=false` 现在都走统一的“正文关闭、统计保留”逻辑
+  - logging plugin 也改成了 client config 热更新可重绑，不需要 restart
+  - 关键实现：
+    - `plugins/logging/main.go`
+    - `plugins/logging/operations.go`
+    - `transports/bifrost-http/server/plugins.go`
+    - `transports/bifrost-http/handlers/config.go`
+    - `ui/app/workspace/config/views/loggingView.tsx`
+    - `ui/components/loggingDisabledView.tsx`
+
+- **Model Catalog：支持任意时间范围 + 快速时间选择**
+
+  - Model Catalog 页面不再固定只能看最近 24h / 30d
+  - 现在支持：
+    - `Last 24 hours`
+    - `Last 7 days`
+    - `Last 30 days`
+    - 任意自定义时间范围
+  - 页面上的 summary cards、provider traffic/cost 统计、models used 列表都会统一按当前所选时间范围查询与展示
+  - 交互风格与 Logs 页的时间过滤器保持一致
+  - 关键实现：
+    - `ui/app/workspace/model-catalog/views/modelCatalogView.tsx`
+    - `ui/app/workspace/model-catalog/views/modelCatalogTable.tsx`
+
+- **Pricing Config：支持显式停用远端 pricing 拉取**
+
+  - 为适配内网部署和“不需要成本计算”的场景，framework pricing 配置现在支持显式停用远端 datasheet 同步：
+    - `pricing_url = ""`
+    - 或 `pricing_sync_interval = 0`
+  - 停用后行为为：
+    - 不再执行初始 remote pricing datasheet 拉取
+    - 不再执行后台定时 pricing sync
+    - 不再执行 model-parameters 的远端同步
+    - `Force Sync Now` 前端按钮会禁用
+    - 已有本地 / DB pricing 数据仍可继续读取，不会强制清空
+  - 这次是“停远端同步”，不是“删除 pricing 能力”，因此对现有运行时影响最小
+  - 配置校验也同步放宽为允许 `pricing_sync_interval = 0`
+  - 关键实现：
+    - `framework/modelcatalog/main.go`
+    - `framework/modelcatalog/sync.go`
+    - `framework/modelcatalog/main_test.go`
+    - `transports/bifrost-http/lib/config.go`
+    - `transports/bifrost-http/lib/config_test.go`
+    - `transports/bifrost-http/handlers/config.go`
+    - `transports/config.schema.json`
+    - `ui/app/workspace/config/views/pricingConfigView.tsx`
+
+- **当前边界说明**
+
+  - 这轮没有去改日志查询后端的 metadata filter 语义；原有 `metadata_<key>=<value>` 过滤能力本来就已经存在，这次主要补的是：
+    - configured logging headers 在过滤器中可见
+    - `enable_logging=false` 时日志插件仍然保留统计数据
+  - Pricing 远端同步停用后，如果部署方本身没有本地 pricing 数据，cost 相关统计会为空或缺失；这是预期行为
+
+- **本轮验证**
+
+  - `go test ./plugins/logging`
+  - `go test ./framework/modelcatalog`
+  - `go test ./transports/bifrost-http/handlers`
+  - `go test ./transports/bifrost-http/server`
+- `go test ./transports/bifrost-http/lib -run 'TestResolveFrameworkPricingConfig|TestConfigDataUnmarshalEnterpriseFields|TestDoesNotExist'`
+- `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+- `npm exec tsc -- --noEmit`
+- `npm exec next build -- --no-lint`
+
+---
+
+## 2026-04-15 00:21:38 CST | Base Commit 3eb9c7364 | prerelease3 安全回迁（MCP discovered tools persistence）
+
+- **本轮目标**
+
+  - 在不影响现有集群高可用、Adaptive、Governance、Vault、Audit 主链路的前提下，继续吸收上游 `transports/v1.5.0-prerelease3` 的低风险增量能力。
+  - 这轮优先回迁的是 MCP 相关的“已发现工具持久化”能力，避免 MCP client 短暂断连、节点切换或服务重启后，前端列表立即丢失工具视图。
+
+- **本轮落地**
+
+  - **MCP Client 新增“已发现工具 / 工具名映射”持久化**
+
+    - 运行时在首次工具发现和后续 tool sync 成功后，会把：
+      - `discovered_tools`
+      - `tool_name_mapping`
+      持久化进 ConfigStore
+    - 这样即使 MCP client 当前未连接，或者页面读取的是分页查询路径，也能回退展示“最近一次成功发现到的工具”
+    - 关键实现：
+      - `core/mcp/mcp.go`
+      - `core/mcp/clientmanager.go`
+      - `core/mcp/toolsync.go`
+      - `framework/configstore/tables/mcp.go`
+      - `framework/configstore/rdb.go`
+      - `framework/configstore/migrations.go`
+
+  - **服务端新增 MCP discovered tools 持久化回调**
+
+    - transport 层在初始化 MCPManager 时会注入 `PersistDiscoveredTools` 回调
+    - 回调会同步完成三件事：
+      - 更新内存态 `Config.MCPConfig`
+      - 更新 ConfigStore 中对应 MCP client 行
+      - 广播前端 `MCPClients` store_update，促使页面自动刷新
+    - 这样不会改动推理主链，只增强 MCP 管理面和观测面
+    - 关键实现：
+      - `transports/bifrost-http/server/server.go`
+      - `transports/bifrost-http/lib/config.go`
+      - `transports/bifrost-http/server/cluster_config_propagation.go`
+
+  - **MCP 列表页支持 disconnected 状态下展示最近发现工具**
+
+    - MCP Registry 页面现在在运行时工具列表为空时，会自动回退到持久化的 discovered tools
+    - 这样即使某个节点暂时未连上 MCP server，UI 仍能显示最近一次成功发现的工具数量和工具列表，不会一下子退化成空白
+    - 关键实现：
+      - `transports/bifrost-http/handlers/mcp.go`
+      - `ui/app/workspace/mcp-registry/views/mcpClientsTable.tsx`
+
+- **集群影响评估**
+
+  - 这轮没有改动 LLM 推理主链、provider queue、adaptive 选择器、cluster config reload 主流程
+  - 新增能力依赖：
+    - 共享 ConfigStore
+    - 现有 MCP client 配置同步机制
+    - 现有前端 store_update 广播
+  - 因此在多节点环境下，某节点发现到的新工具快照可以被持久化，其它节点读取 MCP 配置或分页列表时也能看到一致的最近状态
+  - 这轮仍然没有去改动“普通企业 API 自动托管成 MCP tools”的数据平面，这部分后续继续按 MCP Federated Auth 的完整方案推进
+
+- **本轮验证**
+
+  - `go test ./mcp -run TestDoesNotExist`
+  - `go test ./configstore -run 'TestMCPClientDiscoveredToolsPersistAcrossCreateAndUpdate|TestDoesNotExist'`
+  - `go test ./bifrost-http/handlers -run 'TestAddMCPClientPropagatesClusterConfigChange|TestGetMCPClientsPaginatedFallsBackToPersistedDiscoveredTools'`
+  - `go test ./bifrost-http/server -run 'TestApplyClusterConfigChangeMCPClientLifecycle|TestPersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig'`
+- `go test ./bifrost-http/server ./bifrost-http/handlers`
+- `go test ./bifrost-http -tags embedui -run TestDoesNotExist`
+- `npm exec tsc -- --noEmit`
+- `npm exec next build -- --no-lint`
+
+---
+
+## 2026-04-15 08:13:49 CST | Base Commit 3eb9c7364 | prerelease3 安全回迁（OAuth token endpoint 重试与永久失败过期标记）
+
+- **本轮目标**
+
+  - 继续按 `transports/v1.5.0-prerelease3` 的稳定性增强路线推进，但仍然保持“企业版 cluster 主链不乱、推理热路径不动”的原则。
+  - 这轮聚焦在 `framework/oauth2`，补齐 OAuth token endpoint 的重试机制，以及永久失败时的配置状态收敛。
+
+- **本轮落地**
+
+  - **OAuth token endpoint 新增受控重试**
+
+    - `authorization_code` 和 `refresh_token` 两条 token 交换链路，都会统一走新的 `callTokenEndpoint(ctx, ...)`
+    - 对以下场景做最多 3 次重试：
+      - 网络抖动
+      - 连接失败 / timeout
+      - 5xx / 429 / 其它非 400、401 的临时失败
+    - 重试采用指数退避，不会在最后一次失败后多等一轮
+    - 关键实现：
+      - `framework/oauth2/main.go`
+
+  - **永久失败自动标记 OAuth Config 为 expired**
+
+    - 当 refresh token 被 provider 明确拒绝时，会把 oauth config 状态标记为 `expired`
+    - 当前按上游策略认定为“永久失败”的场景包括：
+      - `401 unauthorized`
+      - `400 invalid_grant`
+      - `400 unauthorized_client`
+    - 这样 MCP Auth Config 页面和多节点状态页不会一直卡在“authorized 但实际已不可刷新”的假状态
+    - 本地实现还额外保留了已有的 sync hook，因此状态变化会继续通过 cluster sync 传播到其他节点
+
+  - **瞬时失败不误伤配置状态**
+
+    - 如果只是 provider 临时故障、网络波动或 5xx，OAuth config 仍保持原状态，不会被误标记成 `expired`
+    - 这点对集群尤其重要，可以避免一个节点瞬时失败就把共享 OAuth 状态打坏
+
+- **集群影响评估**
+
+  - 这轮只改了 `framework/oauth2`，没有改 MCP server 连接主链、LLM 推理主链、cluster config fanout 主逻辑
+  - 由于本地 OAuth provider 已经有 sync hook，这次新增的 `expired` 状态更新会沿用现有同步通道传播，不会变成单节点私有状态
+  - 也就是说：
+    - 瞬时失败：不改状态，集群保持稳定
+    - 永久失败：统一标记为 `expired`，集群状态一致
+
+- **本轮验证**
+
+  - `go test ./oauth2`
+  - `go test ./bifrost-http/handlers ./bifrost-http/server`
+  - `go test ./bifrost-http -tags embedui -run TestDoesNotExist`
+
+- **新增回归覆盖**
+
+  - token endpoint 遇到瞬时失败会重试并最终成功
+  - refresh token 遇到 `invalid_grant` 会把 oauth config 标记为 `expired`
+  - refresh token 遇到 5xx 等临时故障时，不会误把 oauth config 标记成 `expired`
+
+---
+
+## 2026-04-15 08:54:33 CST | Base Commit 3eb9c7364 | 高基数 Metadata 过滤优化 + prerelease3 Azure Passthrough 回迁
+
+- **本轮目标**
+
+  - 解决 LLM Logs 里 `logging_headers` 元数据过滤在高基数字段下不可用的问题，尤其是 `userId`、`projectId` 这类十万级唯一值场景。
+  - 继续选择性回迁 `transports/v1.5.0-prerelease3` 中风险较低、对现网能力友好的增量功能。
+
+- **本轮落地**
+
+  - **LLM Logs Metadata 过滤改成“按 Key 精确输入 Value”**
+
+    - `GET /api/logs/filterdata` 不再枚举 metadata 的 distinct value，只返回可过滤的 metadata key 列表
+    - 前端 Filter Popover 也不再把每个 metadata value 全量塞进勾选列表，而是改成：
+      - 显示 `Metadata: <key>`
+      - 提供一个精确值输入框
+      - 输入值后按现有 `metadata_<key>=<value>` 查询链路过滤
+    - 这样即使某个 `x-user-id` 有十几万唯一值，也不会把过滤器变成不可用的超大下拉
+    - 关键改动：
+      - `framework/logstore/store.go`
+      - `framework/logstore/rdb.go`
+      - `plugins/logging/utils.go`
+      - `transports/bifrost-http/handlers/logging.go`
+      - `ui/lib/store/apis/logsApi.ts`
+      - `ui/app/workspace/logs/page.tsx`
+      - `ui/components/filters/filterPopover.tsx`
+
+  - **保留 `logging_headers` 的配置能力，但改成高性能消费方式**
+
+    - `client.logging_headers` 中配置过的 header key 仍然会出现在 `metadata_keys`
+    - 但只作为“可过滤字段名”暴露，不再预先聚合 value 集
+    - 更适合后续把 `projectId / userId / tenantId` 这类业务标识放进 metadata 做日志分析
+
+  - **Azure passthrough 回迁**
+
+    - 基于 `prerelease3` 的安全增量，新增 Azure passthrough router
+    - 这轮只扩展 integration router 注册，不改已有 provider queue、cluster fanout、governance/adaptive 主链
+    - 关键改动：
+      - `transports/bifrost-http/integrations/passthrough.go`
+      - `transports/bifrost-http/handlers/integrations.go`
+
+- **集群影响评估**
+
+  - Metadata 过滤优化只改：
+    - 日志过滤字段发现
+    - 前端过滤器展示方式
+    - 现有精确值查询入口
+  - 没有改：
+    - LLM 推理主链
+    - provider queue
+    - cluster config sync
+    - adaptive / governance / vault / audit 的执行路径
+  - 因此这轮不会破坏原有集群高可用链路；多节点下日志查询仍然走统一 LogStore，过滤语义保持一致。
+
+- **本轮验证**
+
+  - `go test ./logstore`
+  - `go test ./logging`
+  - `go test ./bifrost-http/handlers ./bifrost-http/server`
+  - `go test ./bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec tsc -- --noEmit`
+  - `npm exec next build -- --no-lint`
+
+- **新增回归覆盖**
+
+  - metadata distinct 查询只返回 key，不再返回 value 列表
+  - UI 过滤器与新的 `metadata_keys: string[]` 契约对齐
+  - Azure passthrough integration 注册仍能通过 transport 入口编译验证
+
+---
+
+## 2026-04-15 09:18:26 CST | Base Commit 3eb9c7364 | prerelease3 MCP OAuth 引导信息前端落地
+
+- **本轮目标**
+
+  - 把前面已经回迁到后端的 `pending_oauth` 响应增强真正接到前端流程里，避免后端已经返回 `status_url / complete_url / next_steps`，但 UI 仍然只消费 `authorize_url` 的断层。
+  - 在不改 cluster sync 主链的前提下，让 MCP OAuth 在企业多节点环境里的操作引导更完整。
+
+- **本轮落地**
+
+  - **MCP Registry 创建 OAuth MCP client 时，前端现在会完整消费 OAuth flow hints**
+
+    - 创建响应中的以下字段会一起进入授权弹层：
+      - `authorize_url`
+      - `oauth_config_id`
+      - `mcp_client_id`
+      - `status_url`
+      - `complete_url`
+      - `next_steps`
+    - OAuth 授权弹层新增：
+      - 当前 `oauth_config_id / mcp_client_id` 上下文展示
+      - `next_steps` 步骤说明
+      - 重新打开授权窗口
+      - 复制 `status_url`
+      - 复制 `complete_url`
+    - 关键改动：
+      - `ui/app/workspace/mcp-registry/views/mcpClientForm.tsx`
+      - `ui/app/workspace/mcp-registry/views/oauth2Authorizer.tsx`
+
+  - **MCP Auth Config 管理页补充了更完整的操作入口**
+
+    - 挂起中的 OAuth config 现在可以直接：
+      - `Open Auth`
+      - `Copy Status URL`
+    - 待完成挂载的 authorized OAuth config 现在也可以：
+      - `Copy Complete URL`
+      - 继续执行 `Complete OAuth`
+    - 原来只显示第一条 `next_steps`，现在改成完整步骤列表，便于运维排查和人工兜底操作
+    - 关键改动：
+      - `ui/app/workspace/mcp-auth-config/views/mcpAuthConfigView.tsx`
+
+- **集群影响评估**
+
+  - 这轮没有改：
+    - OAuth config/token 的共享 ConfigStore
+    - cluster fanout / oauth sync hook
+    - MCP client create / complete / revoke 的后端协议
+  - 只补了已有字段的前端消费与运维操作入口，因此不会改变多节点状态一致性的既有语义。
+  - `status_url` / `complete_url` 仍然由当前访问节点生成；而 OAuth config 状态本身来自共享配置与已有 cluster sync，因此在集群下仍然是可用的一致状态。
+
+- **本轮验证**
+
+  - `go test ./bifrost-http/handlers -run 'TestAddMCPClientOAuthResponseIncludesGuidance|TestGetOAuthConfigsListsPendingAndLinkedClients'`
+  - `npm exec tsc -- --noEmit`
+  - `npm exec next build -- --no-lint`
+
+---
+
+## 2026-04-15 09:36:12 CST | Base Commit 3eb9c7364 | prerelease3 MCP OAuth 引导信息前端收口
+
+- **本轮目标**
+
+  - 在保持现有 OAuth config/token cluster sync 语义不变的前提下，把已经回迁到后端的 MCP OAuth guidance 字段真正用于前端操作流程。
+  - 让 MCP Registry 和 MCP Auth Config 两个页面在企业多节点环境里都能更完整地引导授权和运维操作。
+
+- **本轮落地**
+
+  - **MCP Registry 的 OAuth 授权弹层增强**
+
+    - 创建 OAuth MCP client 返回 `pending_oauth` 后，前端现在会完整消费这些字段：
+      - `authorize_url`
+      - `oauth_config_id`
+      - `mcp_client_id`
+      - `status_url`
+      - `complete_url`
+      - `next_steps`
+    - 授权弹层新增：
+      - `OAuth Context` 展示
+      - `Open Authorization`
+      - `Copy Status URL`
+      - `Copy Complete URL`
+      - 完整 `next_steps` 引导
+    - 关键改动：
+      - `ui/app/workspace/mcp-registry/views/mcpClientForm.tsx`
+      - `ui/app/workspace/mcp-registry/views/oauth2Authorizer.tsx`
+
+  - **MCP Auth Config 页面运维入口增强**
+
+    - 挂起中的 OAuth config 现在可以直接：
+      - 打开授权页
+      - 复制 `status_url`
+    - 已授权但尚未完成 MCP 挂载的 config 现在可以：
+      - 复制 `complete_url`
+      - 继续执行 `Complete OAuth`
+    - `next_steps` 从“只显示第一条”改成完整步骤列表
+    - 新增按钮都补了 `data-testid`，方便后续 E2E 或回归测试
+    - 关键改动：
+      - `ui/app/workspace/mcp-auth-config/views/mcpAuthConfigView.tsx`
+
+- **集群影响评估**
+
+  - 这轮没有改：
+    - OAuth config/token 的共享 ConfigStore
+    - OAuth sync hook
+    - MCP create / complete / revoke 的后端协议
+    - cluster fanout 主链
+  - 因此不会改变多节点状态一致性的语义；它只是把现有一致状态更完整地呈现在前端。
+
+- **本轮验证**
+
+  - `go test ./bifrost-http/handlers -run 'TestAddMCPClientOAuthResponseIncludesGuidance|TestGetOAuthConfigsListsPendingAndLinkedClients'`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+### 2026-04-15 11:44:14 CST | Base Commit 3eb9c7364 | prerelease3 安全回迁（Pricing tier 增强）
+
+> **说明**：这一轮优先回迁的是 `transports/v1.5.0-prerelease3` 里最适合安全吸收的 Pricing 增量，重点补齐 `272k token tier`、`priority tier`、`flex tier` 三组计费能力。改动全部收口在 `framework/modelcatalog` 和 `framework/configstore`，没有改推理主链、cluster fanout、adaptive/governance/vault/audit 的执行路径。
+
+- **本轮落地**
+
+  - **Model Catalog 新增 tier 定价字段**
+
+    - 新增并接通了以下 pricing 字段：
+      - `input_cost_per_token_flex`
+      - `output_cost_per_token_flex`
+      - `cache_read_input_token_cost_flex`
+      - `input_cost_per_token_above_272k_tokens`
+      - `input_cost_per_token_above_272k_tokens_priority`
+      - `output_cost_per_token_above_272k_tokens`
+      - `output_cost_per_token_above_272k_tokens_priority`
+      - `cache_read_input_token_cost_above_272k_tokens`
+      - `cache_read_input_token_cost_above_272k_tokens_priority`
+      - `input_cost_per_token_above_200k_tokens_priority`
+      - `output_cost_per_token_above_200k_tokens_priority`
+      - `cache_read_input_token_cost_above_200k_tokens_priority`
+    - 同步更新了：
+      - pricing datasheet 反序列化结构
+      - `TableModelPricing`
+      - DB 表与模型之间的双向转换
+
+  - **新增 `service_tier` 感知的定价分支**
+
+    - `ChatResponse` 与 `ResponsesResponse` 现在会从响应中的 `service_tier` 推导出本次定价 tier：
+      - `priority`
+      - `flex`
+      - 其它值按普通 tier 处理
+    - 计费逻辑现在遵循：
+      - `flex`：优先使用 flat flex rate，不再继续套 token tier
+      - `priority`：优先使用对应的 priority tier rate
+      - `272k`：优先级高于 `200k`
+      - `cache_read`：支持 `flex / priority / 272k / 200k` 的层级回退
+    - 关键改动：
+      - `framework/modelcatalog/pricing.go`
+      - `framework/modelcatalog/main.go`
+      - `framework/modelcatalog/utils.go`
+
+  - **数据库迁移**
+
+    - `governance_model_pricing` 会新增以下列：
+      - `input_cost_per_token_flex`
+      - `output_cost_per_token_flex`
+      - `cache_read_input_token_cost_flex`
+      - `input_cost_per_token_above_272k_tokens`
+      - `input_cost_per_token_above_272k_tokens_priority`
+      - `output_cost_per_token_above_272k_tokens`
+      - `output_cost_per_token_above_272k_tokens_priority`
+      - `cache_read_input_token_cost_above_272k_tokens`
+      - `cache_read_input_token_cost_above_272k_tokens_priority`
+      - `input_cost_per_token_above_200k_tokens_priority`
+      - `output_cost_per_token_above_200k_tokens_priority`
+      - `cache_read_input_token_cost_above_200k_tokens_priority`
+    - 新增 migration：
+      - `add_priority_tier_pricing_columns`
+      - `add_flex_tier_pricing_columns`
+
+- **集群影响评估**
+
+  - 这轮只涉及：
+    - 共享 ConfigStore 的 pricing 表结构
+    - 本地 `ModelCatalog` 的 cost 计算逻辑
+  - 没有改：
+    - cluster config propagation
+    - provider queue
+    - inference routing
+    - adaptive/gossip/vault/audit 主链
+  - 在集群部署下，只要各节点共用同一个 ConfigStore 并跑过 migration，就能得到一致的 pricing 行为。
+
+- **环境变量 / 部署说明**
+
+  - **没有新增环境变量**
+  - 升级时需要注意：
+    - 先让共享数据库执行 migration
+    - 再滚动更新各个 Bifrost 节点
+  - 如果当前部署显式停用了远端 pricing sync：
+    - `pricing_url = ""`
+    - 或 `pricing_sync_interval = 0`
+    那这些新字段不会自动从远端 datasheet 拉取；只有本地/DB 已存在数据时才会生效。这是预期行为。
+
+- **本轮验证**
+
+  - `go test ./framework/modelcatalog`
+  - `go test ./framework/configstore/...`
+  - `go test ./plugins/logging ./plugins/governance`
+  - `go test ./transports/bifrost-http/server ./transports/bifrost-http/handlers ./transports/bifrost-http/enterprise`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+- **补充说明**
+
+  - `npm exec tsc -- --noEmit` 仍然需要在 `next build` 之后执行，因为仓库当前 `tsconfig.json` 依赖 `.next/types`；这是仓库现状，不是这轮引入的问题。
+
+### 2026-04-15 11:56:34 CST | Base Commit 3eb9c7364 | prerelease3 安全回迁（MCP 可观测增强 + 多节点定价 upsert 收口）
+
+- **本轮目标**
+
+  - 继续按 `transports/v1.5.0-prerelease3` 的低风险增量推进。
+  - 优先补强：
+    - MCP Registry 的离线/重连可观测性
+    - 共享 ConfigStore 下 `ModelCatalog` 的多节点并发稳定性
+  - 保持不改动：
+    - 推理热路径
+    - cluster config propagation 主链
+    - adaptive / governance / vault / audit 的执行面
+
+- **MCP Registry：把已持久化的工具快照真正用起来**
+
+  - 后端 `GET /api/mcp/clients` 与分页接口现在会额外返回：
+    - `tool_snapshot_source`
+      - `live`
+      - `persisted`
+      - `none`
+    - `tool_name_mapping`
+  - 这样前端可以区分：
+    - 当前看到的是运行时实时发现到的工具
+    - 还是来自 ConfigStore 的最近一次成功快照
+  - 关键改动：
+    - `transports/bifrost-http/handlers/mcp.go`
+    - `ui/lib/types/mcp.ts`
+    - `ui/app/workspace/mcp-registry/views/mcpClientsTable.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpClientSheet.tsx`
+
+  - UI 行为增强：
+    - MCP Registry 列表页的 `Enabled Tools` 现在会明确显示：
+      - `Live tool discovery`
+      - `Using ConfigStore snapshot`
+    - MCP Client 详情页在使用持久化快照时，会显示 `ConfigStore snapshot` 标识和说明文案
+    - 详情页新增 `Tool Discovery Snapshot` 区块，展示 `sanitized tool name -> original MCP tool name` 的映射 JSON，方便排查导入/同步/工具名裁剪问题
+
+  - **集群语义**
+
+    - 这次没有新增新的 MCP 同步协议。
+    - 仍然复用已经存在的：
+      - ConfigStore 持久化
+      - MCP client cluster config sync
+      - discovered tools snapshot persistence
+    - 所以在多节点下，一个节点成功发现到的工具快照依然会通过共享配置面被其它节点看到；这次只是把这份状态更好地暴露给了前端。
+
+- **ModelCatalog / Pricing：多节点并发 upsert 收口**
+
+  - `governance_model_pricing` 的 upsert 现在改成单条原子 `ON CONFLICT` 语句，而不是“先查再写”。
+  - `governance_model_parameters` 的 upsert 也做了同样的处理。
+  - 这样在多节点同时启动、同时同步 model catalog / pricing 的场景下，更不容易出现锁竞争和死锁。
+  - 关键改动：
+    - `framework/configstore/rdb.go`
+    - `framework/configstore/rdb_test.go`
+
+  - **为什么这对集群更重要**
+
+    - 原先的 find-then-save 流程在共享数据库下会放大并发竞争窗口。
+    - 改成原子 upsert 后：
+      - 多节点并发启动更稳
+      - pricing/model parameters 初始化更幂等
+      - 不会影响现有 pricing tier 逻辑
+
+- **数据表 / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮没有新增环境变量**
+  - `ModelCatalog` 这部分是 SQL 写法优化，不需要新配置
+  - `MCP Registry` 这部分只是复用了已有的持久化字段和接口返回，不需要 migration
+
+- **本轮验证**
+
+  - `go test ./framework/configstore`
+  - `go test ./framework/configstore/...`
+  - `go test ./transports/bifrost-http/handlers -run 'TestGetMCPClientsPaginatedFallsBackToPersistedDiscoveredTools|TestGetMCPClientsPaginatedMarksLiveToolsWhenConnected|TestAddMCPClientPropagatesClusterConfigChange'`
+  - `go test ./transports/bifrost-http/server -run TestDoesNotExist`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+- **补充说明**
+
+  - `npm exec next build -- --no-lint` 仍然会输出仓库现有的 `rewrites` / `output: export` warning，但构建已通过。
+  - `npm exec tsc -- --noEmit` 仍然建议在 `next build` 之后执行，因为仓库当前依赖 `.next/types`；这是仓库现状，不是这轮引入的问题。
+
+### 2026-04-15 15:12:08 CST | Base Commit 3eb9c7364 | prerelease3 安全回迁（MCP 导入校验收口 + 轻量 Observability 增量）
+
+- **本轮目标**
+
+  - 继续按 `transports/v1.5.0-prerelease3` 的安全增量推进。
+  - 补齐一项轻量 observability 增量：
+    - `content_summary` 真正暴露到日志接口与表格消息回退
+  - 对 MCP 导入流做“诚实可用”的后端收口：
+    - 支持导入前验证目标是否为 MCP-compatible endpoint
+    - 对运行时模板头部场景明确标记为 `unverified`
+    - 不再把“普通 REST API 已经自动转换成 MCP tool”这件事做成假象
+
+- **Logs / Observability：`content_summary` 前后端打通**
+
+  - 日志表中的 `content_summary` 现在会直接通过日志接口返回。
+  - LLM Logs 列表页在没有结构化输入消息可展示时，会回退显示 `content_summary`，这对：
+    - rerank
+    - response 变体
+    - disabled content logging 的元数据模式
+    - 大 payload 场景
+    更友好。
+  - 关键改动：
+    - `framework/logstore/tables.go`
+    - `ui/lib/types/logs.ts`
+    - `ui/app/workspace/logs/views/columns.tsx`
+
+- **MCP 导入流：新增后端校验接口**
+
+  - 新增：
+    - `POST /api/mcp/client/validate`
+  - 这个接口会在真正创建 MCP client 之前，对目标 endpoint 做分类：
+    - `compatible`
+      - 目标成功响应为 MCP-compatible HTTP/SSE server
+      - 会返回探测到的 tool 名称列表
+    - `unverified`
+      - 当前配置依赖运行时模板头部，例如 `{{req.header.authorization}}`
+      - 或需要 OAuth 交互授权，无法离线探测
+      - 这类配置仍然允许导入，但会明确告知“未验证”
+    - `incompatible`
+      - 目标无法通过 MCP 初始化 / `tools/list`
+      - 或根本不是 MCP-compatible endpoint
+
+  - 关键改动：
+    - `transports/bifrost-http/handlers/mcp.go`
+    - `transports/bifrost-http/handlers/mcp_cluster_test.go`
+
+- **MCP Registry 前端：导入流不再误导**
+
+  - 导入弹窗标题与说明改为更准确的语义：
+    - `Import MCP-Compatible Endpoints`
+    - 明确说明当前 build 支持导入 `streamable HTTP / SSE MCP server`
+    - 但还没有把普通企业 REST API 自动托管成 MCP tools
+  - 导入页新增：
+    - `Validate MCP Compatibility`
+    - 每个 endpoint 的状态列
+      - `MCP-compatible`
+      - `Needs runtime auth`
+      - `Not MCP-compatible`
+  - 批量导入时会先调用后端验证：
+    - `compatible` / `unverified` 才继续创建
+    - `incompatible` 会被跳过并计入失败数
+  - 手工新增 endpoint 时，也会先做验证再创建
+  - 关键改动：
+    - `ui/lib/types/mcp.ts`
+    - `ui/lib/store/apis/mcpApi.ts`
+    - `ui/app/workspace/mcp-registry/views/mcpImportDialog.tsx`
+    - `ui/app/workspace/mcp-registry/page.tsx`
+
+- **集群语义**
+
+  - 本轮没有修改：
+    - cluster config propagation 协议
+    - MCP runtime 主执行链
+    - tool sync / health monitor / OAuth sync hook
+  - MCP 导入校验是“写入前检查”，不会影响现有多节点同步链。
+  - `content_summary` 只是日志响应面增强，不会改变日志写入语义和多节点聚合逻辑。
+
+- **数据表 / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮没有新增 migration**
+  - **本轮没有新增环境变量**
+
+- **本轮验证**
+
+  - `go test ./framework/logstore -run 'TestLogCreateSerializesFields|TestGetDistinctMetadataKeysReturnsKeysOnly'`
+  - `go test ./transports/bifrost-http/handlers -run 'TestValidateMCPClientReturnsUnverifiedForRuntimeTemplates|TestValidateMCPClientDetectsCompatibleEndpoint|TestGetMCPClientsPaginatedFallsBackToPersistedDiscoveredTools|TestGetMCPClientsPaginatedMarksLiveToolsWhenConnected|TestAddMCPClientPropagatesClusterConfigChange'`
+  - `go test ./transports/bifrost-http/handlers -run TestDoesNotExist`
+  - `go test ./transports/bifrost-http/server -run TestDoesNotExist`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+
+- **补充说明**
+
+  - `npm exec tsc -- --noEmit` 在当前仓库仍会因为 `.next/types` 缺失报 `TS6053`；这是现有构建链问题，不是这轮改动引入的问题。
+  - 这轮对 MCP 导入流做的是“真实能力收口”和“避免误导”，不是把官方 `MCP with Federated Auth` 里“普通私有 API 自动托管成 MCP tools”的完整 data plane 一次性做完。那一条后续仍可以继续单独推进。
+
+### 2026-04-15 14:05:05 CST | Base Commit 3eb9c7364 | MCP Hosted Tools 落地（普通私有 API 托管为集群可同步的 MCP Tools）
+
+- **MCP 导入流真正补上 Hosted Tools 执行面**
+
+  - 新增了“Hosted MCP Tool”后端数据面：普通企业 HTTP API 不再只是被标记成 `incompatible/unverified`，而是可以直接落库并注册为本地 in-process MCP tool。
+  - 当前支持的模板能力：
+    - `{{req.header.<name>}}`
+    - `{{env.<VAR>}}`
+    - `{{args.<field>}}`
+    - `{{req.body.<field>}}`
+    - `{{req.query.<field>}}`
+  - 导入后的 Hosted Tool 会在运行时把调用参数、请求头和环境变量解析后，再代理请求到目标企业 API。
+  - 关键改动：
+    - `core/mcp/interface.go`
+    - `core/mcp/mcp.go`
+    - `core/mcp/clientmanager.go`
+    - `core/bifrost.go`
+    - `transports/bifrost-http/server/mcp_hosted_tools.go`
+
+- **新增 Hosted Tools 持久化与集群传播**
+
+  - 新增 ConfigStore 表：
+    - `config_mcp_hosted_tools`
+  - 这个表用于存储 Hosted Tool 的：
+    - `tool_id`
+    - `name`
+    - `method`
+    - `url`
+    - `headers`
+    - `body_template`
+    - `tool_schema`
+  - 服务启动时会从 ConfigStore 重放注册 Hosted Tools。
+  - 集群下新增了 `mcp_hosted_tool` 配置传播 scope，创建/删除 Hosted Tool 会像其它企业配置一样 fanout 到 peer 节点。
+  - 删除链路已做成共享 ConfigStore 场景下的幂等语义，避免“源节点先删库，peer 再删时报 not found”导致 runtime 残留。
+  - 关键改动：
+    - `framework/configstore/tables/mcp_hosted_tool.go`
+    - `framework/configstore/store.go`
+    - `framework/configstore/rdb.go`
+    - `framework/configstore/migrations.go`
+    - `transports/bifrost-http/handlers/cluster_config_reload.go`
+    - `transports/bifrost-http/server/cluster_config_propagation.go`
+
+- **MCP HTTP Handler 与 UI 已完整适配**
+
+  - 新增 API：
+    - `GET /api/mcp/hosted-tools`
+    - `POST /api/mcp/hosted-tool`
+    - `DELETE /api/mcp/hosted-tool/{id}`
+  - `Import MCP Endpoints` 页面现在会按分析结果自动分流：
+    - `compatible`：继续创建真正的 MCP Server client
+    - `unverified` / `incompatible`：直接创建 Hosted Tool
+  - MCP Registry 页面新增 `Hosted API Tools` 区块，可查看并删除已托管工具。
+  - 同时补了 tool name 规范化：
+    - 导入名中的空格、连字符和非法字符会自动规范成 MCP 可执行的 tool name
+    - 这样无论是 UI 导入、cluster fanout 还是服务启动重放，都能稳定注册
+  - 关键改动：
+    - `transports/bifrost-http/handlers/mcp.go`
+    - `ui/lib/types/mcp.ts`
+    - `ui/lib/store/apis/baseApi.ts`
+    - `ui/lib/store/apis/mcpApi.ts`
+    - `ui/app/workspace/mcp-registry/page.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpImportDialog.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolsTable.tsx`
+
+- **数据表 / 环境变量**
+
+  - **本轮新增数据表**
+    - `config_mcp_hosted_tools`
+  - **本轮没有新增环境变量**
+  - **部署注意**
+    - 集群部署时，需要先对共享 ConfigStore 数据库执行 migration，再滚动更新各节点。
+
+- **本轮验证**
+
+  - `go test ./framework/configstore/...`
+  - `go test ./transports/bifrost-http/handlers -run 'Test(AddMCPHostedToolPropagatesClusterConfigChange|DeleteMCPHostedToolPropagatesClusterConfigChange|GetMCPHostedToolsReturnsPersistedDefinitions|ValidateMCPClientReturnsUnverifiedForRuntimeTemplates|ValidateMCPClientDetectsCompatibleEndpoint|AddMCPClientOAuthResponseIncludesGuidance|GetMCPAuthConfigsListsPendingAndLinkedClients)$'`
+  - `go test ./transports/bifrost-http/server -run 'Test(ApplyClusterConfigChangeMCPHostedToolLifecycle|ApplyClusterConfigChangeMCPClientLifecycle|PersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig)$'`
+  - `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/server`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+- **补充说明**
+
+  - 这轮做的是 Hosted Tools 的第一版执行面与管理面，已经可以让普通私有 API 在现有企业版集群里被托管成可调用的 MCP tools。
+  - 还没有继续往更深一层扩到 Postman/OpenAPI schema 的高级参数映射、响应结构化抽取、或更细粒度的 per-tool auth profile；这些可以在后续版本继续增强。
+
+### 2026-04-15 14:31:15 CST | Base Commit 3eb9c7364 | Embedding 连接关闭兼容修复（fasthttp stale-connection retry 补强）
+
+- **问题定位**
+
+  - Embedding 请求报错：
+    - `failed to execute HTTP request to provider API`
+    - `the server closed connection before returning the first response byte. Make sure the server returns 'Connection: close' response header before closing the connection`
+  - 这次定位结论是：
+    - **不是 embedding 请求体格式问题**
+    - **不是网关 `/v1/embeddings` handler 逻辑问题**
+    - 更接近于 upstream provider server 在 keep-alive 连接上的关闭行为，与 `fasthttp` 连接复用的兼容边界
+  - 直接用 curl 能成功，但通过网关偶发失败，是因为 curl 和 Bifrost 对连接复用/重试的行为不同。
+
+- **修复内容**
+
+  - 扩展了 stale connection retry 识别范围：
+    - `fasthttp.ErrConnectionClosed`
+    - `closed connection before returning the first response byte`
+  - 这类错误现在会像 `io.EOF / broken pipe / connection reset by peer` 一样，在首次尝试时走一次安全重试。
+  - 关键改动：
+    - `core/network/http.go`
+    - `core/network/http_test.go`
+    - `core/providers/utils/dialer_test.go`
+
+- **影响范围**
+
+  - 只增强了 provider HTTP 请求的“连接关闭兼容重试”
+  - 没有修改：
+    - embedding 请求 schema
+    - provider 路由逻辑
+    - cluster fanout / HA 主链
+    - governance / vault / adaptive / audit 执行面
+
+- **数据表 / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮没有新增 migration**
+  - **本轮没有新增环境变量**
+
+- **本轮验证**
+
+  - `go test ./core/network ./core/providers/utils`
+  - `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/server`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+
+- **补充说明**
+
+  - 这轮修复的是网关侧的兼容性缺口，所以对你们现网会更稳。
+  - 但从根因上看，provider server 如果能在主动关闭 keep-alive 连接前正确返回 `Connection: close`，或者保证连接管理更规范，仍然是更理想的上游修复方式。
+
+### 2026-04-15 15:00:54 CST | Base Commit 3eb9c7364 | Hosted MCP Tools 编辑能力增强（控制面低风险收口）
+
+- **本轮目标**
+
+  - 在不影响现有集群高可用主链、不触碰推理热路径的前提下，继续把 Hosted MCP Tools 的管理能力补齐。
+  - 这轮重点补的是：
+    - Hosted Tool 的后端更新能力
+    - MCP Registry 的 Hosted Tool 编辑界面
+    - 集群下 update / rename / delete 的 fanout 与幂等语义回归
+
+- **实现内容**
+
+  - Hosted MCP Tool 新增更新接口：
+    - `PUT /api/mcp/hosted-tool/{id}`
+  - 后端现在支持：
+    - 读取已有 Hosted Tool
+    - 更新 `name / method / url / headers / body_template / description`
+    - 重新生成 `tool_schema`
+    - 名称变化时先注销旧 runtime tool，再注册新 runtime tool
+    - 更新 ConfigStore 后向集群广播 `mcp_hosted_tool` scope 的变更
+  - 对应改动：
+    - `transports/bifrost-http/handlers/mcp.go`
+    - `transports/bifrost-http/server/mcp_hosted_tools.go`
+    - `transports/bifrost-http/server/server.go`
+
+- **前端增强**
+
+  - MCP Registry 的 Hosted Tools 区块现在支持编辑：
+    - 列表增加编辑按钮
+    - 新增 Hosted Tool 表单弹层，可用于 create / edit 共用
+    - 更新完成后会自动刷新 Hosted Tools 列表
+  - 对应改动：
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolsTable.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolForm.tsx`
+    - `ui/lib/store/apis/mcpApi.ts`
+    - `ui/lib/types/mcp.ts`
+
+- **集群与性能说明**
+
+  - 这轮改动全部位于 **控制面 CRUD / 配置同步**：
+    - 不修改 inference hot path
+    - 不修改 provider queue
+    - 不修改 adaptive / governance / vault / audit 执行链
+  - 集群下依赖的仍然是现有：
+    - 共享 `ConfigStore`
+    - `mcp_hosted_tool` cluster config fanout
+    - peer apply 时的 add/update/delete 幂等逻辑
+  - 因此这轮不会引入新的性能风险，影响范围仅限 Hosted Tool 管理操作本身。
+
+- **数据表 / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮没有新增 migration**
+  - **本轮没有新增环境变量**
+
+- **本轮验证**
+
+  - `go test ./framework/configstore/...`
+  - `go test ./transports/bifrost-http/handlers -run 'Test(AddMCPHostedToolPropagatesClusterConfigChange|UpdateMCPHostedToolPropagatesClusterConfigChange|DeleteMCPHostedToolPropagatesClusterConfigChange|GetMCPHostedToolsReturnsPersistedDefinitions|ValidateMCPClientReturnsUnverifiedForRuntimeTemplates|ValidateMCPClientDetectsCompatibleEndpoint|AddMCPClientOAuthResponseIncludesGuidance|GetMCPAuthConfigsListsPendingAndLinkedClients)$'`
+  - `go test ./transports/bifrost-http/server -run 'Test(ApplyClusterConfigChangeMCPHostedToolLifecycle|ApplyClusterConfigChangeMCPHostedToolRenameReplacesRuntimeRegistration|ApplyClusterConfigChangeMCPClientLifecycle|PersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig)$'`
+  - `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/server`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+
+- **补充说明**
+
+  - `npm exec tsc -- --noEmit` 依旧会受仓库现有 `.next/types` 产物缺失影响报 `TS6053`，这不是本轮改动引入的问题。
+  - 这轮完成后，Hosted MCP Tools 已经具备更完整的 create / update / delete 管理能力，适合继续往更深一层做参数映射与响应结构化增强。
+
+### 2026-04-15 15:18:40 CST | Base Commit 3eb9c7364 | Hosted MCP Tools 参数映射与结构化响应增强
+
+- **本轮目标**
+
+  - 在保持集群高可用、高性能主链不受影响的前提下，把 Hosted MCP Tools 从“基础 HTTP 代理”增强到更适合企业 API 托管的形态。
+  - 这轮重点补了两类能力：
+    - 显式 `query_params` 参数映射
+    - `response_json_path / response_template` 结构化响应处理
+
+- **实现内容**
+
+  - Hosted Tool 配置新增：
+    - `query_params`
+    - `response_json_path`
+    - `response_template`
+  - 请求执行层增强：
+    - URL 仍支持原有模板替换
+    - 额外支持把 `query_params` 作为独立映射拼到最终请求 URL
+    - `body_template` 继续保留
+    - `response_json_path` 可从 JSON 返回中直接抽取目标字段
+    - `response_template` 支持 `{{response.*}}` 模板渲染，并优先于 `response_json_path`
+    - 保留 `{{req.header.*}}`、`{{env.*}}`、`{{args.*}}`、`{{req.body.*}}`、`{{req.query.*}}`
+  - 关键改动：
+    - `framework/configstore/tables/mcp_hosted_tool.go`
+    - `framework/configstore/rdb.go`
+    - `framework/configstore/migrations.go`
+    - `transports/bifrost-http/handlers/mcp.go`
+    - `transports/bifrost-http/server/mcp_hosted_tools.go`
+
+- **前端增强**
+
+  - Hosted Tool 表单现在支持：
+    - 显式编辑 Query Params
+    - 配置 Response JSON Path
+    - 配置 Response Template
+  - Hosted Tools 列表增加了：
+    - Query Params 数量展示
+    - Response 模式展示（Raw / JSON Path / Template）
+  - 对应改动：
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolForm.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolsTable.tsx`
+    - `ui/lib/types/mcp.ts`
+
+- **集群与性能说明**
+
+  - 这轮增强仍然只发生在 Hosted Tool 的控制面和工具执行层：
+    - 不修改 inference hot path
+    - 不修改 provider queue
+    - 不修改 cluster membership / health / config fanout 主链
+  - 集群一致性仍依赖：
+    - 共享 `ConfigStore`
+    - 现有 `mcp_hosted_tool` cluster config fanout
+    - peer apply 时的 add/update/delete 幂等逻辑
+  - 性能方面：
+    - `query_params` 只在 Hosted Tool 执行时做一次 URL 拼接
+    - `response_json_path / response_template` 只在 Hosted Tool 收到响应后做本地处理
+    - 不会把额外开销带到普通 LLM inference 请求路径
+
+- **数据表 / 环境变量**
+
+  - **本轮新增 migration**
+    - `add_mcp_hosted_tool_enhancement_columns`
+  - **本轮新增列**
+    - `config_mcp_hosted_tools.query_params_json`
+    - `config_mcp_hosted_tools.response_json_path`
+    - `config_mcp_hosted_tools.response_template`
+  - **本轮没有新增环境变量**
+  - 集群部署注意事项：
+    - 先对共享数据库执行 migration
+    - 再对各节点做滚动更新
+
+- **本轮验证**
+
+  - `go test ./framework/configstore/...`
+  - `go test ./transports/bifrost-http/server -run 'Test(ExecuteHostedMCPToolAppliesQueryParamsAndExtractsJSONPath|ExecuteHostedMCPToolAppliesResponseTemplate|ExecuteHostedMCPToolSupportsResponseRawTemplate|ExecuteHostedMCPToolUsesRequestHeadersInQueryAndBodyTemplates|ApplyClusterConfigChangeMCPHostedToolLifecycle|ApplyClusterConfigChangeMCPHostedToolRenameReplacesRuntimeRegistration|ApplyClusterConfigChangeMCPClientLifecycle|PersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig)$'`
+  - `go test ./transports/bifrost-http/handlers -run 'Test(AddMCPHostedToolPropagatesClusterConfigChange|UpdateMCPHostedToolPropagatesClusterConfigChange|DeleteMCPHostedToolPropagatesClusterConfigChange|GetMCPHostedToolsReturnsPersistedDefinitions|ValidateMCPClientReturnsUnverifiedForRuntimeTemplates|ValidateMCPClientDetectsCompatibleEndpoint|AddMCPClientOAuthResponseIncludesGuidance|GetMCPAuthConfigsListsPendingAndLinkedClients)$'`
+  - `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/server`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+- **补充说明**
+
+  - 这轮完成后，Hosted MCP Tools 已经不只是“代发一个固定 HTTP 请求”，而是具备了更实用的企业 API 参数映射与响应抽取能力。
+  - 下一步如果继续增强，最值得做的是：
+    - 更细粒度的 per-tool auth/profile
+    - 更丰富的 response schema 提示
+    - 更强的 OpenAPI/Postman 导入映射自动化
+
+---
+
+### 2026-04-15 15:43:41 CST | Base Commit 3eb9c7364 | Hosted MCP Tools：per-tool auth/profile、自动映射增强与内存风险收口
+
+- **实现内容**
+
+  - Hosted Tool 新增了更完整的 per-tool profile：
+    - `auth_profile`
+      - `none`
+      - `bearer_passthrough`
+      - `header_passthrough`
+    - `execution_profile`
+      - `timeout_seconds`
+      - `max_response_body_bytes`
+  - 执行层增强：
+    - Hosted Tool 在调用上游企业 API 时，支持按 tool 级别复用调用方 `Authorization` 或指定请求头
+    - 支持按 tool 级别设置超时和响应体大小上限
+    - `response_template` 只有在确实用到 `{{response.raw}}` 时才会额外构造原始响应字符串，避免无谓的大对象复制
+  - OpenAPI / Postman / cURL / Manual 导入增强：
+    - 自动拆分 URL query string 到 `query_params`
+    - OpenAPI 支持把 `query` / `path` 参数映射成 Hosted Tool 参数模板
+    - 安全头部如 `Authorization: {{req.header.authorization}}`、`X-Tenant-ID: {{req.header.x-tenant-id}}` 会自动归并成 `auth_profile`
+    - Manual 导入在落 Hosted Tool 时也会自动做 URL query 与 auth profile 收口
+
+- **关键改动**
+
+  - 后端：
+    - `framework/configstore/tables/mcp_hosted_tool.go`
+    - `framework/configstore/rdb.go`
+    - `framework/configstore/migrations.go`
+    - `transports/bifrost-http/handlers/mcp.go`
+    - `transports/bifrost-http/server/mcp_hosted_tools.go`
+    - `transports/bifrost-http/server/mcp_hosted_tools_test.go`
+  - 前端：
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolForm.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolsTable.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpImportDialog.tsx`
+    - `ui/lib/types/mcp.ts`
+
+- **集群、高可用与性能说明**
+
+  - 这轮增强仍然沿用原有模式：
+    - Hosted Tool 配置持久化到共享 `ConfigStore`
+    - 通过既有 `mcp_hosted_tool` cluster config fanout 传播
+    - peer 侧按现有 add / update / delete 幂等 apply 逻辑生效
+  - **没有引入新的集群状态分叉机制**
+  - **没有修改普通 LLM inference hot path**
+  - 内存风险收口重点：
+    - Hosted Tool 原本会完整缓冲上游响应体，这在上游返回大 payload 时会直接放大内存占用
+    - 本轮通过 `execution_profile.max_response_body_bytes` 增加了 tool 级硬限制
+    - 仅在 `response_template` 真正引用 `response.raw` 时才会额外复制原始响应内容
+  - 代码审视结果：
+    - 本轮新增逻辑没有引入新的常驻 goroutine
+    - 没有引入新的全局缓存或无限增长的 map
+    - 当前更容易放大内存占用的场景主要仍是：
+      - Hosted Tool 上游返回超大响应
+      - 开启正文日志时的大报文日志写入
+      - Streaming 请求的全量响应累积
+    - 这次已经把 Hosted Tool 这条链的主要风险做了可配置硬限制
+
+- **数据表 / Migration / 环境变量**
+
+  - **本轮新增列**
+    - `config_mcp_hosted_tools.auth_profile_json`
+    - `config_mcp_hosted_tools.execution_profile_json`
+  - **本轮沿用并扩展现有 migration**
+    - `add_mcp_hosted_tool_enhancement_columns`
+  - **本轮没有新增环境变量**
+  - 集群部署注意事项：
+    - 先在共享数据库上完成 migration
+    - 再对各节点滚动发布
+
+- **本轮验证**
+
+  - `go test ./framework/configstore/...`
+  - `go test ./transports/bifrost-http/server -run 'Test(ExecuteHostedMCPToolAppliesQueryParamsAndExtractsJSONPath|ExecuteHostedMCPToolAppliesResponseTemplate|ExecuteHostedMCPToolSupportsResponseRawTemplate|ExecuteHostedMCPToolUsesRequestHeadersInQueryAndBodyTemplates|ExecuteHostedMCPToolAppliesBearerPassthroughAuthProfile|ExecuteHostedMCPToolAppliesHeaderPassthroughAuthProfile|ExecuteHostedMCPToolRespectsExecutionProfileMaxResponseBodyBytes|ExecuteHostedMCPToolRespectsExecutionProfileTimeout|ApplyClusterConfigChangeMCPHostedToolLifecycle|ApplyClusterConfigChangeMCPHostedToolRenameReplacesRuntimeRegistration|ApplyClusterConfigChangeMCPClientLifecycle|PersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig)$'`
+  - `go test ./transports/bifrost-http/handlers -run 'Test(AddMCPHostedToolPropagatesClusterConfigChange|UpdateMCPHostedToolPropagatesClusterConfigChange|DeleteMCPHostedToolPropagatesClusterConfigChange|GetMCPHostedToolsReturnsPersistedDefinitions|ValidateMCPClientReturnsUnverifiedForRuntimeTemplates|ValidateMCPClientDetectsCompatibleEndpoint|AddMCPClientOAuthResponseIncludesGuidance|GetMCPAuthConfigsListsPendingAndLinkedClients)$'`
+  - `go test ./transports/bifrost-http/handlers ./transports/bifrost-http/server`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+- **补充说明**
+
+  - 这轮完成后，Hosted MCP Tools 已经具备：
+    - 参数映射
+    - 响应结构化
+    - per-tool auth/profile
+    - 更强的 OpenAPI / Postman / cURL / Manual 自动映射
+  - 下一步如果继续增强，最值得做的是：
+    - 更强的 OpenAPI schema → tool parameter 类型映射
+    - Hosted Tool 的响应 schema/preview
+    - 更细粒度的 per-tool observability 与调用统计
+
+---
+
+### 2026-04-15 16:05:31 CST | Base Commit 3eb9c7364 | Hosted Tool：OpenAPI 参数类型映射与导入链收口
+
+- **实现内容**
+
+  - Hosted Tool 创建/更新接口现在支持显式传入 `tool_schema`
+  - 当导入源已经能提供更完整的参数定义时，不再只靠模板字符串推断参数名，而是保留：
+    - 参数类型
+    - `required`
+    - 参数描述
+    - 数组/对象的基础 schema 结构
+  - OpenAPI 导入增强：
+    - `query` / `path` 参数会映射成更完整的 tool parameter schema
+    - `requestBody.application/json` 的 object schema 会映射成：
+      - Hosted Tool 参数 schema
+      - 对应的 `body_template`
+    - OpenAPI `securitySchemes` 和运行时 header 模板仍会继续自动收口成 `auth_profile`
+  - Postman / cURL / Manual 导入增强：
+    - 继续自动拆 URL query
+    - 继续自动识别 `Authorization` / 自定义 header passthrough
+    - Hosted Tool 创建 payload 里会统一带上归一化后的 `tool_schema`
+
+- **关键改动**
+
+  - 后端：
+    - `transports/bifrost-http/handlers/mcp.go`
+  - 前端：
+    - `ui/app/workspace/mcp-registry/views/mcpImportDialog.tsx`
+    - `ui/lib/types/mcp.ts`
+
+- **集群、高可用与性能说明**
+
+  - 这轮只增强 Hosted Tool 的控制面和导入映射，不修改 inference hot path
+  - `tool_schema` 仍通过原有 Hosted Tool 配置存储在共享 `ConfigStore` 中，并沿用现有 cluster fanout 同步
+  - 没有引入新的运行时共享状态，也没有新增 cluster sidecar/worker
+  - 性能影响主要发生在导入阶段和 Hosted Tool 注册阶段，不在普通推理请求路径上
+
+- **数据表 / Migration / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮没有新增 migration**
+  - **本轮没有新增环境变量**
+
+- **本轮验证**
+
+  - `go test ./transports/bifrost-http/handlers -run 'Test(AddMCPHostedToolPropagatesClusterConfigChange|UpdateMCPHostedToolPropagatesClusterConfigChange|DeleteMCPHostedToolPropagatesClusterConfigChange|AddMCPHostedToolPreservesProvidedToolSchema|GetMCPHostedToolsReturnsPersistedDefinitions|ValidateMCPClientReturnsUnverifiedForRuntimeTemplates|ValidateMCPClientDetectsCompatibleEndpoint|AddMCPClientOAuthResponseIncludesGuidance|GetMCPAuthConfigsListsPendingAndLinkedClients)$'`
+  - `go test ./transports/bifrost-http/server -run 'Test(ExecuteHostedMCPToolAppliesQueryParamsAndExtractsJSONPath|ExecuteHostedMCPToolAppliesResponseTemplate|ExecuteHostedMCPToolSupportsResponseRawTemplate|ExecuteHostedMCPToolUsesRequestHeadersInQueryAndBodyTemplates|ExecuteHostedMCPToolAppliesBearerPassthroughAuthProfile|ExecuteHostedMCPToolAppliesHeaderPassthroughAuthProfile|ExecuteHostedMCPToolRespectsExecutionProfileMaxResponseBodyBytes|ExecuteHostedMCPToolRespectsExecutionProfileTimeout|ApplyClusterConfigChangeMCPHostedToolLifecycle|ApplyClusterConfigChangeMCPHostedToolRenameReplacesRuntimeRegistration|ApplyClusterConfigChangeMCPClientLifecycle|PersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig)$'`
+  - `npm exec next build -- --no-lint`
+  - `npm exec tsc -- --noEmit`
+
+- **补充说明**
+
+  - 到这一轮为止，Hosted Tool 已经不是“只把 URL + headers 包起来”的轻薄壳了，而是具备：
+    - 参数映射
+    - 参数类型/schema
+    - per-tool auth/profile
+    - 响应结构化
+    - 导入自动收口
+  - 下一步如果继续增强，最值得做的是：
+    - Hosted Tool 的响应 schema / preview
+    - 更细粒度的 Hosted Tool 调用观测
+    - OpenAPI / Postman 更完整的 schema 与 example 映射
+
+### 2026-04-15 19:16:00 CST | Base Commit 3eb9c7364 | Hosted Tool：响应 Schema、Preview 与轻量执行观测
+
+- **本轮目标**
+
+  - 补齐 Hosted Tool 的响应 schema/preview 能力
+  - 给 Hosted Tool 增加更细粒度但仍然轻量的执行观测
+  - 保持集群高可用语义不变，不把新逻辑带入普通 LLM inference hot path
+
+- **本轮完成**
+
+  - Hosted Tool 新增 `response_schema` 持久化字段，支持从 OpenAPI 导入和在 UI 中手工维护
+  - Hosted Tool 新增预览接口：`POST /api/mcp/hosted-tool/{id}/preview`
+  - Preview 返回结构化执行元数据：
+    - `status_code`
+    - `latency_ms`
+    - `response_bytes`
+    - `content_type`
+    - `resolved_url`
+    - `truncated`
+    - `response_schema`
+  - Preview 执行会继承当前请求头上下文，因此 `bearer_passthrough` / `header_passthrough` 类型的 Hosted Tool 预览也能复用现有请求头
+  - Preview 输出增加了 64KB 上限保护，避免管理面一次预览把超大响应直接灌进浏览器或在网关侧制造不必要的大对象
+  - MCP Registry 的 Hosted Tools 列表新增：
+    - `Schema` 状态展示
+    - `Preview` 操作入口
+  - Hosted Tool 编辑表单新增 `Response Schema (optional)` JSON 编辑区
+  - OpenAPI 导入链新增 response schema 映射，会把 2xx JSON response schema 自动带进 Hosted Tool 配置
+
+- **关键改动**
+
+  - 后端：
+    - `framework/configstore/tables/mcp_hosted_tool.go`
+    - `framework/configstore/rdb.go`
+    - `framework/configstore/migrations.go`
+    - `transports/bifrost-http/server/mcp_hosted_tools.go`
+    - `transports/bifrost-http/handlers/mcp.go`
+  - 前端：
+    - `ui/lib/types/mcp.ts`
+    - `ui/lib/store/apis/mcpApi.ts`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolForm.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolsTable.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolPreviewDialog.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpImportDialog.tsx`
+
+- **集群、高可用与性能说明**
+
+  - 这轮新增的是 Hosted Tool 的配置字段和显式 preview 控制面，不改普通模型推理主链
+  - `response_schema` 和其它 Hosted Tool 配置一样，继续走共享 `ConfigStore` + 现有 cluster fanout，同步语义不变
+  - Preview 是显式按需调用，不引入新的后台 worker、poller 或 gossip 通道
+  - Preview 仍复用已有 per-tool：
+    - `timeout_seconds`
+    - `max_response_body_bytes`
+  - 新增的 64KB preview 输出截断可以减少管理面的大响应内存占用风险
+  - 本轮没有新增常驻 goroutine、无界缓存或新的热路径共享状态，因此不会放大集群高可用主链的运行风险
+
+- **数据表 / Migration / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮新增 migration 列**
+    - `config_mcp_hosted_tools.response_schema_json`
+  - **本轮没有新增环境变量**
+
+- **部署注意**
+
+  - 集群升级顺序：
+    1. 先升级共享数据库 migration
+    2. 再滚动更新各节点
+  - Preview 接口不要求额外 sidecar 或独立服务
+
+- **本轮验证**
+
+  - `go test ./configstore/...` in `framework`
+  - `go test ./bifrost-http/handlers -run 'Test(AddMCPHostedToolPropagatesClusterConfigChange|UpdateMCPHostedToolPropagatesClusterConfigChange|DeleteMCPHostedToolPropagatesClusterConfigChange|AddMCPHostedToolPreservesProvidedToolSchema|PreviewMCPHostedToolReturnsExecutionMetadata|GetMCPHostedToolsReturnsPersistedDefinitions|ValidateMCPClientReturnsUnverifiedForRuntimeTemplates|ValidateMCPClientDetectsCompatibleEndpoint|AddMCPClientOAuthResponseIncludesGuidance|GetMCPAuthConfigsListsPendingAndLinkedClients)$'` in `transports`
+  - `go test ./bifrost-http/server -run 'Test(ExecuteHostedMCPToolAppliesQueryParamsAndExtractsJSONPath|ExecuteHostedMCPToolAppliesResponseTemplate|ExecuteHostedMCPToolSupportsResponseRawTemplate|ExecuteHostedMCPToolUsesRequestHeadersInQueryAndBodyTemplates|ExecuteHostedMCPToolAppliesBearerPassthroughAuthProfile|ExecuteHostedMCPToolAppliesHeaderPassthroughAuthProfile|ExecuteHostedMCPToolRespectsExecutionProfileMaxResponseBodyBytes|ExecuteHostedMCPToolRespectsExecutionProfileTimeout|ExecuteHostedMCPToolWithMetadataCapturesExecutionDetails|PreviewMCPHostedToolTruncatesLargeOutput|ApplyClusterConfigChangeMCPHostedToolLifecycle|ApplyClusterConfigChangeMCPHostedToolRenameReplacesRuntimeRegistration|ApplyClusterConfigChangeMCPClientLifecycle|PersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig)$'` in `transports`
+  - `go test ./bifrost-http -tags embedui -run TestDoesNotExist` in `transports`
+  - `npm exec next build -- --no-lint` in `ui`
+  - `npm exec next typegen` in `ui`
+  - `npm exec tsc -- --noEmit` in `ui`
+
+- **补充说明**
+
+  - 这轮的“更细粒度调用观测”是轻量版本，重点在单次 preview 的执行元数据，而不是引入新的高频持久化 metrics 面
+  - 如果继续增强，下一步最值得做的是：
+    - Hosted Tool 的 response examples / sample payload 映射
+    - Hosted Tool 的调用日志聚合视图
+    - OpenAPI response schema 到 UI 参数/结果展示的进一步自动化
+
+### 2026-04-15 20:24:00 CST | Base Commit 3eb9c7364 | Hosted Tool：Response Examples 与轻量调用观测
+
+- **目标**
+
+  - 在不引入新后台 worker、不改普通 LLM inference hot path 的前提下，把 Hosted Tool 再往“可运营、可排障”推进一层
+  - 继续保持集群部署下的共享 `ConfigStore` + cluster fanout 语义，不制造新的状态分叉
+  - 继续把 OpenAPI / 导入链和 Hosted Tool 表单收口成一套一致的能力面
+
+- **本轮完成**
+
+  - Hosted Tool 新增 `response_examples` 持久化字段，支持：
+    - UI 手工维护
+    - OpenAPI 2xx `example/examples` 自动导入
+  - MCP Registry 的 Hosted Tools 列表新增：
+    - `Examples` 状态展示
+    - `Observability` 操作入口
+  - 新增 Hosted Tool 轻量观测弹层：
+    - 按 `24h / 7d / 30d` 查看最近调用
+    - 展示 `total calls / success rate / avg latency / total cost`
+    - 展示最近 10 条调用日志
+    - 复用现有 MCP logs/logstore，不新增专用 metrics 存储
+  - Observability 弹层会直接展示：
+    - 配置中的 `response_examples`
+    - 配置中的 `response_schema`
+    - 最近调用状态、延迟、Virtual Key、LLM Request、错误摘要
+
+- **关键改动**
+
+  - 后端：
+    - `framework/configstore/tables/mcp_hosted_tool.go`
+    - `framework/configstore/rdb.go`
+    - `framework/configstore/migrations.go`
+    - `transports/bifrost-http/handlers/mcp.go`
+  - 前端：
+    - `ui/lib/types/mcp.ts`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolForm.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolsTable.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpHostedToolObservabilityDialog.tsx`
+    - `ui/app/workspace/mcp-registry/views/mcpImportDialog.tsx`
+
+- **集群、高可用与性能说明**
+
+  - 本轮没有改普通模型推理主链，也没有新增后台同步线程
+  - Hosted Tool 的新字段继续走共享 `ConfigStore` + 现有 cluster fanout，同步语义不变
+  - 轻量观测弹层直接查询现有 MCP logs，只有在用户打开弹层时才触发请求，不做轮询
+  - 这样可以复用已有日志索引和过滤能力，避免再引入一套新的高频聚合存储
+  - `response_examples` 仅作为控制面配置，不参与运行时请求执行，不会放大主链延迟
+
+- **数据表 / Migration / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮新增 migration 列**
+    - `config_mcp_hosted_tools.response_examples_json`
+  - **本轮没有新增环境变量**
+
+- **部署注意**
+
+  - 集群升级顺序：
+    1. 先升级共享数据库 migration
+    2. 再滚动更新各节点
+  - 观测弹层依赖现有 MCP logs；如果某环境关闭了日志存储，只会没有历史调用数据，不影响 Hosted Tool 本身执行
+
+- **本轮验证**
+
+  - `go test ./configstore/...` in `framework`
+  - `go test ./bifrost-http/handlers -run 'Test(GetMCPHostedToolsReturnsPersistedDefinitions|AddMCPHostedToolPropagatesClusterConfigChange|UpdateMCPHostedToolPropagatesClusterConfigChange|DeleteMCPHostedToolPropagatesClusterConfigChange|AddMCPHostedToolPreservesProvidedToolSchema|PreviewMCPHostedToolReturnsExecutionMetadata)$'` in `transports`
+  - `go test ./bifrost-http/server -run 'Test(ExecuteHostedMCPToolAppliesQueryParamsAndExtractsJSONPath|ExecuteHostedMCPToolAppliesResponseTemplate|ExecuteHostedMCPToolSupportsResponseRawTemplate|ExecuteHostedMCPToolUsesRequestHeadersInQueryAndBodyTemplates|ExecuteHostedMCPToolAppliesBearerPassthroughAuthProfile|ExecuteHostedMCPToolAppliesHeaderPassthroughAuthProfile|ExecuteHostedMCPToolRespectsExecutionProfileMaxResponseBodyBytes|ExecuteHostedMCPToolRespectsExecutionProfileTimeout|ExecuteHostedMCPToolWithMetadataCapturesExecutionDetails|PreviewMCPHostedToolTruncatesLargeOutput|ApplyClusterConfigChangeMCPHostedToolLifecycle|ApplyClusterConfigChangeMCPHostedToolRenameReplacesRuntimeRegistration|ApplyClusterConfigChangeMCPClientLifecycle|PersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig)$'` in `transports`
+  - `go test ./bifrost-http/handlers ./bifrost-http/server` in `transports`
+  - `go test ./bifrost-http -tags embedui -run TestDoesNotExist` in `transports`
+  - `npm exec next build -- --no-lint` in `ui`
+  - `npm exec next typegen` in `ui`
+  - `npm exec tsc -- --noEmit` in `ui`

@@ -244,7 +244,10 @@ func TestBindClientConfigRebindsContentLoggingBehavior(t *testing.T) {
 		t.Fatalf("expected content summary to include chat output after rebind, got %q", logEntry.ContentSummary)
 	}
 
-	disableContentLogging, loggingHeaders := plugin.CurrentClientConfigBindings()
+	enableLogging, disableContentLogging, loggingHeaders := plugin.CurrentClientConfigBindings()
+	if !enableLogging {
+		t.Fatal("expected enable_logging to remain true after rebinding client config")
+	}
 	if disableContentLogging {
 		t.Fatal("expected disable_content_logging to be false after rebinding client config")
 	}
@@ -396,6 +399,85 @@ func TestApplyNonStreamingOutputToEntryKeepsRerankUsageWhenContentLoggingDisable
 	}
 	if len(entry.RerankOutputParsed) != 0 {
 		t.Fatalf("expected rerank output to be suppressed when content logging is disabled, got %+v", entry.RerankOutputParsed)
+	}
+}
+
+func TestApplyNonStreamingOutputToEntryKeepsRerankUsageWhenFullLoggingDisabled(t *testing.T) {
+	enableLogging := false
+	plugin := &LoggerPlugin{
+		logger:        testLogger{},
+		enableLogging: &enableLogging,
+	}
+
+	entry := &logstore.Log{}
+	result := &schemas.BifrostResponse{
+		RerankResponse: &schemas.BifrostRerankResponse{
+			Usage: &schemas.BifrostLLMUsage{
+				TotalTokens: 43,
+			},
+			Results: []schemas.RerankResult{
+				{Index: 0, RelevanceScore: 0.9678807854652405},
+			},
+		},
+	}
+
+	plugin.applyNonStreamingOutputToEntry(entry, result)
+
+	if entry.TokenUsageParsed == nil || entry.TokenUsageParsed.TotalTokens != 43 {
+		t.Fatalf("expected rerank total tokens to be logged even when full logging is disabled, got %+v", entry.TokenUsageParsed)
+	}
+	if len(entry.RerankOutputParsed) != 0 {
+		t.Fatalf("expected rerank output to be suppressed when full logging is disabled, got %+v", entry.RerankOutputParsed)
+	}
+}
+
+func TestApplyNonStreamingOutputToEntryCapturesModelAlias(t *testing.T) {
+	plugin := &LoggerPlugin{
+		logger: testLogger{},
+	}
+
+	entry := &logstore.Log{
+		Model: "gpt-4o",
+	}
+	result := &schemas.BifrostResponse{
+		ChatResponse: &schemas.BifrostChatResponse{
+			Model: "openai/gpt-4o-2024-08-06",
+		},
+	}
+	result.PopulateExtraFields(schemas.ChatCompletionRequest, schemas.OpenAI, "gpt-4o", "openai/gpt-4o-2024-08-06")
+
+	plugin.applyNonStreamingOutputToEntry(entry, result)
+
+	if entry.Model != "openai/gpt-4o-2024-08-06" {
+		t.Fatalf("expected resolved model to be stored on log entry, got %q", entry.Model)
+	}
+	if entry.Alias == nil || *entry.Alias != "gpt-4o" {
+		t.Fatalf("expected requested model alias to be stored, got %+v", entry.Alias)
+	}
+}
+
+func TestApplyStreamingOutputToEntryCapturesModelAlias(t *testing.T) {
+	plugin := &LoggerPlugin{
+		logger: testLogger{},
+	}
+
+	entry := &logstore.Log{
+		Model: "claude-opus-4-5",
+	}
+	streamResponse := &streaming.ProcessedStreamResponse{
+		Model: "bedrock/anthropic.claude-opus-4-5-20250301-v1:0",
+		Data: &streaming.AccumulatedData{
+			Model: "bedrock/anthropic.claude-opus-4-5-20250301-v1:0",
+		},
+	}
+
+	plugin.applyStreamingOutputToEntry(entry, streamResponse)
+
+	if entry.Model != "bedrock/anthropic.claude-opus-4-5-20250301-v1:0" {
+		t.Fatalf("expected resolved streaming model to be stored on log entry, got %q", entry.Model)
+	}
+	if entry.Alias == nil || *entry.Alias != "claude-opus-4-5" {
+		t.Fatalf("expected original requested model alias to be preserved, got %+v", entry.Alias)
 	}
 }
 

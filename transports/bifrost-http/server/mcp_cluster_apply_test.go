@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -66,10 +68,11 @@ func (m *fakeClusterMCPManager) UpdateClient(id string, updatedConfig *schemas.M
 
 type fakeMCPClusterApplyStore struct {
 	configstore.ConfigStore
-	created []*schemas.MCPClientConfig
-	updated []*configstoreTables.TableMCPClient
-	deleted []string
-	rows    map[string]*configstoreTables.TableMCPClient
+	created    []*schemas.MCPClientConfig
+	updated    []*configstoreTables.TableMCPClient
+	deleted    []string
+	rows       map[string]*configstoreTables.TableMCPClient
+	hostedRows map[string]*configstoreTables.TableMCPHostedTool
 }
 
 func (s *fakeMCPClusterApplyStore) CreateMCPClientConfig(_ context.Context, clientConfig *schemas.MCPClientConfig) error {
@@ -122,6 +125,69 @@ func (s *fakeMCPClusterApplyStore) GetMCPClientByID(_ context.Context, id string
 		return &cloned, nil
 	}
 	return nil, nil
+}
+
+func (s *fakeMCPClusterApplyStore) GetMCPHostedTools(_ context.Context) ([]configstoreTables.TableMCPHostedTool, error) {
+	result := make([]configstoreTables.TableMCPHostedTool, 0, len(s.hostedRows))
+	for _, tool := range s.hostedRows {
+		cloned := *tool
+		result = append(result, cloned)
+	}
+	return result, nil
+}
+
+func (s *fakeMCPClusterApplyStore) GetMCPHostedToolByID(_ context.Context, id string) (*configstoreTables.TableMCPHostedTool, error) {
+	if s.hostedRows == nil {
+		return nil, configstore.ErrNotFound
+	}
+	tool, ok := s.hostedRows[id]
+	if !ok {
+		return nil, configstore.ErrNotFound
+	}
+	cloned := *tool
+	return &cloned, nil
+}
+
+func (s *fakeMCPClusterApplyStore) GetMCPHostedToolByName(_ context.Context, name string) (*configstoreTables.TableMCPHostedTool, error) {
+	if s.hostedRows == nil {
+		return nil, configstore.ErrNotFound
+	}
+	for _, tool := range s.hostedRows {
+		if tool.Name == name {
+			cloned := *tool
+			return &cloned, nil
+		}
+	}
+	return nil, configstore.ErrNotFound
+}
+
+func (s *fakeMCPClusterApplyStore) CreateMCPHostedTool(_ context.Context, tool *configstoreTables.TableMCPHostedTool) error {
+	if s.hostedRows == nil {
+		s.hostedRows = map[string]*configstoreTables.TableMCPHostedTool{}
+	}
+	cloned := *tool
+	s.hostedRows[tool.ToolID] = &cloned
+	return nil
+}
+
+func (s *fakeMCPClusterApplyStore) UpdateMCPHostedTool(_ context.Context, tool *configstoreTables.TableMCPHostedTool) error {
+	if s.hostedRows == nil {
+		s.hostedRows = map[string]*configstoreTables.TableMCPHostedTool{}
+	}
+	cloned := *tool
+	s.hostedRows[tool.ToolID] = &cloned
+	return nil
+}
+
+func (s *fakeMCPClusterApplyStore) DeleteMCPHostedTool(_ context.Context, id string) error {
+	if s.hostedRows == nil {
+		return configstore.ErrNotFound
+	}
+	if _, ok := s.hostedRows[id]; !ok {
+		return configstore.ErrNotFound
+	}
+	delete(s.hostedRows, id)
+	return nil
 }
 
 func TestApplyClusterConfigChangeMCPClientLifecycle(t *testing.T) {
@@ -216,5 +282,261 @@ func TestApplyClusterConfigChangeMCPClientLifecycle(t *testing.T) {
 	}
 	if _, err := server.Config.GetMCPClient(updatedConfig.ID); err == nil {
 		t.Fatal("expected mcp client to be removed from runtime config")
+	}
+}
+
+func TestPersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	store := &fakeMCPClusterApplyStore{
+		rows: map[string]*configstoreTables.TableMCPClient{
+			"client-1": {
+				ClientID:       "client-1",
+				Name:           "docs-client",
+				ConnectionType: string(schemas.MCPConnectionTypeHTTP),
+				AuthType:       string(schemas.MCPAuthTypeNone),
+			},
+		},
+	}
+	cfg := &lib.Config{
+		MCPConfig: &schemas.MCPConfig{
+			ClientConfigs: []*schemas.MCPClientConfig{
+				{
+					ID:             "client-1",
+					Name:           "docs-client",
+					ConnectionType: schemas.MCPConnectionTypeHTTP,
+					AuthType:       schemas.MCPAuthTypeNone,
+				},
+			},
+		},
+		ConfigStore: store,
+	}
+	cfg.SetBifrostClient(&bifrost.Bifrost{})
+
+	server := &BifrostHTTPServer{Config: cfg}
+	description := "Search enterprise docs"
+	tools := map[string]schemas.ChatTool{
+		"docs-client-search": {
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "docs-client-search",
+				Description: &description,
+			},
+		},
+	}
+	mapping := map[string]string{"docs_client_search": "docs-client-search"}
+
+	if err := server.persistMCPDiscoveredTools(context.Background(), "client-1", tools, mapping); err != nil {
+		t.Fatalf("persistMCPDiscoveredTools error = %v", err)
+	}
+	if len(store.updated) != 1 {
+		t.Fatalf("expected discovered tools update to be persisted, got %+v", store.updated)
+	}
+	if len(store.updated[0].DiscoveredTools) != 1 {
+		t.Fatalf("expected persisted discovered tools, got %+v", store.updated[0].DiscoveredTools)
+	}
+
+	got, err := cfg.GetMCPClient("client-1")
+	if err != nil {
+		t.Fatalf("GetMCPClient error = %v", err)
+	}
+	if len(got.DiscoveredTools) != 1 || got.DiscoveredToolNameMapping["docs_client_search"] != "docs-client-search" {
+		t.Fatalf("expected runtime discovered tools snapshot, got %+v %+v", got.DiscoveredTools, got.DiscoveredToolNameMapping)
+	}
+}
+
+func TestApplyClusterConfigChangeMCPHostedToolLifecycle(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	manager := coremcp.NewMCPManager(context.Background(), schemas.MCPConfig{}, nil, bifrost.NewNoOpLogger(), nil)
+	client := &bifrost.Bifrost{}
+	client.SetMCPManager(manager)
+
+	store := &fakeMCPClusterApplyStore{
+		hostedRows: map[string]*configstoreTables.TableMCPHostedTool{},
+	}
+	cfg := &lib.Config{ConfigStore: store}
+	cfg.SetBifrostClient(client)
+
+	server := &BifrostHTTPServer{
+		Config: cfg,
+		Client: client,
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	description := "Get user profile"
+	timeoutSeconds := 10
+	tool := &configstoreTables.TableMCPHostedTool{
+		ToolID:      "tool-1",
+		Name:        "get-user-profile",
+		Description: &description,
+		Method:      "GET",
+		URL:         upstream.URL + "/users/{{args.user_id}}",
+		Headers: map[string]string{
+			"Authorization": "{{req.header.authorization}}",
+		},
+		AuthProfile: &configstoreTables.MCPHostedToolAuthProfile{
+			Mode: configstoreTables.MCPHostedToolAuthModeBearerPassthrough,
+		},
+		ExecutionProfile: &configstoreTables.MCPHostedToolExecutionProfile{
+			TimeoutSeconds: &timeoutSeconds,
+		},
+		ToolSchema: schemas.ChatTool{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "get-user-profile",
+				Description: &description,
+				Parameters: &schemas.ToolFunctionParameters{
+					Type:     "object",
+					Required: []string{"user_id"},
+				},
+			},
+		},
+	}
+
+	if err := server.ApplyClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:           handlers.ClusterConfigScopeMCPHostedTool,
+		MCPHostedToolID: tool.ToolID,
+		MCPHostedTool:   tool,
+	}); err != nil {
+		t.Fatalf("ApplyClusterConfigChange(add hosted tool) error = %v", err)
+	}
+	if _, err := store.GetMCPHostedToolByID(context.Background(), tool.ToolID); err != nil {
+		t.Fatalf("expected hosted tool persisted, got err=%v", err)
+	}
+	persisted, _ := store.GetMCPHostedToolByID(context.Background(), tool.ToolID)
+	if persisted.AuthProfile == nil || persisted.AuthProfile.Mode != configstoreTables.MCPHostedToolAuthModeBearerPassthrough {
+		t.Fatalf("expected hosted tool auth profile to persist, got %+v", persisted.AuthProfile)
+	}
+	if persisted.ExecutionProfile == nil || persisted.ExecutionProfile.TimeoutSeconds == nil || *persisted.ExecutionProfile.TimeoutSeconds != timeoutSeconds {
+		t.Fatalf("expected hosted tool execution profile to persist, got %+v", persisted.ExecutionProfile)
+	}
+	if available := client.GetAvailableMCPTools(context.Background()); len(available) == 0 {
+		t.Fatalf("expected hosted tool to be registered in runtime MCP manager, got %+v", available)
+	}
+
+	if err := server.ApplyClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:           handlers.ClusterConfigScopeMCPHostedTool,
+		MCPHostedToolID: tool.ToolID,
+		MCPHostedTool:   tool,
+		Delete:          true,
+	}); err != nil {
+		t.Fatalf("ApplyClusterConfigChange(delete hosted tool) error = %v", err)
+	}
+	if _, err := store.GetMCPHostedToolByID(context.Background(), tool.ToolID); err == nil {
+		t.Fatal("expected hosted tool to be removed from config store")
+	}
+	if available := client.GetAvailableMCPTools(context.Background()); len(available) != 0 {
+		t.Fatalf("expected hosted tool to be removed from runtime MCP manager, got %+v", available)
+	}
+}
+
+func TestApplyClusterConfigChangeMCPHostedToolRenameReplacesRuntimeRegistration(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	manager := coremcp.NewMCPManager(context.Background(), schemas.MCPConfig{}, nil, bifrost.NewNoOpLogger(), nil)
+	client := &bifrost.Bifrost{}
+	client.SetMCPManager(manager)
+
+	store := &fakeMCPClusterApplyStore{
+		hostedRows: map[string]*configstoreTables.TableMCPHostedTool{},
+	}
+	cfg := &lib.Config{ConfigStore: store}
+	cfg.SetBifrostClient(client)
+
+	server := &BifrostHTTPServer{
+		Config: cfg,
+		Client: client,
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	initialDescription := "Get user profile"
+	initialTool := &configstoreTables.TableMCPHostedTool{
+		ToolID:      "tool-1",
+		Name:        "get-user-profile",
+		Description: &initialDescription,
+		Method:      "GET",
+		URL:         upstream.URL + "/users/{{args.user_id}}",
+		Headers: map[string]string{
+			"Authorization": "{{req.header.authorization}}",
+		},
+		ToolSchema: schemas.ChatTool{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "get-user-profile",
+				Description: &initialDescription,
+				Parameters: &schemas.ToolFunctionParameters{
+					Type:     "object",
+					Required: []string{"user_id"},
+				},
+			},
+		},
+	}
+
+	if err := server.ApplyClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:           handlers.ClusterConfigScopeMCPHostedTool,
+		MCPHostedToolID: initialTool.ToolID,
+		MCPHostedTool:   initialTool,
+	}); err != nil {
+		t.Fatalf("ApplyClusterConfigChange(add initial hosted tool) error = %v", err)
+	}
+
+	updatedDescription := "Sync user profile"
+	bodyTemplate := `{"user_id":"{{args.user_id}}"}`
+	updatedTool := &configstoreTables.TableMCPHostedTool{
+		ToolID:      "tool-1",
+		Name:        "sync-user-profile",
+		Description: &updatedDescription,
+		Method:      "POST",
+		URL:         upstream.URL + "/users/{{args.user_id}}/sync",
+		Headers: map[string]string{
+			"Authorization": "{{req.header.authorization}}",
+		},
+		BodyTemplate: &bodyTemplate,
+		ToolSchema: schemas.ChatTool{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "sync-user-profile",
+				Description: &updatedDescription,
+				Parameters: &schemas.ToolFunctionParameters{
+					Type:     "object",
+					Required: []string{"user_id"},
+				},
+			},
+		},
+	}
+
+	if err := server.ApplyClusterConfigChange(context.Background(), &handlers.ClusterConfigChange{
+		Scope:           handlers.ClusterConfigScopeMCPHostedTool,
+		MCPHostedToolID: updatedTool.ToolID,
+		MCPHostedTool:   updatedTool,
+	}); err != nil {
+		t.Fatalf("ApplyClusterConfigChange(update hosted tool) error = %v", err)
+	}
+
+	persisted, err := store.GetMCPHostedToolByID(context.Background(), updatedTool.ToolID)
+	if err != nil {
+		t.Fatalf("expected renamed hosted tool persisted, got err=%v", err)
+	}
+	if persisted.Name != "sync_user_profile" || persisted.Method != http.MethodPost {
+		t.Fatalf("expected updated hosted tool persisted, got %+v", persisted)
+	}
+
+	available := client.GetAvailableMCPTools(context.Background())
+	if len(available) != 1 {
+		t.Fatalf("expected exactly one runtime hosted tool after rename, got %+v", available)
+	}
+	if available[0].Function == nil {
+		t.Fatalf("expected runtime hosted tool to keep a function schema, got %+v", available)
 	}
 }

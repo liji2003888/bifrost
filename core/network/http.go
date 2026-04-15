@@ -5,6 +5,7 @@ package network
 import (
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -261,10 +262,15 @@ func StaleConnectionRetryIfErr(_ *fasthttp.Request, attempts int, err error) (re
 	errStr := err.Error()
 	// io.EOF — server closed the connection (fasthttp converts this to
 	//   ErrConnectionClosed AFTER the retry loop, so RetryIfErr sees raw EOF)
+	// fasthttp.ErrConnectionClosed — some upstreams close keep-alive connections
+	//   without advertising "Connection: close", causing fasthttp to surface this
+	//   specific error text on the next reused POST.
 	// "cannot find whitespace in the first line of response" — stale chunked data in buffer
 	// "connection reset by peer" — server RST'd the idle connection (read-side)
 	// "broken pipe" — server closed the idle connection (write-side EPIPE)
 	if err == io.EOF ||
+		errors.Is(err, fasthttp.ErrConnectionClosed) ||
+		strings.Contains(errStr, "closed connection before returning the first response byte") ||
 		strings.Contains(errStr, "cannot find whitespace") ||
 		strings.Contains(errStr, "connection reset by peer") ||
 		strings.Contains(errStr, "broken pipe") {

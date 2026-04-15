@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -33,6 +34,20 @@ func getWeight(w *float64) float64 {
 		return 1.0
 	}
 	return *w
+}
+
+func cloneTableMCPDiscoveredTools(in map[string]schemas.ChatTool) map[string]schemas.ChatTool {
+	if len(in) == 0 {
+		if in == nil {
+			return nil
+		}
+		return map[string]schemas.ChatTool{}
+	}
+	out := make(map[string]schemas.ChatTool, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 // UpdateClientConfig updates the client configuration in the database.
@@ -886,20 +901,22 @@ func (s *RDBConfigStore) GetMCPConfig(ctx context.Context) (*schemas.MCPConfig, 
 					isPingAvailable = *dbClient.IsPingAvailable
 				}
 				clientConfigs[i] = &schemas.MCPClientConfig{
-					ID:                 dbClient.ClientID,
-					Name:               dbClient.Name,
-					IsCodeModeClient:   dbClient.IsCodeModeClient,
-					ConnectionType:     schemas.MCPConnectionType(dbClient.ConnectionType),
-					ConnectionString:   dbClient.ConnectionString,
-					StdioConfig:        dbClient.StdioConfig,
-					AuthType:           schemas.MCPAuthType(dbClient.AuthType),
-					OauthConfigID:      dbClient.OauthConfigID,
-					ToolsToExecute:     dbClient.ToolsToExecute,
-					ToolsToAutoExecute: dbClient.ToolsToAutoExecute,
-					Headers:            dbClient.Headers,
-					IsPingAvailable:    isPingAvailable,
-					ToolSyncInterval:   time.Duration(dbClient.ToolSyncInterval) * time.Minute,
-					ToolPricing:        dbClient.ToolPricing,
+					ID:                        dbClient.ClientID,
+					Name:                      dbClient.Name,
+					IsCodeModeClient:          dbClient.IsCodeModeClient,
+					ConnectionType:            schemas.MCPConnectionType(dbClient.ConnectionType),
+					ConnectionString:          dbClient.ConnectionString,
+					StdioConfig:               dbClient.StdioConfig,
+					AuthType:                  schemas.MCPAuthType(dbClient.AuthType),
+					OauthConfigID:             dbClient.OauthConfigID,
+					ToolsToExecute:            dbClient.ToolsToExecute,
+					ToolsToAutoExecute:        dbClient.ToolsToAutoExecute,
+					Headers:                   dbClient.Headers,
+					IsPingAvailable:           isPingAvailable,
+					ToolSyncInterval:          time.Duration(dbClient.ToolSyncInterval) * time.Minute,
+					ToolPricing:               dbClient.ToolPricing,
+					DiscoveredTools:           dbClient.DiscoveredTools,
+					DiscoveredToolNameMapping: dbClient.ToolNameMapping,
 				}
 			}
 			return &schemas.MCPConfig{
@@ -925,20 +942,22 @@ func (s *RDBConfigStore) GetMCPConfig(ctx context.Context) (*schemas.MCPConfig, 
 			isPingAvailable = *dbClient.IsPingAvailable
 		}
 		clientConfigs[i] = &schemas.MCPClientConfig{
-			ID:                 dbClient.ClientID,
-			Name:               dbClient.Name,
-			IsCodeModeClient:   dbClient.IsCodeModeClient,
-			ConnectionType:     schemas.MCPConnectionType(dbClient.ConnectionType),
-			ConnectionString:   dbClient.ConnectionString,
-			StdioConfig:        dbClient.StdioConfig,
-			AuthType:           schemas.MCPAuthType(dbClient.AuthType),
-			OauthConfigID:      dbClient.OauthConfigID,
-			ToolsToExecute:     dbClient.ToolsToExecute,
-			ToolsToAutoExecute: dbClient.ToolsToAutoExecute,
-			Headers:            dbClient.Headers,
-			IsPingAvailable:    isPingAvailable,
-			ToolSyncInterval:   time.Duration(dbClient.ToolSyncInterval) * time.Minute,
-			ToolPricing:        dbClient.ToolPricing,
+			ID:                        dbClient.ClientID,
+			Name:                      dbClient.Name,
+			IsCodeModeClient:          dbClient.IsCodeModeClient,
+			ConnectionType:            schemas.MCPConnectionType(dbClient.ConnectionType),
+			ConnectionString:          dbClient.ConnectionString,
+			StdioConfig:               dbClient.StdioConfig,
+			AuthType:                  schemas.MCPAuthType(dbClient.AuthType),
+			OauthConfigID:             dbClient.OauthConfigID,
+			ToolsToExecute:            dbClient.ToolsToExecute,
+			ToolsToAutoExecute:        dbClient.ToolsToAutoExecute,
+			Headers:                   dbClient.Headers,
+			IsPingAvailable:           isPingAvailable,
+			ToolSyncInterval:          time.Duration(dbClient.ToolSyncInterval) * time.Minute,
+			ToolPricing:               dbClient.ToolPricing,
+			DiscoveredTools:           dbClient.DiscoveredTools,
+			DiscoveredToolNameMapping: dbClient.ToolNameMapping,
 		}
 	}
 	return &schemas.MCPConfig{
@@ -1021,6 +1040,8 @@ func (s *RDBConfigStore) CreateMCPClientConfig(ctx context.Context, clientConfig
 		if err != nil {
 			return err
 		}
+		clientConfigCopy.DiscoveredTools = cloneTableMCPDiscoveredTools(clientConfig.DiscoveredTools)
+		clientConfigCopy.DiscoveredToolNameMapping = maps.Clone(clientConfig.DiscoveredToolNameMapping)
 		// Create new client
 		dbClient := tables.TableMCPClient{
 			ClientID:           clientConfigCopy.ID,
@@ -1036,6 +1057,9 @@ func (s *RDBConfigStore) CreateMCPClientConfig(ctx context.Context, clientConfig
 			Headers:            clientConfigCopy.Headers,
 			IsPingAvailable:    &clientConfigCopy.IsPingAvailable,
 			ToolSyncInterval:   int(clientConfigCopy.ToolSyncInterval.Minutes()),
+			ToolPricing:        clientConfigCopy.ToolPricing,
+			DiscoveredTools:    clientConfigCopy.DiscoveredTools,
+			ToolNameMapping:    clientConfigCopy.DiscoveredToolNameMapping,
 		}
 		if err := tx.WithContext(ctx).Create(&dbClient).Error; err != nil {
 			return s.parseGormError(err)
@@ -1061,6 +1085,8 @@ func (s *RDBConfigStore) UpdateMCPClientConfig(ctx context.Context, id string, c
 		if err != nil {
 			return err
 		}
+		clientConfigCopy.DiscoveredTools = cloneTableMCPDiscoveredTools(clientConfig.DiscoveredTools)
+		clientConfigCopy.ToolNameMapping = maps.Clone(clientConfig.ToolNameMapping)
 
 		// Serialize the virtual fields to JSON before updating
 		// This is normally done in BeforeSave hook, but we need to do it manually for map updates
@@ -1103,6 +1129,24 @@ func (s *RDBConfigStore) UpdateMCPClientConfig(ctx context.Context, id string, c
 			return fmt.Errorf("failed to marshal tool_pricing: %w", err)
 		}
 
+		discoveredToolsJSON := ""
+		if clientConfigCopy.DiscoveredTools != nil {
+			data, marshalErr := json.Marshal(clientConfigCopy.DiscoveredTools)
+			if marshalErr != nil {
+				return fmt.Errorf("failed to marshal discovered_tools: %w", marshalErr)
+			}
+			discoveredToolsJSON = string(data)
+		}
+
+		toolNameMappingJSON := ""
+		if clientConfigCopy.ToolNameMapping != nil {
+			data, marshalErr := json.Marshal(clientConfigCopy.ToolNameMapping)
+			if marshalErr != nil {
+				return fmt.Errorf("failed to marshal tool_name_mapping: %w", marshalErr)
+			}
+			toolNameMappingJSON = string(data)
+		}
+
 		headersJSONStr := string(headersJSON)
 		if encrypt.IsEnabled() && headersJSONStr != "" && headersJSONStr != "{}" {
 			encrypted, encErr := encrypt.Encrypt(headersJSONStr)
@@ -1133,6 +1177,12 @@ func (s *RDBConfigStore) UpdateMCPClientConfig(ctx context.Context, id string, c
 		if clientConfigCopy.IsPingAvailable != nil {
 			updates["is_ping_available"] = *clientConfigCopy.IsPingAvailable
 		}
+		if clientConfigCopy.DiscoveredTools != nil {
+			updates["discovered_tools_json"] = discoveredToolsJSON
+		}
+		if clientConfigCopy.ToolNameMapping != nil {
+			updates["tool_name_mapping_json"] = toolNameMappingJSON
+		}
 
 		if err := tx.WithContext(ctx).Model(&existingClient).Updates(updates).Error; err != nil {
 			return s.parseGormError(err)
@@ -1161,6 +1211,100 @@ func (s *RDBConfigStore) DeleteMCPClientConfig(ctx context.Context, id string) e
 		// Delete the client (this will also handle foreign key cascades)
 		return tx.WithContext(ctx).Delete(&existingClient).Error
 	})
+}
+
+func (s *RDBConfigStore) GetMCPHostedTools(ctx context.Context) ([]tables.TableMCPHostedTool, error) {
+	var tools []tables.TableMCPHostedTool
+	if err := s.db.WithContext(ctx).
+		Order("created_at ASC, tool_id ASC").
+		Find(&tools).Error; err != nil {
+		return nil, err
+	}
+	return tools, nil
+}
+
+func (s *RDBConfigStore) GetMCPHostedToolByID(ctx context.Context, id string) (*tables.TableMCPHostedTool, error) {
+	var tool tables.TableMCPHostedTool
+	if err := s.db.WithContext(ctx).Where("tool_id = ?", id).First(&tool).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &tool, nil
+}
+
+func (s *RDBConfigStore) GetMCPHostedToolByName(ctx context.Context, name string) (*tables.TableMCPHostedTool, error) {
+	var tool tables.TableMCPHostedTool
+	if err := s.db.WithContext(ctx).Where("name = ?", name).First(&tool).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &tool, nil
+}
+
+func (s *RDBConfigStore) CreateMCPHostedTool(ctx context.Context, tool *tables.TableMCPHostedTool) error {
+	if _, err := s.GetMCPHostedToolByName(ctx, tool.Name); err == nil {
+		return fmt.Errorf("MCP hosted tool with name '%s' already exists", tool.Name)
+	}
+	cloned, err := deepCopy(*tool)
+	if err != nil {
+		return err
+	}
+	if err := s.db.WithContext(ctx).Create(&cloned).Error; err != nil {
+		return s.parseGormError(err)
+	}
+	return nil
+}
+
+func (s *RDBConfigStore) UpdateMCPHostedTool(ctx context.Context, tool *tables.TableMCPHostedTool) error {
+	cloned, err := deepCopy(*tool)
+	if err != nil {
+		return err
+	}
+	if err := cloned.BeforeSave(nil); err != nil {
+		return err
+	}
+	result := s.db.WithContext(ctx).
+		Model(&tables.TableMCPHostedTool{}).
+		Where("tool_id = ?", tool.ToolID).
+		Updates(map[string]any{
+			"name":                   cloned.Name,
+			"description":            cloned.Description,
+			"method":                 cloned.Method,
+			"url":                    cloned.URL,
+			"headers_json":           cloned.HeadersJSON,
+			"query_params_json":      cloned.QueryParamsJSON,
+			"auth_profile_json":      cloned.AuthProfileJSON,
+			"execution_profile_json": cloned.ExecutionProfileJSON,
+			"response_schema_json":   cloned.ResponseSchemaJSON,
+			"response_examples_json": cloned.ResponseExamplesJSON,
+			"body_template":          cloned.BodyTemplate,
+			"response_json_path":     cloned.ResponseJSONPath,
+			"response_template":      cloned.ResponseTemplate,
+			"tool_schema_json":       cloned.ToolSchemaJSON,
+			"updated_at":             time.Now(),
+		})
+	if result.Error != nil {
+		return s.parseGormError(result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *RDBConfigStore) DeleteMCPHostedTool(ctx context.Context, id string) error {
+	result := s.db.WithContext(ctx).Where("tool_id = ?", id).Delete(&tables.TableMCPHostedTool{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // GetVectorStoreConfig retrieves the vector store configuration from the database.
@@ -1272,8 +1416,8 @@ func (s *RDBConfigStore) GetModelPrices(ctx context.Context) ([]tables.TableMode
 }
 
 // UpsertModelPrices creates or updates a model pricing record in the database.
-// Uses a find-then-create-or-update pattern so it works regardless of dialect
-// (SQLite vs PostgreSQL) and constraint naming.
+// Uses a single atomic ON CONFLICT statement to avoid deadlocks in multinode
+// deployments where multiple nodes may upsert the same model at startup.
 func (s *RDBConfigStore) UpsertModelPrices(ctx context.Context, pricing *tables.TableModelPricing, tx ...*gorm.DB) error {
 	var txDB *gorm.DB
 	if len(tx) > 0 {
@@ -1283,22 +1427,10 @@ func (s *RDBConfigStore) UpsertModelPrices(ctx context.Context, pricing *tables.
 	}
 	db := txDB.WithContext(ctx)
 
-	var existing tables.TableModelPricing
-	err := db.Where("model = ? AND provider = ? AND mode = ?", pricing.Model, pricing.Provider, pricing.Mode).First(&existing).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// No existing row: create
-			if err := db.Create(pricing).Error; err != nil {
-				return s.parseGormError(err)
-			}
-			return nil
-		}
-		return s.parseGormError(err)
-	}
-
-	// Existing row: update by setting ID and saving (full replace)
-	pricing.ID = existing.ID
-	if err := db.Save(pricing).Error; err != nil {
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "model"}, {Name: "provider"}, {Name: "mode"}},
+		UpdateAll: true,
+	}).Create(pricing).Error; err != nil {
 		return s.parseGormError(err)
 	}
 	return nil
@@ -1330,6 +1462,8 @@ func (s *RDBConfigStore) GetModelParameters(ctx context.Context, model string) (
 }
 
 // UpsertModelParameters inserts or updates model parameters for a specific model.
+// Uses a single atomic ON CONFLICT statement to avoid deadlocks in multinode
+// deployments where multiple nodes may upsert the same model at startup.
 func (s *RDBConfigStore) UpsertModelParameters(ctx context.Context, params *tables.TableModelParameters, tx ...*gorm.DB) error {
 	var txDB *gorm.DB
 	if len(tx) > 0 {
@@ -1339,20 +1473,10 @@ func (s *RDBConfigStore) UpsertModelParameters(ctx context.Context, params *tabl
 	}
 	db := txDB.WithContext(ctx)
 
-	var existing tables.TableModelParameters
-	err := db.Where("model = ?", params.Model).First(&existing).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			if err := db.Create(params).Error; err != nil {
-				return s.parseGormError(err)
-			}
-			return nil
-		}
-		return s.parseGormError(err)
-	}
-
-	params.ID = existing.ID
-	if err := db.Save(params).Error; err != nil {
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "model"}},
+		UpdateAll: true,
+	}).Create(params).Error; err != nil {
 		return s.parseGormError(err)
 	}
 	return nil
@@ -3491,6 +3615,48 @@ func (s *RDBConfigStore) CleanupExpiredLockByKey(ctx context.Context, lockKey st
 }
 
 // ==================== OAuth Methods ====================
+
+// GetOauthConfigsPaginated retrieves OAuth configs with pagination and optional search filtering.
+func (s *RDBConfigStore) GetOauthConfigsPaginated(ctx context.Context, params OAuthConfigsQueryParams) ([]tables.TableOauthConfig, int64, error) {
+	baseQuery := s.db.WithContext(ctx).Model(&tables.TableOauthConfig{})
+
+	if params.Search != "" {
+		search := "%" + strings.ToLower(strings.TrimSpace(params.Search)) + "%"
+		baseQuery = baseQuery.Where(
+			`LOWER(client_id) LIKE ? OR LOWER(server_url) LIKE ? OR LOWER(authorize_url) LIKE ? OR LOWER(token_url) LIKE ? OR LOWER(redirect_uri) LIKE ?`,
+			search, search, search, search, search,
+		)
+	}
+
+	if status := strings.TrimSpace(params.Status); status != "" {
+		baseQuery = baseQuery.Where("status = ?", status)
+	}
+
+	var totalCount int64
+	if err := baseQuery.Count(&totalCount).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to count oauth configs: %w", err)
+	}
+
+	limit := params.Limit
+	offset := params.Offset
+
+	if limit <= 0 {
+		limit = 25
+	} else if limit > 100 {
+		limit = 100
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+
+	var configs []tables.TableOauthConfig
+	if err := baseQuery.Order("created_at DESC, id ASC").Offset(offset).Limit(limit).Find(&configs).Error; err != nil {
+		return nil, 0, fmt.Errorf("failed to get oauth configs: %w", err)
+	}
+
+	return configs, totalCount, nil
+}
 
 // GetOauthConfigByID retrieves an OAuth config by its ID
 func (s *RDBConfigStore) GetOauthConfigByID(ctx context.Context, id string) (*tables.TableOauthConfig, error) {

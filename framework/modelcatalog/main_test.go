@@ -1,11 +1,15 @@
 package modelcatalog
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newTestCatalog creates a minimal ModelCatalog for testing within the package.
@@ -144,6 +148,29 @@ func TestIsSameModel_EmptyStrings(t *testing.T) {
 	assert.True(t, mc.IsSameModel("", ""))
 	assert.False(t, mc.IsSameModel("gpt-4o", ""))
 	assert.False(t, mc.IsSameModel("", "gpt-4o"))
+}
+
+func TestIsRemotePricingSyncEnabled(t *testing.T) {
+	mc := newTestCatalog(nil, nil)
+	mc.pricingURL = DefaultPricingURL
+	mc.pricingSyncInterval = DefaultPricingSyncInterval
+	assert.True(t, mc.isRemotePricingSyncEnabled())
+
+	mc.pricingSyncInterval = 0
+	assert.False(t, mc.isRemotePricingSyncEnabled())
+
+	mc.pricingURL = ""
+	mc.pricingSyncInterval = DefaultPricingSyncInterval
+	assert.False(t, mc.isRemotePricingSyncEnabled())
+}
+
+func TestForceReloadPricingNoopWhenRemotePricingSyncDisabled(t *testing.T) {
+	mc := newTestCatalog(nil, nil)
+	mc.logger = bifrost.NewNoOpLogger()
+	mc.pricingURL = ""
+	mc.pricingSyncInterval = time.Duration(0)
+
+	require.NoError(t, mc.ForceReloadPricing(context.Background()))
 }
 
 func TestIsModelAllowedForProvider_PrefixedAllowedModelInCatalog(t *testing.T) {

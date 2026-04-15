@@ -80,9 +80,19 @@ func (e *AsyncJobExecutor) RetrieveJob(ctx context.Context, jobID string, vkValu
 }
 
 // SubmitJob creates a pending job, starts background execution, and returns the job record.
-func (e *AsyncJobExecutor) SubmitJob(virtualKeyValue *string, resultTTL int, operation AsyncOperation, operationType schemas.RequestType) (*AsyncJob, error) {
+// contextValues carries original request-scoped user values so async execution preserves
+// governance, tracing, and other per-request context without re-reading transport state.
+func (e *AsyncJobExecutor) SubmitJob(virtualKeyValue *string, resultTTL int, operation AsyncOperation, operationType schemas.RequestType, contextValues map[any]any) (*AsyncJob, error) {
 	if resultTTL <= 0 {
 		resultTTL = DefaultAsyncJobResultTTL
+	}
+
+	var copiedContextValues map[any]any
+	if len(contextValues) > 0 {
+		copiedContextValues = make(map[any]any, len(contextValues))
+		for k, v := range contextValues {
+			copiedContextValues[k] = v
+		}
 	}
 
 	var virtualKeyID *string
@@ -109,14 +119,17 @@ func (e *AsyncJobExecutor) SubmitJob(virtualKeyValue *string, resultTTL int, ope
 		return nil, fmt.Errorf("failed to create async job: %w", err)
 	}
 
-	go e.executeJob(job.ID, job.ResultTTL, operation)
+	go e.executeJob(job.ID, job.ResultTTL, operation, copiedContextValues)
 
 	return job, nil
 }
 
 // executeJob runs the operation in the background and updates the job record.
-func (e *AsyncJobExecutor) executeJob(jobID string, resultTTL int, operation AsyncOperation) {
+func (e *AsyncJobExecutor) executeJob(jobID string, resultTTL int, operation AsyncOperation, contextValues map[any]any) {
 	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+	for k, v := range contextValues {
+		ctx.SetValue(k, v)
+	}
 
 	markFailed := func(msg string) {
 		now := time.Now().UTC()

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -225,5 +226,172 @@ func TestOAuthSyncHookReceivesRefreshUpdates(t *testing.T) {
 	lastToken := hook.tokens[len(hook.tokens)-1]
 	if lastToken.AccessToken != "refreshed-access-token" || lastToken.RefreshToken != "refreshed-refresh-token" {
 		t.Fatalf("unexpected refreshed token sync payload: %+v", lastToken)
+	}
+}
+
+func TestRevokeTokenWithoutLinkedTokenRevokesPendingOAuthConfig(t *testing.T) {
+	store := newOAuthTestStore()
+	hook := &oauthTestSyncHook{}
+	provider := NewOAuth2Provider(store, bifrost.NewNoOpLogger())
+	provider.SetSyncHook(hook)
+
+	configJSON := `{"id":"mcp-client-pending","name":"docs-client","auth_type":"oauth"}`
+	store.configs["oauth-config-pending"] = &tables.TableOauthConfig{
+		ID:                  "oauth-config-pending",
+		ClientID:            "client-id",
+		AuthorizeURL:        "https://auth.example.com/authorize",
+		TokenURL:            "https://auth.example.com/token",
+		RedirectURI:         "https://gateway.example.com/api/oauth/callback",
+		State:               "pending-state",
+		Status:              "pending",
+		MCPClientConfigJSON: &configJSON,
+		ExpiresAt:           time.Now().Add(10 * time.Minute),
+	}
+
+	if err := provider.RevokeToken(context.Background(), "oauth-config-pending"); err != nil {
+		t.Fatalf("RevokeToken() error = %v", err)
+	}
+
+	updated := store.configs["oauth-config-pending"]
+	if updated == nil {
+		t.Fatal("expected oauth config to remain in store")
+	}
+	if updated.Status != "revoked" {
+		t.Fatalf("expected revoked status, got %q", updated.Status)
+	}
+	if updated.MCPClientConfigJSON != nil {
+		t.Fatalf("expected pending MCP client config to be cleared, got %+v", updated.MCPClientConfigJSON)
+	}
+	if len(hook.tokenDeletes) != 0 {
+		t.Fatalf("expected no oauth token delete sync, got %+v", hook.tokenDeletes)
+	}
+	if len(hook.configs) == 0 || hook.configs[len(hook.configs)-1].Status != "revoked" {
+		t.Fatalf("expected revoked oauth config sync, got %+v", hook.configs)
+	}
+}
+
+func TestCallTokenEndpointRetriesTransientFailures(t *testing.T) {
+	store := newOAuthTestStore()
+	provider := NewOAuth2Provider(store, bifrost.NewNoOpLogger())
+	provider.retryBaseDelay = time.Millisecond
+
+	var attempts int
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			http.Error(w, `{"error":"temporarily_unavailable"}`, http.StatusBadGateway)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "retry-success-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		}); err != nil {
+			t.Fatalf("Encode() error = %v", err)
+		}
+	}))
+	defer tokenServer.Close()
+
+	resp, err := provider.callTokenEndpoint(context.Background(), tokenServer.URL, url.Values{
+		"grant_type": []string{"authorization_code"},
+	})
+	if err != nil {
+		t.Fatalf("callTokenEndpoint() error = %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+	if resp.AccessToken != "retry-success-token" {
+		t.Fatalf("expected retry-success-token, got %+v", resp)
+	}
+}
+
+func TestGetAccessTokenMarksConfigExpiredOnPermanentRefreshFailure(t *testing.T) {
+	store := newOAuthTestStore()
+	hook := &oauthTestSyncHook{}
+	provider := NewOAuth2Provider(store, bifrost.NewNoOpLogger())
+	provider.SetSyncHook(hook)
+	provider.retryBaseDelay = time.Millisecond
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"error": "invalid_grant",
+		}); err != nil {
+			t.Fatalf("Encode() error = %v", err)
+		}
+	}))
+	defer tokenServer.Close()
+
+	tokenID := "oauth-token-expired"
+	store.tokens[tokenID] = &tables.TableOauthToken{
+		ID:           tokenID,
+		AccessToken:  "expired-access-token",
+		RefreshToken: "expired-refresh-token",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(-time.Minute),
+	}
+	store.configs["oauth-config-expired"] = &tables.TableOauthConfig{
+		ID:           "oauth-config-expired",
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		TokenURL:     tokenServer.URL,
+		Status:       "authorized",
+		TokenID:      bifrost.Ptr(tokenID),
+	}
+
+	if _, err := provider.GetAccessToken(context.Background(), "oauth-config-expired"); err == nil {
+		t.Fatal("expected GetAccessToken() to fail on permanent refresh error")
+	}
+
+	updated := store.configs["oauth-config-expired"]
+	if updated == nil || updated.Status != "expired" {
+		t.Fatalf("expected oauth config to be marked expired, got %+v", updated)
+	}
+	if len(hook.configs) == 0 || hook.configs[len(hook.configs)-1].Status != "expired" {
+		t.Fatalf("expected expired oauth config sync, got %+v", hook.configs)
+	}
+}
+
+func TestGetAccessTokenDoesNotExpireConfigOnTransientRefreshFailure(t *testing.T) {
+	store := newOAuthTestStore()
+	hook := &oauthTestSyncHook{}
+	provider := NewOAuth2Provider(store, bifrost.NewNoOpLogger())
+	provider.SetSyncHook(hook)
+	provider.retryBaseDelay = time.Millisecond
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"temporarily_unavailable"}`, http.StatusServiceUnavailable)
+	}))
+	defer tokenServer.Close()
+
+	tokenID := "oauth-token-transient"
+	store.tokens[tokenID] = &tables.TableOauthToken{
+		ID:           tokenID,
+		AccessToken:  "expired-access-token",
+		RefreshToken: "expired-refresh-token",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(-time.Minute),
+	}
+	store.configs["oauth-config-transient"] = &tables.TableOauthConfig{
+		ID:           "oauth-config-transient",
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		TokenURL:     tokenServer.URL,
+		Status:       "authorized",
+		TokenID:      bifrost.Ptr(tokenID),
+	}
+
+	if _, err := provider.GetAccessToken(context.Background(), "oauth-config-transient"); err == nil {
+		t.Fatal("expected GetAccessToken() to fail on transient refresh error")
+	}
+
+	updated := store.configs["oauth-config-transient"]
+	if updated == nil || updated.Status != "authorized" {
+		t.Fatalf("expected oauth config to remain authorized, got %+v", updated)
+	}
+	if len(hook.configs) != 0 {
+		t.Fatalf("expected no oauth config status sync for transient failure, got %+v", hook.configs)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"context"
 	cryptoRand "crypto/rand"
 	"encoding/json"
 	"io"
@@ -30,6 +31,28 @@ func (m *mockLogger) SetLevel(level schemas.LogLevel)                   {}
 func (m *mockLogger) SetOutputType(outputType schemas.LoggerOutputType) {}
 func (m *mockLogger) LogHTTPRequest(level schemas.LogLevel, msg string) schemas.LogEventBuilder {
 	return schemas.NoopLogEvent
+}
+
+type testHTTPTransportPlugin struct {
+	postHookCalls int
+	lastReq       *schemas.HTTPRequest
+	lastResp      *schemas.HTTPResponse
+}
+
+func (p *testHTTPTransportPlugin) GetName() string { return "test-http-plugin" }
+func (p *testHTTPTransportPlugin) Cleanup() error  { return nil }
+func (p *testHTTPTransportPlugin) HTTPTransportPreHook(_ *schemas.BifrostContext, _ *schemas.HTTPRequest) (*schemas.HTTPResponse, error) {
+	return nil, nil
+}
+func (p *testHTTPTransportPlugin) HTTPTransportPostHook(_ *schemas.BifrostContext, req *schemas.HTTPRequest, resp *schemas.HTTPResponse) error {
+	p.postHookCalls++
+	p.lastReq = req
+	p.lastResp = resp
+	resp.Headers["X-Posthook"] = "executed"
+	return nil
+}
+func (p *testHTTPTransportPlugin) HTTPTransportStreamChunkHook(_ *schemas.BifrostContext, _ *schemas.HTTPRequest, chunk *schemas.BifrostStreamChunk) (*schemas.BifrostStreamChunk, error) {
+	return chunk, nil
 }
 
 // TestCorsMiddleware_LocalhostOrigins tests that localhost origins are always allowed
@@ -260,6 +283,38 @@ func TestCorsMiddleware_PreflightLocalhost(t *testing.T) {
 	// Check next handler was NOT called for OPTIONS requests
 	if nextCalled {
 		t.Error("Next handler should not be called for OPTIONS preflight requests")
+	}
+}
+
+func TestRunTransportPostHooksCapturedUsesSnapshots(t *testing.T) {
+	plugin := &testHTTPTransportPlugin{}
+	req := schemas.AcquireHTTPRequest()
+	defer schemas.ReleaseHTTPRequest(req)
+	req.Method = fasthttp.MethodGet
+	req.Path = "/v1/test"
+
+	resp := schemas.AcquireHTTPResponse()
+	defer schemas.ReleaseHTTPResponse(resp)
+	resp.StatusCode = fasthttp.StatusAccepted
+	resp.Headers["X-Next"] = "ok"
+
+	bifrostCtx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+
+	if err := runTransportPostHooksCaptured(req, resp, []schemas.HTTPTransportPlugin{plugin}, bifrostCtx); err != nil {
+		t.Fatalf("runTransportPostHooksCaptured() error = %v", err)
+	}
+
+	if plugin.postHookCalls != 1 {
+		t.Fatalf("expected post-hook to run once, got %d", plugin.postHookCalls)
+	}
+	if plugin.lastReq == nil || plugin.lastReq.Path != "/v1/test" {
+		t.Fatalf("expected captured request path to be preserved, got %+v", plugin.lastReq)
+	}
+	if plugin.lastResp == nil || plugin.lastResp.StatusCode != fasthttp.StatusAccepted {
+		t.Fatalf("expected captured response status to be preserved, got %+v", plugin.lastResp)
+	}
+	if plugin.lastResp.Headers["X-Next"] != "ok" {
+		t.Fatalf("expected captured response headers to be preserved, got %+v", plugin.lastResp.Headers)
 	}
 }
 

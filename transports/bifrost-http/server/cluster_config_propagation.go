@@ -90,6 +90,8 @@ func (s *BifrostHTTPServer) ApplyClusterConfigChange(ctx context.Context, change
 		err = s.ApplyClusterLoadBalancerConfig(ctx, change.LoadBalancerConfig)
 	case handlers.ClusterConfigScopeMCPClient:
 		err = s.ApplyClusterMCPClientConfig(ctx, change.MCPClientID, change.MCPClientConfig, change.Delete)
+	case handlers.ClusterConfigScopeMCPHostedTool:
+		err = s.ApplyClusterMCPHostedToolConfig(ctx, change.MCPHostedToolID, change.MCPHostedTool, change.Delete)
 	case handlers.ClusterConfigScopeModelConfig:
 		err = s.ApplyClusterModelConfig(ctx, change.ModelConfigID, change.ModelConfig, change.Delete)
 	case handlers.ClusterConfigScopeOAuthConfig:
@@ -167,6 +169,8 @@ func clusterConfigChangeTags(change *handlers.ClusterConfigChange) []string {
 		tags = append(tags, "GuardrailProviders", "GuardrailRules")
 	case handlers.ClusterConfigScopeMCPClient:
 		tags = append(tags, "MCPClients", "OAuth2Config")
+	case handlers.ClusterConfigScopeMCPHostedTool:
+		tags = append(tags, "MCPHostedTools")
 	case handlers.ClusterConfigScopeOAuthConfig, handlers.ClusterConfigScopeOAuthToken:
 		tags = append(tags, "OAuth2Config", "MCPClients")
 	case handlers.ClusterConfigScopePlugin:
@@ -381,6 +385,8 @@ func clusterMCPClientToTable(cfg *schemas.MCPClientConfig) *configstoreTables.Ta
 		ToolSyncInterval:   int(cfg.ToolSyncInterval.Minutes()),
 		AuthType:           string(cfg.AuthType),
 		OauthConfigID:      cfg.OauthConfigID,
+		DiscoveredTools:    cfg.DiscoveredTools,
+		ToolNameMapping:    cfg.DiscoveredToolNameMapping,
 	}
 }
 

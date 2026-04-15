@@ -61,6 +61,14 @@ type MCPClientsQueryParams struct {
 	Search string
 }
 
+// OAuthConfigsQueryParams holds pagination, filtering, and search parameters for OAuth config queries.
+type OAuthConfigsQueryParams struct {
+	Limit  int
+	Offset int
+	Search string
+	Status string
+}
+
 // TeamsQueryParams holds pagination, filtering, and search parameters for team queries.
 type TeamsQueryParams struct {
 	Limit      int
@@ -111,6 +119,12 @@ type ConfigStore interface {
 	CreateMCPClientConfig(ctx context.Context, clientConfig *schemas.MCPClientConfig) error
 	UpdateMCPClientConfig(ctx context.Context, id string, clientConfig *tables.TableMCPClient) error
 	DeleteMCPClientConfig(ctx context.Context, id string) error
+	GetMCPHostedTools(ctx context.Context) ([]tables.TableMCPHostedTool, error)
+	GetMCPHostedToolByID(ctx context.Context, id string) (*tables.TableMCPHostedTool, error)
+	GetMCPHostedToolByName(ctx context.Context, name string) (*tables.TableMCPHostedTool, error)
+	CreateMCPHostedTool(ctx context.Context, tool *tables.TableMCPHostedTool) error
+	UpdateMCPHostedTool(ctx context.Context, tool *tables.TableMCPHostedTool) error
+	DeleteMCPHostedTool(ctx context.Context, id string) error
 
 	// Vector store config CRUD
 	UpdateVectorStoreConfig(ctx context.Context, config *vectorstore.Config) error
@@ -287,6 +301,7 @@ type ConfigStore interface {
 	CleanupExpiredLocks(ctx context.Context) (int64, error)
 
 	// OAuth config CRUD
+	GetOauthConfigsPaginated(ctx context.Context, params OAuthConfigsQueryParams) ([]tables.TableOauthConfig, int64, error)
 	GetOauthConfigByID(ctx context.Context, id string) (*tables.TableOauthConfig, error)
 	GetOauthConfigByState(ctx context.Context, state string) (*tables.TableOauthConfig, error)
 	GetOauthConfigByTokenID(ctx context.Context, tokenID string) (*tables.TableOauthConfig, error)

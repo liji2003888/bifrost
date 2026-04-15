@@ -152,8 +152,8 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, allowDirectKeys bool, mat
 		"transfer-encoding":   true,
 
 		// prevent auth/key overrides via x-bf-eh-*
-		"x-api-key":      true,
-		"x-goog-api-key": true,
+		"x-api-key":       true,
+		"x-goog-api-key":  true,
 		"x-bf-api-key":    true,
 		"x-bf-api-key-id": true,
 		"x-bf-vk":         true,
@@ -503,4 +503,18 @@ func BuildHTTPRequestFromFastHTTP(ctx *fasthttp.RequestCtx) *schemas.HTTPRequest
 
 	// Note: Body not copied - for streaming, body was already consumed
 	return req
+}
+
+// BuildHTTPResponseFromFastHTTP creates an HTTPResponse snapshot from fasthttp context.
+// The returned response should be released with schemas.ReleaseHTTPResponse when done.
+func BuildHTTPResponseFromFastHTTP(ctx *fasthttp.RequestCtx) *schemas.HTTPResponse {
+	resp := schemas.AcquireHTTPResponse()
+	resp.StatusCode = ctx.Response.StatusCode()
+
+	for key, value := range ctx.Response.Header.All() {
+		resp.Headers[string(key)] = string(value)
+	}
+
+	// Streaming responses are already on the wire; do not materialize body snapshots here.
+	return resp
 }

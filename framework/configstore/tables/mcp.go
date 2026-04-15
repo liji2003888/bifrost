@@ -26,6 +26,8 @@ type TableMCPClient struct {
 	IsPingAvailable        *bool           `gorm:"default:true" json:"is_ping_available,omitempty"` // Whether the MCP server supports ping for health checks
 	ToolPricingJSON        string          `gorm:"type:text" json:"-"`                              // JSON serialized map[string]float64
 	ToolSyncInterval       int             `gorm:"default:0" json:"tool_sync_interval"`             // Per-client tool sync interval in minutes (0 = use global, -1 = disabled)
+	DiscoveredToolsJSON    string          `gorm:"type:text" json:"-"`                              // JSON serialized map[string]schemas.ChatTool
+	ToolNameMappingJSON    string          `gorm:"type:text" json:"-"`                              // JSON serialized map[string]string
 
 	// OAuth authentication fields
 	AuthType      string            `gorm:"type:varchar(20);default:'headers'" json:"auth_type"`                         // "none", "headers", "oauth"
@@ -42,11 +44,13 @@ type TableMCPClient struct {
 	UpdatedAt time.Time `gorm:"index;not null" json:"updated_at"`
 
 	// Virtual fields for runtime use (not stored in DB)
-	StdioConfig        *schemas.MCPStdioConfig   `gorm:"-" json:"stdio_config,omitempty"`
-	ToolsToExecute     []string                  `gorm:"-" json:"tools_to_execute"`
-	ToolsToAutoExecute []string                  `gorm:"-" json:"tools_to_auto_execute"`
-	Headers            map[string]schemas.EnvVar `gorm:"-" json:"headers"`
-	ToolPricing        map[string]float64        `gorm:"-" json:"tool_pricing"`
+	StdioConfig        *schemas.MCPStdioConfig     `gorm:"-" json:"stdio_config,omitempty"`
+	ToolsToExecute     []string                    `gorm:"-" json:"tools_to_execute"`
+	ToolsToAutoExecute []string                    `gorm:"-" json:"tools_to_auto_execute"`
+	Headers            map[string]schemas.EnvVar   `gorm:"-" json:"headers"`
+	ToolPricing        map[string]float64          `gorm:"-" json:"tool_pricing"`
+	DiscoveredTools    map[string]schemas.ChatTool `gorm:"-" json:"-"`
+	ToolNameMapping    map[string]string           `gorm:"-" json:"-"`
 }
 
 // TableName sets the table name for each model
@@ -113,6 +117,26 @@ func (c *TableMCPClient) BeforeSave(tx *gorm.DB) error {
 		c.ToolPricingJSON = string(data)
 	} else {
 		c.ToolPricingJSON = "{}"
+	}
+
+	if c.DiscoveredTools != nil {
+		data, err := json.Marshal(c.DiscoveredTools)
+		if err != nil {
+			return err
+		}
+		c.DiscoveredToolsJSON = string(data)
+	} else if c.DiscoveredToolsJSON == "" {
+		c.DiscoveredToolsJSON = "{}"
+	}
+
+	if c.ToolNameMapping != nil {
+		data, err := json.Marshal(c.ToolNameMapping)
+		if err != nil {
+			return err
+		}
+		c.ToolNameMappingJSON = string(data)
+	} else if c.ToolNameMappingJSON == "" {
+		c.ToolNameMappingJSON = "{}"
 	}
 
 	// Encrypt sensitive fields after serialization.
@@ -186,6 +210,16 @@ func (c *TableMCPClient) AfterFind(tx *gorm.DB) error {
 
 	if c.ToolPricingJSON != "" {
 		if err := json.Unmarshal([]byte(c.ToolPricingJSON), &c.ToolPricing); err != nil {
+			return err
+		}
+	}
+	if c.DiscoveredToolsJSON != "" {
+		if err := sonic.Unmarshal([]byte(c.DiscoveredToolsJSON), &c.DiscoveredTools); err != nil {
+			return err
+		}
+	}
+	if c.ToolNameMappingJSON != "" {
+		if err := sonic.Unmarshal([]byte(c.ToolNameMappingJSON), &c.ToolNameMapping); err != nil {
 			return err
 		}
 	}

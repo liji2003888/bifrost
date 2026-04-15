@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/bytedance/sonic"
 	"github.com/fasthttp/router"
@@ -438,9 +439,12 @@ type RerankRequest struct {
 
 // UnmarshalJSON implements custom JSON unmarshalling for RerankRequest.
 // It accepts both the canonical Bifrost document shape:
-//   [{"text":"..."},{"text":"...","id":"doc-2"}]
+//
+//	[{"text":"..."},{"text":"...","id":"doc-2"}]
+//
 // and the common reranker shorthand used by vLLM/Cohere-style clients:
-//   ["doc 1", "doc 2"]
+//
+//	["doc 1", "doc 2"]
 func (rr *RerankRequest) UnmarshalJSON(data []byte) error {
 	type bifrostAlias BifrostParams
 	var bp bifrostAlias
@@ -1580,6 +1584,8 @@ func (h *CompletionHandler) handleStreamingResponse(ctx *fasthttp.RequestCtx, bi
 	// Signal to tracing middleware that trace completion should be deferred
 	// The streaming callback will complete the trace after the stream ends
 	ctx.SetUserValue(schemas.BifrostContextKeyDeferTraceCompletion, true)
+	var transportPostHookCompleter atomic.Value
+	ctx.SetUserValue(schemas.BifrostContextKeyTransportPostHookCompleter, &transportPostHookCompleter)
 
 	// Get the trace completer function for use in the streaming callback
 	traceCompleter, _ := ctx.UserValue(schemas.BifrostContextKeyTraceCompleter).(func())
@@ -1601,6 +1607,11 @@ func (h *CompletionHandler) handleStreamingResponse(ctx *fasthttp.RequestCtx, bi
 		defer func() {
 			schemas.ReleaseHTTPRequest(httpReq)
 			reader.Done()
+			if completer, _ := transportPostHookCompleter.Load().(func() error); completer != nil {
+				if err := completer(); err != nil {
+					logger.Warn("deferred HTTP transport post-hook failed: %v", err)
+				}
+			}
 			// Complete the trace after streaming finishes
 			// This ensures all spans (including llm.call) are properly ended before the trace is sent to OTEL
 			if traceCompleter != nil {

@@ -9,6 +9,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { ProviderIconType, RenderProviderIcon } from "@/lib/constants/icons";
 import { ProviderLabels } from "@/lib/constants/logs";
 import { Info } from "lucide-react";
+import { ReactNode } from "react";
 
 function formatCost(dollars: number) {
 	return `$${dollars.toFixed(4)}`;
@@ -30,9 +31,11 @@ interface ModelCatalogTableProps {
 	onProviderFilterChange: (value: string) => void;
 	totalProviders: number;
 	totalModels: number;
-	totalRequests24h: number;
-	totalCost24h: number;
+	totalRequestsInRange: number;
+	totalCostInRange: number;
 	isLoadingModels: boolean;
+	timeRangeLabel: string;
+	timeRangePicker: ReactNode;
 }
 
 export default function ModelCatalogTable({
@@ -42,15 +45,17 @@ export default function ModelCatalogTable({
 	onProviderFilterChange,
 	totalProviders,
 	totalModels,
-	totalRequests24h,
-	totalCost24h,
+	totalRequestsInRange,
+	totalCostInRange,
 	isLoadingModels,
+	timeRangeLabel,
+	timeRangePicker,
 }: ModelCatalogTableProps) {
 	const summaryCards = [
 		{ label: "Total Providers", value: totalProviders.toLocaleString() },
 		{ label: "Total Models", value: totalModels.toLocaleString() },
-		{ label: "Total Requests (24h)", value: totalRequests24h.toLocaleString() },
-		{ label: "Total Cost (24h)", value: formatCost(totalCost24h) },
+		{ label: `Total Requests (${timeRangeLabel})`, value: totalRequestsInRange.toLocaleString() },
+		{ label: `Total Cost (${timeRangeLabel})`, value: formatCost(totalCostInRange) },
 	];
 
 	return (
@@ -68,28 +73,33 @@ export default function ModelCatalogTable({
 			</div>
 
 			{/* Header + Filter */}
-			<div className="flex items-center justify-between">
+			<div className="flex items-center justify-between gap-3">
 				<div>
 					<h2 className="text-lg font-semibold">Model Catalog</h2>
-					<p className="text-muted-foreground text-sm">Overview of all configured providers, models, and usage.</p>
+					<p className="text-muted-foreground text-sm">
+						Overview of all configured providers, models, and usage within the selected time range.
+					</p>
 				</div>
-				<Select
-					value={providerFilter || "all"}
-					onValueChange={(val) => onProviderFilterChange(val === "all" ? "" : val)}
-					data-testid="model-catalog-provider-filter"
-				>
-					<SelectTrigger className="w-[200px]" data-testid="model-catalog-provider-trigger">
-						<SelectValue placeholder="All Providers" />
-					</SelectTrigger>
-					<SelectContent>
-						<SelectItem value="all">All Providers</SelectItem>
-						{providers.map((p) => (
-							<SelectItem key={p} value={p}>
-								{ProviderLabels[p as keyof typeof ProviderLabels] || p}
-							</SelectItem>
-						))}
-					</SelectContent>
-				</Select>
+				<div className="flex items-center gap-2">
+					{timeRangePicker}
+					<Select
+						value={providerFilter || "all"}
+						onValueChange={(val) => onProviderFilterChange(val === "all" ? "" : val)}
+						data-testid="model-catalog-provider-filter"
+					>
+						<SelectTrigger className="w-[200px]" data-testid="model-catalog-provider-trigger">
+							<SelectValue placeholder="All Providers" />
+						</SelectTrigger>
+						<SelectContent>
+							<SelectItem value="all">All Providers</SelectItem>
+							{providers.map((p) => (
+								<SelectItem key={p} value={p}>
+									{ProviderLabels[p as keyof typeof ProviderLabels] || p}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				</div>
 			</div>
 
 			{/* Table */}
@@ -106,13 +116,13 @@ export default function ModelCatalogTable({
 											<TooltipTrigger data-testid="model-catalog-models-info-trigger">
 												<Info className="text-muted-foreground h-3.5 w-3.5" />
 											</TooltipTrigger>
-											<TooltipContent side="bottom">Models used in the last 30 days</TooltipContent>
+											<TooltipContent side="bottom">Models used within the selected time range</TooltipContent>
 										</Tooltip>
 									</div>
 								</TooltipProvider>
 							</TableHead>
-							<TableHead className="text-right">Total Traffic (24h)</TableHead>
-							<TableHead className="text-right">Total Cost (24h)</TableHead>
+							<TableHead className="text-right">Total Traffic</TableHead>
+							<TableHead className="text-right">Total Cost</TableHead>
 						</TableRow>
 					</TableHeader>
 					<TableBody>

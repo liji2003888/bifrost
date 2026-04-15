@@ -80,6 +80,7 @@ func (m *clusterConfigHandlerStore) GetConfig(_ context.Context, key string) (*c
 type fakeConfigHandlerManager struct {
 	store                  *clusterConfigHandlerStore
 	lastLoadBalancerConfig *enterprisecfg.LoadBalancerConfig
+	reloadPricingCalls     int
 }
 
 func (m *fakeConfigHandlerManager) UpdateAuthConfig(_ context.Context, authConfig *configstore.AuthConfig) error {
@@ -95,7 +96,12 @@ func (m *fakeConfigHandlerManager) UpdateAuthConfig(_ context.Context, authConfi
 func (m *fakeConfigHandlerManager) ReloadClientConfigFromConfigStore(_ context.Context) error {
 	return nil
 }
-func (m *fakeConfigHandlerManager) ReloadPricingManager(_ context.Context) error       { return nil }
+func (m *fakeConfigHandlerManager) ReloadPricingManager(_ context.Context) error {
+	if m != nil {
+		m.reloadPricingCalls++
+	}
+	return nil
+}
 func (m *fakeConfigHandlerManager) ForceReloadPricing(_ context.Context) error         { return nil }
 func (m *fakeConfigHandlerManager) UpdateDropExcessRequests(_ context.Context, _ bool) {}
 func (m *fakeConfigHandlerManager) UpdateMCPToolManagerConfig(_ context.Context, _ int, _ int, _ string) error {
@@ -296,5 +302,57 @@ func TestUpdateConfigReloadsAndPropagatesLoadBalancerConfig(t *testing.T) {
 	}
 	if loadBalancerChange.LoadBalancerConfig.DirectionRoutingEnabled == nil || *loadBalancerChange.LoadBalancerConfig.DirectionRoutingEnabled {
 		t.Fatalf("expected propagated direction routing to remain disabled, got %+v", loadBalancerChange.LoadBalancerConfig)
+	}
+}
+
+func TestUpdateConfigLoggingChangesDoNotRequireRestart(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	store := &clusterConfigHandlerStore{
+		clientConfig: &configstore.ClientConfig{
+			LogRetentionDays:                30,
+			DisableContentLogging:           false,
+			LoggingHeaders:                  []string{"x-project-id"},
+			EnableLogging:                   bifrost.Ptr(true),
+			HideDeletedVirtualKeysInFilters: false,
+		},
+	}
+	manager := &fakeConfigHandlerManager{store: store}
+	propagator := &fakeClusterConfigPropagator{}
+	handler := NewConfigHandler(manager, &lib.Config{
+		ConfigStore: store,
+		ClientConfig: &configstore.ClientConfig{
+			LogRetentionDays:      30,
+			DisableContentLogging: false,
+			LoggingHeaders:        []string{"x-project-id"},
+			EnableLogging:         bifrost.Ptr(true),
+		},
+	}, propagator)
+
+	body, err := json.Marshal(map[string]any{
+		"client_config": map[string]any{
+			"log_retention_days":      30,
+			"enable_logging":          false,
+			"disable_content_logging": true,
+			"logging_headers":         []string{"x-project-id", "x-user-id"},
+		},
+		"framework_config": map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Request.Header.SetMethod(fasthttp.MethodPut)
+	ctx.Request.SetRequestURI("/api/config")
+	ctx.Request.SetBody(body)
+
+	handler.updateConfig(ctx)
+
+	if ctx.Response.StatusCode() != fasthttp.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	}
+	if store.restartRequiredValue != nil && store.restartRequiredValue.Required {
+		t.Fatalf("expected logging-only config change not to require restart, got %+v", store.restartRequiredValue)
 	}
 }

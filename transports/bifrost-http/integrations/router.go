@@ -56,6 +56,7 @@ import (
 	"mime/multipart"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/bytedance/sonic"
@@ -1463,7 +1464,7 @@ func (g *GenericRouter) handleAsyncCreate(
 		}
 	}
 
-	job, err := executor.SubmitJob(vkValue, resultTTL, operation, operationType)
+	job, err := executor.SubmitJob(vkValue, resultTTL, operation, operationType, bifrostCtx.GetUserValues())
 	if err != nil {
 		g.sendError(ctx, bifrostCtx, config.ErrorConverter,
 			newBifrostError(err, "failed to create async job"))
@@ -2273,6 +2274,8 @@ func (g *GenericRouter) handleStreaming(ctx *fasthttp.RequestCtx, bifrostCtx *sc
 	// Signal to tracing middleware that trace completion should be deferred
 	// The streaming callback will complete the trace after the stream ends
 	ctx.SetUserValue(schemas.BifrostContextKeyDeferTraceCompletion, true)
+	var transportPostHookCompleter atomic.Value
+	ctx.SetUserValue(schemas.BifrostContextKeyTransportPostHookCompleter, &transportPostHookCompleter)
 
 	// Get the trace completer function for use in the streaming callback
 	traceCompleter, _ := ctx.UserValue(schemas.BifrostContextKeyTraceCompleter).(func())
@@ -2294,6 +2297,11 @@ func (g *GenericRouter) handleStreaming(ctx *fasthttp.RequestCtx, bifrostCtx *sc
 		defer func() {
 			schemas.ReleaseHTTPRequest(httpReq)
 			reader.Done()
+			if completer, _ := transportPostHookCompleter.Load().(func() error); completer != nil {
+				if err := completer(); err != nil {
+					g.logger.Warn("deferred HTTP transport post-hook failed: %v", err)
+				}
+			}
 			// Complete the trace after streaming finishes
 			// This ensures all spans (including llm.call) are properly ended before the trace is sent to OTEL
 			if traceCompleter != nil {
@@ -2759,6 +2767,9 @@ func (g *GenericRouter) handlePassthroughStream(
 
 	// Skip post-hook body materialization — ctx.Response.Body() would buffer the entire stream.
 	ctx.SetUserValue(schemas.BifrostContextKeyDeferTraceCompletion, true)
+	var transportPostHookCompleter atomic.Value
+	ctx.SetUserValue(schemas.BifrostContextKeyTransportPostHookCompleter, &transportPostHookCompleter)
+	traceCompleter, _ := ctx.UserValue(schemas.BifrostContextKeyTraceCompleter).(func())
 
 	ctx.SetStatusCode(passthroughResp.StatusCode)
 	ctx.SetConnectionClose()
@@ -2778,6 +2789,14 @@ func (g *GenericRouter) handlePassthroughStream(
 	go func() {
 		defer func() {
 			reader.Done()
+			if completer, _ := transportPostHookCompleter.Load().(func() error); completer != nil {
+				if err := completer(); err != nil {
+					g.logger.Warn("deferred HTTP transport post-hook failed: %v", err)
+				}
+			}
+			if traceCompleter != nil {
+				traceCompleter()
+			}
 			cancel()
 		}()
 

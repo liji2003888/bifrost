@@ -62,6 +62,9 @@ const ClientForm: React.FC<ClientFormProps> = ({ open, onClose, onSaved }) => {
 		authorizeUrl: string;
 		oauthConfigId: string;
 		mcpClientId: string;
+		statusUrl?: string;
+		completeUrl?: string;
+		nextSteps?: string[];
 	} | null>(null);
 	const { toast } = useToast();
 
@@ -256,6 +259,9 @@ const ClientForm: React.FC<ClientFormProps> = ({ open, onClose, onSaved }) => {
 					authorizeUrl: response.authorize_url,
 					oauthConfigId: response.oauth_config_id,
 					mcpClientId: response.mcp_client_id,
+					statusUrl: response.status_url,
+					completeUrl: response.complete_url,
+					nextSteps: response.next_steps,
 				});
 			} else {
 				setIsLoading(false);
@@ -605,6 +611,9 @@ const ClientForm: React.FC<ClientFormProps> = ({ open, onClose, onSaved }) => {
 					authorizeUrl={oauthFlow.authorizeUrl}
 					oauthConfigId={oauthFlow.oauthConfigId}
 					mcpClientId={oauthFlow.mcpClientId}
+					statusUrl={oauthFlow.statusUrl}
+					completeUrl={oauthFlow.completeUrl}
+					nextSteps={oauthFlow.nextSteps}
 				/>
 			)}
 		</Sheet>

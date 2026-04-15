@@ -6,6 +6,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"os/signal"
@@ -135,6 +136,10 @@ type ServerCallbacks interface {
 	AddMCPClient(ctx context.Context, clientConfig *schemas.MCPClientConfig) error
 	RemoveMCPClient(ctx context.Context, id string) error
 	UpdateMCPClient(ctx context.Context, id string, updatedConfig *schemas.MCPClientConfig) error
+	AddMCPHostedTool(ctx context.Context, tool *tables.TableMCPHostedTool) error
+	UpdateMCPHostedTool(ctx context.Context, id string, tool *tables.TableMCPHostedTool) error
+	RemoveMCPHostedTool(ctx context.Context, id string) error
+	PreviewMCPHostedTool(ctx context.Context, id string, args map[string]any) (*tables.MCPHostedToolExecutionResult, error)
 	UpdateMCPToolManagerConfig(ctx context.Context, maxAgentDepth int, toolExecutionTimeoutInSeconds int, codeModeBindingLevel string) error
 	ReconnectMCPClient(ctx context.Context, id string) error
 	// Logging related callbacks
@@ -179,9 +184,10 @@ type BifrostHTTPServer struct {
 	devPprofHandler    *handlers.DevPprofHandler
 	IntegrationHandler *handlers.IntegrationHandler
 
-	AuthMiddleware    *handlers.AuthMiddleware
-	TracingMiddleware *handlers.TracingMiddleware
-	WSTicketStore     *handlers.WSTicketStore
+	AuthMiddleware          *handlers.AuthMiddleware
+	TracingMiddleware       *handlers.TracingMiddleware
+	WSTicketStore           *handlers.WSTicketStore
+	hostedMCPToolHTTPClient *fasthttp.Client
 
 	wsPool *bfws.Pool
 }
@@ -291,6 +297,53 @@ func (s *BifrostHTTPServer) syncMCPServers(ctx context.Context) error {
 		return nil
 	}
 	return s.MCPServerHandler.SyncAllMCPServers(ctx)
+}
+
+func cloneServerMCPDiscoveredTools(in map[string]schemas.ChatTool) map[string]schemas.ChatTool {
+	if len(in) == 0 {
+		if in == nil {
+			return nil
+		}
+		return map[string]schemas.ChatTool{}
+	}
+	out := make(map[string]schemas.ChatTool, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func (s *BifrostHTTPServer) persistMCPDiscoveredTools(ctx context.Context, clientID string, tools map[string]schemas.ChatTool, toolNameMapping map[string]string) error {
+	if s == nil || s.Config == nil || strings.TrimSpace(clientID) == "" {
+		return nil
+	}
+
+	clonedTools := cloneServerMCPDiscoveredTools(tools)
+	clonedMapping := maps.Clone(toolNameMapping)
+
+	if err := s.Config.UpdateMCPClientDiscoveredTools(clientID, clonedTools, clonedMapping); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+		return err
+	}
+
+	if s.Config.ConfigStore != nil {
+		row, err := s.Config.ConfigStore.GetMCPClientByID(ctx, clientID)
+		if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			return fmt.Errorf("failed to get mcp client config for discovered tools persistence: %w", err)
+		}
+		if row != nil {
+			row.DiscoveredTools = clonedTools
+			row.ToolNameMapping = clonedMapping
+			if err := s.Config.ConfigStore.UpdateMCPClientConfig(ctx, clientID, row); err != nil {
+				return fmt.Errorf("failed to persist discovered mcp tools: %w", err)
+			}
+		}
+	}
+
+	if s.WebSocketHandler != nil {
+		s.WebSocketHandler.BroadcastUpdatesToClients([]string{"MCPClients"})
+	}
+
+	return nil
 }
 
 // ExecuteChatMCPTool executes an MCP tool call and returns the result as a chat message.
@@ -1431,6 +1484,7 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 			mcpConfig.FetchNewRequestIDFunc = func(ctx *schemas.BifrostContext) string {
 				return uuid.New().String()
 			}
+			mcpConfig.PersistDiscoveredTools = s.persistMCPDiscoveredTools
 		}
 	}
 	// Initialize bifrost client
@@ -1453,6 +1507,9 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 		return fmt.Errorf("failed to initialize bifrost: %v", err)
 	}
 	logger.Info("bifrost client initialized")
+	if err := s.syncHostedMCPToolsFromStore(ctx); err != nil {
+		return fmt.Errorf("failed to initialize hosted MCP tools: %v", err)
+	}
 	// Sync plugin execution order from config to core (defensive — Init receives sorted list,
 	// but this ensures order consistency if the loading path changes in the future)
 	s.Client.ReorderPlugins(s.Config.GetPluginOrder())

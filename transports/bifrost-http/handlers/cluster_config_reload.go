@@ -22,6 +22,7 @@ const (
 	ClusterConfigScopeFramework          ClusterConfigScope = "framework"
 	ClusterConfigScopeLoadBalancer       ClusterConfigScope = "load_balancer"
 	ClusterConfigScopeMCPClient          ClusterConfigScope = "mcp_client"
+	ClusterConfigScopeMCPHostedTool      ClusterConfigScope = "mcp_hosted_tool"
 	ClusterConfigScopeModelConfig        ClusterConfigScope = "model_config"
 	ClusterConfigScopeOAuthConfig        ClusterConfigScope = "oauth_config"
 	ClusterConfigScopeOAuthToken         ClusterConfigScope = "oauth_token"
@@ -60,6 +61,8 @@ type ClusterConfigChange struct {
 	Provider           schemas.ModelProvider                   `json:"provider,omitempty"`
 	ProviderGovernance *configstoreTables.TableProvider        `json:"provider_governance,omitempty"`
 	MCPClientID        string                                  `json:"mcp_client_id,omitempty"`
+	MCPHostedToolID    string                                  `json:"mcp_hosted_tool_id,omitempty"`
+	MCPHostedTool      *configstoreTables.TableMCPHostedTool   `json:"mcp_hosted_tool,omitempty"`
 	PromptID           string                                  `json:"prompt_id,omitempty"`
 	PromptConfig       *configstoreTables.TablePrompt          `json:"prompt_config,omitempty"`
 	PromptSessionID    uint                                    `json:"prompt_session_id,omitempty"`

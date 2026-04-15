@@ -206,6 +206,9 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationAddGovernanceTrackingColumns(ctx, db); err != nil {
 		return err
 	}
+	if err := migrationAddModelAliasColumn(ctx, db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -2136,6 +2139,51 @@ func migrationAddGovernanceTrackingColumns(ctx context.Context, db *gorm.DB) err
 	}})
 	if err := m.Migrate(); err != nil {
 		return fmt.Errorf("error while adding governance tracking columns: %w", err)
+	}
+	return nil
+}
+
+// migrationAddModelAliasColumn adds the alias column to logs so requested model aliases
+// can be persisted separately from the resolved model used for execution.
+func migrationAddModelAliasColumn(ctx context.Context, db *gorm.DB) error {
+	opts := *migrator.DefaultOptions
+	opts.UseTransaction = true
+	m := migrator.New(db, &opts, []*migrator.Migration{{
+		ID: "logs_add_model_alias_column",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+
+			if !migrator.HasColumn(&Log{}, "Alias") {
+				if err := migrator.AddColumn(&Log{}, "Alias"); err != nil {
+					return fmt.Errorf("failed to add Alias column: %w", err)
+				}
+			}
+			if !migrator.HasIndex(&Log{}, "Alias") {
+				if err := migrator.CreateIndex(&Log{}, "Alias"); err != nil {
+					return fmt.Errorf("failed to create Alias index: %w", err)
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if migrator.HasIndex(&Log{}, "Alias") {
+				if err := migrator.DropIndex(&Log{}, "Alias"); err != nil {
+					return fmt.Errorf("failed to drop Alias index: %w", err)
+				}
+			}
+			if migrator.HasColumn(&Log{}, "Alias") {
+				if err := migrator.DropColumn(&Log{}, "Alias"); err != nil {
+					return fmt.Errorf("failed to drop Alias column: %w", err)
+				}
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while adding model alias column: %w", err)
 	}
 	return nil
 }

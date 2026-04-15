@@ -241,7 +241,7 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Validating framework config
-	if payload.FrameworkConfig.PricingURL != nil && *payload.FrameworkConfig.PricingURL != modelcatalog.DefaultPricingURL {
+	if payload.FrameworkConfig.PricingURL != nil && *payload.FrameworkConfig.PricingURL != "" && *payload.FrameworkConfig.PricingURL != modelcatalog.DefaultPricingURL {
 		// Checking the accessibility of the pricing URL
 		resp, err := http.Get(*payload.FrameworkConfig.PricingURL)
 		if err != nil {
@@ -258,9 +258,9 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Checking the pricing sync interval
-	if payload.FrameworkConfig.PricingSyncInterval != nil && *payload.FrameworkConfig.PricingSyncInterval <= 0 {
-		logger.Warn("pricing sync interval must be greater than 0")
-		SendError(ctx, fasthttp.StatusBadRequest, "pricing sync interval must be greater than 0")
+	if payload.FrameworkConfig.PricingSyncInterval != nil && *payload.FrameworkConfig.PricingSyncInterval < 0 {
+		logger.Warn("pricing sync interval must be greater than or equal to 0")
+		SendError(ctx, fasthttp.StatusBadRequest, "pricing sync interval must be greater than or equal to 0")
 		return
 	}
 
@@ -335,17 +335,9 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	}
 
 	if payload.ClientConfig.EnableLogging != nil {
-		payloadLogging := *payload.ClientConfig.EnableLogging
-		currentLogging := currentConfig.EnableLogging == nil || *currentConfig.EnableLogging
-		if payloadLogging != currentLogging {
-			restartReasons = append(restartReasons, "Logging changed")
-		}
 		updatedConfig.EnableLogging = payload.ClientConfig.EnableLogging
 	}
 
-	if payload.ClientConfig.DisableContentLogging != currentConfig.DisableContentLogging {
-		restartReasons = append(restartReasons, "Content logging")
-	}
 	updatedConfig.DisableContentLogging = payload.ClientConfig.DisableContentLogging
 	updatedConfig.DisableDBPingsInHealth = payload.ClientConfig.DisableDBPingsInHealth
 	updatedConfig.AllowDirectKeys = payload.ClientConfig.AllowDirectKeys
@@ -472,17 +464,19 @@ func (h *ConfigHandler) updateConfig(ctx *fasthttp.RequestCtx) {
 	shouldReloadFrameworkConfig := false
 	if payload.FrameworkConfig.PricingURL != nil && *payload.FrameworkConfig.PricingURL != *frameworkConfig.PricingURL {
 		// Checking the accessibility of the pricing URL
-		resp, err := http.Get(*payload.FrameworkConfig.PricingURL)
-		if err != nil {
-			logger.Warn("failed to check the accessibility of the pricing URL: %v", err)
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the pricing URL: %v", err))
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			logger.Warn("failed to check the accessibility of the pricing URL: %v", resp.StatusCode)
-			SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the pricing URL: %v", resp.StatusCode))
-			return
+		if *payload.FrameworkConfig.PricingURL != "" {
+			resp, err := http.Get(*payload.FrameworkConfig.PricingURL)
+			if err != nil {
+				logger.Warn("failed to check the accessibility of the pricing URL: %v", err)
+				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the pricing URL: %v", err))
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				logger.Warn("failed to check the accessibility of the pricing URL: %v", resp.StatusCode)
+				SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to check the accessibility of the pricing URL: %v", resp.StatusCode))
+				return
+			}
 		}
 		frameworkConfig.PricingURL = payload.FrameworkConfig.PricingURL
 		shouldReloadFrameworkConfig = true

@@ -110,9 +110,9 @@ func TestReloadClientConfigFromConfigStoreRebindsClientConfigDependentPlugins(t 
 		Config: cfg,
 	}
 
-	disableContentLogging, loggingHeaders := logPlugin.CurrentClientConfigBindings()
-	if !disableContentLogging || !reflect.DeepEqual(loggingHeaders, staleClientConfig.LoggingHeaders) {
-		t.Fatalf("expected logging plugin to start bound to stale config, got disable=%v headers=%v", disableContentLogging, loggingHeaders)
+	enableLogging, disableContentLogging, loggingHeaders := logPlugin.CurrentClientConfigBindings()
+	if !enableLogging || !disableContentLogging || !reflect.DeepEqual(loggingHeaders, staleClientConfig.LoggingHeaders) {
+		t.Fatalf("expected logging plugin to start bound to stale config, got enable=%v disable=%v headers=%v", enableLogging, disableContentLogging, loggingHeaders)
 	}
 
 	isVkMandatory, requiredHeaders := governancePlugin.CurrentClientConfigBindings()
@@ -126,7 +126,10 @@ func TestReloadClientConfigFromConfigStoreRebindsClientConfigDependentPlugins(t 
 		}
 	}
 
-	disableContentLogging, loggingHeaders = logPlugin.CurrentClientConfigBindings()
+	enableLogging, disableContentLogging, loggingHeaders = logPlugin.CurrentClientConfigBindings()
+	if storeClientConfig.EnableLogging != nil && enableLogging != *storeClientConfig.EnableLogging {
+		t.Fatalf("expected logging plugin enable_logging=%v, got %v", *storeClientConfig.EnableLogging, enableLogging)
+	}
 	if disableContentLogging != storeClientConfig.DisableContentLogging {
 		t.Fatalf("expected logging plugin disable_content_logging=%v, got %v", storeClientConfig.DisableContentLogging, disableContentLogging)
 	}

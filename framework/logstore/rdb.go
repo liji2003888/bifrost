@@ -2088,13 +2088,12 @@ var metadataSystemKeys = map[string]struct{}{
 const (
 	// maxMetadataRows is the maximum number of recent rows to scan for metadata keys.
 	maxMetadataRows = 1000
-	// maxMetadataValuesPerKey caps the number of distinct values collected per metadata key.
-	maxMetadataValuesPerKey = 100
 )
 
-// GetDistinctMetadataKeys returns unique metadata keys and their distinct values from recent logs.
-// It scans a bounded number of recent rows to avoid memory bloat on large tables.
-func (s *RDBLogStore) GetDistinctMetadataKeys(ctx context.Context) (map[string][]string, error) {
+// GetDistinctMetadataKeys returns unique metadata keys from recent logs.
+// It intentionally does not enumerate distinct values, because high-cardinality
+// metadata like user IDs would make filter-data payloads and queries expensive.
+func (s *RDBLogStore) GetDistinctMetadataKeys(ctx context.Context) ([]string, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -defaultFilterDataCutoffDays)
 	var metadataStrings []string
 	// Guard must match the partial-index predicate so the planner uses the GIN index.
@@ -2113,52 +2112,28 @@ func (s *RDBLogStore) GetDistinctMetadataKeys(ctx context.Context) (map[string][
 		return nil, fmt.Errorf("failed to get metadata: %w", err)
 	}
 
-	// Collect unique key-value pairs with bounded sizes
-	keyValues := make(map[string]map[string]struct{})
+	keys := make(map[string]struct{})
 	for _, raw := range metadataStrings {
 		var parsed map[string]interface{}
 		if err := sonic.UnmarshalString(raw, &parsed); err != nil {
 			continue
 		}
-		for key, val := range parsed {
+		for key := range parsed {
 			if _, isSystem := metadataSystemKeys[key]; isSystem {
 				continue
 			}
 			if !isValidMetadataKey(key) {
 				continue
 			}
-			if _, ok := keyValues[key]; !ok {
-				keyValues[key] = make(map[string]struct{})
-			}
-			if len(keyValues[key]) >= maxMetadataValuesPerKey {
-				continue
-			}
-			var strVal string
-			switch v := val.(type) {
-			case string:
-				strVal = v
-			case float64:
-				strVal = fmt.Sprint(v)
-			case bool:
-				strVal = fmt.Sprint(v)
-			default:
-				continue
-			}
-			if strVal != "" {
-				keyValues[key][strVal] = struct{}{}
-			}
+			keys[key] = struct{}{}
 		}
 	}
 
-	result := make(map[string][]string, len(keyValues))
-	for key, vals := range keyValues {
-		values := make([]string, 0, len(vals))
-		for v := range vals {
-			values = append(values, v)
-		}
-		sort.Strings(values)
-		result[key] = values
+	result := make([]string, 0, len(keys))
+	for key := range keys {
+		result = append(result, key)
 	}
+	sort.Strings(result)
 	return result, nil
 }
 

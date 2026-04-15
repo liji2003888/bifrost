@@ -202,6 +202,7 @@ type LogCallback func(ctx context.Context, logEntry *logstore.Log)
 type MCPToolLogCallback func(*logstore.MCPToolLog)
 
 type Config struct {
+	EnableLogging         *bool     `json:"enable_logging"`
 	DisableContentLogging *bool     `json:"disable_content_logging"`
 	LoggingHeaders        *[]string `json:"logging_headers"` // Pointer to live config slice; changes are reflected immediately without restart
 }
@@ -210,6 +211,7 @@ type Config struct {
 type LoggerPlugin struct {
 	ctx                   context.Context
 	store                 logstore.LogStore
+	enableLogging         *bool
 	disableContentLogging *bool
 	loggingHeaders        *[]string // Pointer to live config slice for headers to capture in metadata
 	pricingManager        *modelcatalog.ModelCatalog
@@ -251,6 +253,7 @@ func Init(ctx context.Context, config *Config, logger schemas.Logger, logsStore 
 		store:                 logsStore,
 		pricingManager:        pricingManager,
 		mcpCatalog:            mcpCatalog,
+		enableLogging:         config.EnableLogging,
 		disableContentLogging: config.DisableContentLogging,
 		loggingHeaders:        config.LoggingHeaders,
 		done:                  make(chan struct{}),
@@ -297,23 +300,30 @@ func (p *LoggerPlugin) BindClientConfig(cfg *configstore.ClientConfig) {
 	defer p.mu.Unlock()
 
 	if cfg == nil {
+		p.enableLogging = nil
 		p.disableContentLogging = nil
 		p.loggingHeaders = nil
 		return
 	}
 
+	p.enableLogging = cfg.EnableLogging
 	p.disableContentLogging = &cfg.DisableContentLogging
 	p.loggingHeaders = &cfg.LoggingHeaders
 }
 
 // CurrentClientConfigBindings exposes the currently bound logging client-config values.
-func (p *LoggerPlugin) CurrentClientConfigBindings() (bool, []string) {
+func (p *LoggerPlugin) CurrentClientConfigBindings() (bool, bool, []string) {
 	if p == nil {
-		return false, nil
+		return false, false, nil
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	enableLogging := true
+	if p.enableLogging != nil {
+		enableLogging = *p.enableLogging
+	}
 
 	disableContentLogging := false
 	if p.disableContentLogging != nil {
@@ -325,7 +335,26 @@ func (p *LoggerPlugin) CurrentClientConfigBindings() (bool, []string) {
 		loggingHeaders = append([]string(nil), (*p.loggingHeaders)...)
 	}
 
-	return disableContentLogging, loggingHeaders
+	return enableLogging, disableContentLogging, loggingHeaders
+}
+
+func (p *LoggerPlugin) isContentLoggingEnabled() bool {
+	if p == nil {
+		return false
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	enableLogging := true
+	if p.enableLogging != nil {
+		enableLogging = *p.enableLogging
+	}
+	if !enableLogging {
+		return false
+	}
+
+	return p.disableContentLogging == nil || !*p.disableContentLogging
 }
 
 // cleanupWorker periodically removes old processing logs
@@ -468,7 +497,7 @@ func (p *LoggerPlugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.Bifr
 		Object:   string(req.RequestType),
 	}
 
-	if p.disableContentLogging == nil || !*p.disableContentLogging {
+	if p.isContentLoggingEnabled() {
 		inputHistory, responsesInputHistory := p.extractInputHistory(req)
 		initialData.InputHistory = inputHistory
 		initialData.ResponsesInputHistory = responsesInputHistory
@@ -691,6 +720,7 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 				Timestamp: time.Now().UTC(),
 				CreatedAt: time.Now().UTC(),
 			}
+			applyModelAlias(entry, bifrostErr.ExtraFields.OriginalModelRequested, bifrostErr.ExtraFields.ResolvedModelUsed)
 			if data, err := sonic.Marshal(bifrostErr); err == nil {
 				entry.ErrorDetails = string(data)
 			}
@@ -746,7 +776,7 @@ func (p *LoggerPlugin) PostLLMHook(ctx *schemas.BifrostContext, result *schemas.
 			entry.ErrorDetails = string(data)
 		}
 		entry.ErrorDetailsParsed = bifrostErr
-		if p.disableContentLogging == nil || !*p.disableContentLogging {
+		if p.isContentLoggingEnabled() {
 			if bifrostErr.ExtraFields.RawRequest != nil {
 				rawReqBytes, err := sonic.Marshal(bifrostErr.ExtraFields.RawRequest)
 				if err == nil {
@@ -979,7 +1009,7 @@ func (p *LoggerPlugin) PreMCPHook(ctx *schemas.BifrostContext, req *schemas.Bifr
 		}
 
 		// Set arguments if content logging is enabled
-		if p.disableContentLogging == nil || !*p.disableContentLogging {
+		if p.isContentLoggingEnabled() {
 			entry.ArgumentsParsed = arguments
 		}
 
@@ -1074,7 +1104,7 @@ func (p *LoggerPlugin) PostMCPHook(ctx *schemas.BifrostContext, resp *schemas.Bi
 		} else if resp != nil {
 			updates["status"] = "success"
 			// Store result if content logging is enabled
-			if p.disableContentLogging == nil || !*p.disableContentLogging {
+			if p.isContentLoggingEnabled() {
 				var result interface{}
 				if resp.ChatMessage != nil {
 					// For ChatMessage, try to parse the content as JSON if it's a string

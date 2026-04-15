@@ -51,7 +51,7 @@ type LogStore interface {
 	GetDistinctModels(ctx context.Context) ([]string, error)
 	GetDistinctKeyPairs(ctx context.Context, idCol, nameCol string) ([]KeyPairResult, error)
 	GetDistinctRoutingEngines(ctx context.Context) ([]string, error)
-	GetDistinctMetadataKeys(ctx context.Context) (map[string][]string, error)
+	GetDistinctMetadataKeys(ctx context.Context) ([]string, error)
 
 	// MCP Tool Log histogram methods
 	GetMCPHistogram(ctx context.Context, filters MCPToolLogSearchFilters, bucketSizeSeconds int64) (*MCPHistogramResult, error)

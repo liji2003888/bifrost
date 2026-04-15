@@ -1,10 +1,11 @@
 "use client"
 
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { useCopyToClipboard } from "@/hooks/useCopyToClipboard"
 import { getErrorMessage } from "@/lib/store/apis/baseApi";
 import { useCompleteOAuthFlowMutation, useLazyGetOAuthConfigStatusQuery } from "@/lib/store/apis/mcpApi";
-import { Loader2 } from "lucide-react"
+import { Copy, ExternalLink, Link2, Loader2 } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 
 interface OAuth2AuthorizerProps {
@@ -15,6 +16,9 @@ interface OAuth2AuthorizerProps {
 	authorizeUrl: string
 	oauthConfigId: string
 	mcpClientId: string
+	statusUrl?: string
+	completeUrl?: string
+	nextSteps?: string[]
 }
 
 export const OAuth2Authorizer: React.FC<OAuth2AuthorizerProps> = ({
@@ -25,11 +29,15 @@ export const OAuth2Authorizer: React.FC<OAuth2AuthorizerProps> = ({
 	authorizeUrl,
 	oauthConfigId,
 	mcpClientId,
+	statusUrl,
+	completeUrl,
+	nextSteps,
 }) => {
 	const [status, setStatus] = useState<"pending" | "polling" | "success" | "failed">("pending")
 	const [errorMessage, setErrorMessage] = useState<string | null>(null)
 	const popupRef = useRef<Window | null>(null)
 	const pollIntervalRef = useRef<NodeJS.Timeout | null>(null)
+	const { copy } = useCopyToClipboard()
 
 	// RTK Query hooks
 	const [getOAuthStatus] = useLazyGetOAuthConfigStatusQuery()
@@ -247,12 +255,50 @@ export const OAuth2Authorizer: React.FC<OAuth2AuthorizerProps> = ({
 					)}
 				</div>
 
+				<div className="bg-muted/30 space-y-3 rounded-md border p-3">
+					<div className="space-y-1">
+						<p className="text-xs font-medium tracking-wide uppercase">OAuth Context</p>
+						<p className="font-mono text-xs break-all">oauth_config_id: {oauthConfigId}</p>
+						<p className="font-mono text-xs break-all">mcp_client_id: {mcpClientId}</p>
+					</div>
+
+					{nextSteps && nextSteps.length > 0 && (
+						<div className="space-y-1">
+							<p className="text-xs font-medium tracking-wide uppercase">Next Steps</p>
+							<ol className="text-muted-foreground list-decimal space-y-1 pl-4 text-xs">
+								{nextSteps.map((step) => (
+									<li key={step}>{step}</li>
+								))}
+							</ol>
+						</div>
+					)}
+
+					<div className="flex flex-wrap gap-2">
+						<Button onClick={openPopup} variant="outline" size="sm" dataTestId="oauth-authorizer-open-authorization">
+							<ExternalLink className="h-4 w-4" />
+							Open Authorization
+						</Button>
+						{statusUrl && (
+							<Button onClick={() => void copy(statusUrl)} variant="outline" size="sm" dataTestId="oauth-authorizer-copy-status-url">
+								<Link2 className="h-4 w-4" />
+								Copy Status URL
+							</Button>
+						)}
+						{completeUrl && (
+							<Button onClick={() => void copy(completeUrl)} variant="outline" size="sm" dataTestId="oauth-authorizer-copy-complete-url">
+								<Copy className="h-4 w-4" />
+								Copy Complete URL
+							</Button>
+						)}
+					</div>
+				</div>
+
 				{status === "polling" && (
-					<div className="flex justify-end space-x-2">
+					<DialogFooter>
 						<Button onClick={handleCancel} variant="outline">
 							Cancel
 						</Button>
-					</div>
+					</DialogFooter>
 				)}
 			</DialogContent>
 		</Dialog>

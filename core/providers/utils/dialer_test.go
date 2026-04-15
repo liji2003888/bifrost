@@ -344,7 +344,12 @@ func TestStaleConnectionRetryIfErr_WrappedErrors(t *testing.T) {
 		{
 			name:      "ErrConnectionClosed from fasthttp",
 			err:       fasthttp.ErrConnectionClosed,
-			wantRetry: false, // Not matched - this error appears AFTER the retry loop
+			wantRetry: true,
+		},
+		{
+			name:      "closed-before-first-byte message",
+			err:       fmt.Errorf("the server closed connection before returning the first response byte. Make sure the server returns 'Connection: close' response header before closing the connection"),
+			wantRetry: true,
 		},
 	}
 

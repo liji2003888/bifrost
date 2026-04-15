@@ -27,17 +27,23 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 
-import { useCreateMCPClientMutation } from "@/lib/store/apis/mcpApi";
+import { useCreateMCPClientMutation, useCreateMCPHostedToolMutation, useValidateMCPClientMutation } from "@/lib/store/apis/mcpApi";
 import { getErrorMessage } from "@/lib/store";
-import type { EnvVar } from "@/lib/types/mcp";
+import type { EnvVar, MCPHostedTool, ValidateMCPClientResponse } from "@/lib/types/mcp";
 
 interface ParsedEndpoint {
 	name: string;
 	method: string;
 	url: string;
 	headers: Record<string, string>;
+	queryParams?: Record<string, string>;
+	authProfile?: MCPHostedTool["auth_profile"];
 	body?: string;
+	responseSchema?: MCPHostedTool["response_schema"];
+	responseExamples?: MCPHostedTool["response_examples"];
+	toolSchema?: MCPHostedTool["tool_schema"];
 	selected: boolean;
+	validation?: ValidateMCPClientResponse;
 }
 
 function envVar(val: string): EnvVar {
@@ -50,6 +56,186 @@ function headersToEnvVars(headers: Record<string, string>): Record<string, EnvVa
 		result[k] = envVar(v);
 	}
 	return result;
+}
+
+function splitURLAndQuery(url: string): { url: string; queryParams: Record<string, string> } {
+	try {
+		const parsed = new URL(url);
+		const queryParams: Record<string, string> = {};
+		for (const [key, value] of parsed.searchParams.entries()) {
+			queryParams[key] = value;
+		}
+		parsed.search = "";
+		return { url: parsed.toString(), queryParams };
+	} catch {
+		return { url, queryParams: {} };
+	}
+}
+
+function resolveEndpointSecurityHeaders(headers: Record<string, string>): {
+	headers: Record<string, string>;
+	authProfile?: MCPHostedTool["auth_profile"];
+} {
+	const staticHeaders: Record<string, string> = {};
+	const passthroughMappings: Record<string, string> = {};
+	const exactRuntimeHeaderPattern = /^\{\{\s*req\.header\.([^}]+)\s*\}\}$/i;
+
+	for (const [headerKey, headerValue] of Object.entries(headers)) {
+		const match = headerValue.trim().match(exactRuntimeHeaderPattern);
+		if (!match) {
+			staticHeaders[headerKey] = headerValue;
+			continue;
+		}
+		passthroughMappings[headerKey] = match[1].trim().toLowerCase();
+	}
+
+	if (Object.keys(passthroughMappings).length === 0) {
+		return { headers: staticHeaders };
+	}
+	if (
+		Object.keys(passthroughMappings).length === 1 &&
+		passthroughMappings.Authorization === "authorization"
+	) {
+		return {
+			headers: staticHeaders,
+			authProfile: { mode: "bearer_passthrough" },
+		};
+	}
+	return {
+		headers: staticHeaders,
+		authProfile: {
+			mode: "header_passthrough",
+			header_mappings: passthroughMappings,
+		},
+	};
+}
+
+function resolveOpenAPIRef(schema: any, spec: any): any {
+	if (!schema || typeof schema !== "object") {
+		return schema;
+	}
+	if (typeof schema.$ref !== "string" || !schema.$ref.startsWith("#/")) {
+		return schema;
+	}
+	const parts = schema.$ref.slice(2).split("/");
+	let current: any = spec;
+	for (const part of parts) {
+		if (!current || typeof current !== "object") {
+			return schema;
+		}
+		current = current[part];
+	}
+	return current || schema;
+}
+
+function buildToolPropertyFromOpenAPISchema(schema: any, spec: any): any {
+	const resolved = resolveOpenAPIRef(schema, spec) || {};
+	const property: Record<string, any> = {};
+	if (resolved.type) property.type = resolved.type;
+	if (resolved.description) property.description = resolved.description;
+	if (resolved.enum) property.enum = resolved.enum;
+	if (resolved.format) property.format = resolved.format;
+	if (resolved.default !== undefined) property.default = resolved.default;
+	if (resolved.type === "object" && resolved.properties) {
+		property.properties = Object.fromEntries(
+			Object.entries(resolved.properties).map(([key, value]) => [key, buildToolPropertyFromOpenAPISchema(value, spec)]),
+		);
+		if (Array.isArray(resolved.required) && resolved.required.length > 0) {
+			property.required = resolved.required;
+		}
+	} else if (resolved.type === "array" && resolved.items) {
+		property.items = buildToolPropertyFromOpenAPISchema(resolved.items, spec);
+	}
+	if (!property.type) {
+		property.type = "string";
+	}
+	return property;
+}
+
+function buildBodyTemplateFromOpenAPISchema(schema: any, spec: any, pathPrefix = ""): any {
+	const resolved = resolveOpenAPIRef(schema, spec) || {};
+	if (resolved.type === "object" && resolved.properties) {
+		return Object.fromEntries(
+			Object.entries(resolved.properties).map(([key, value]) => {
+				const nextPrefix = pathPrefix ? `${pathPrefix}.${key}` : key;
+				return [key, buildBodyTemplateFromOpenAPISchema(value, spec, nextPrefix)];
+			}),
+		);
+	}
+	return `{{args.${pathPrefix}}}`;
+}
+
+function buildHostedToolSchema(name: string, description: string | undefined, properties: Record<string, any>, required: string[]): MCPHostedTool["tool_schema"] {
+	return {
+		type: "function",
+		function: {
+			name,
+			description,
+			parameters: {
+				type: "object",
+				properties,
+				required,
+			},
+		},
+	};
+}
+
+function extractOpenAPIResponseSchema(op: any, spec: any): MCPHostedTool["response_schema"] | undefined {
+	const responses = op?.responses;
+	if (!responses || typeof responses !== "object") {
+		return undefined;
+	}
+	const preferredStatusCode = Object.keys(responses)
+		.filter((code) => /^2\d\d$/.test(code))
+		.sort()[0];
+	const response = responses[preferredStatusCode] || responses.default;
+	if (!response || typeof response !== "object") {
+		return undefined;
+	}
+	const content = response.content || {};
+	const mediaType =
+		content["application/json"] ||
+		content["application/*+json"] ||
+		Object.values(content)[0];
+	const schema = mediaType && typeof mediaType === "object" ? (mediaType as any).schema : undefined;
+	if (!schema) {
+		return undefined;
+	}
+	return buildToolPropertyFromOpenAPISchema(schema, spec);
+}
+
+function extractOpenAPIResponseExamples(op: any): MCPHostedTool["response_examples"] | undefined {
+	const responses = op?.responses;
+	if (!responses || typeof responses !== "object") {
+		return undefined;
+	}
+	const preferredStatusCode = Object.keys(responses)
+		.filter((code) => /^2\d\d$/.test(code))
+		.sort()[0];
+	const response = responses[preferredStatusCode] || responses.default;
+	if (!response || typeof response !== "object") {
+		return undefined;
+	}
+	const content = response.content || {};
+	const mediaType =
+		content["application/json"] ||
+		content["application/*+json"] ||
+		Object.values(content)[0];
+	if (!mediaType || typeof mediaType !== "object") {
+		return undefined;
+	}
+	const directExample = (mediaType as any).example;
+	if (directExample !== undefined) {
+		return [directExample];
+	}
+	const examples = (mediaType as any).examples;
+	if (!examples || typeof examples !== "object") {
+		return undefined;
+	}
+	const values = Object.values(examples)
+		.map((entry: any) => entry?.value)
+		.filter((entry: any) => entry !== undefined);
+	return values.length > 0 ? values : undefined;
 }
 
 // ─── Postman Parser ──────────────────────────────────────────────────────────
@@ -79,12 +265,35 @@ function parsePostmanCollection(json: string): ParsedEndpoint[] {
 					if (h.key && h.value) headers[h.key] = h.value;
 				}
 			}
+			let queryParams: Record<string, string> = {};
+			if (Array.isArray(req.url?.query)) {
+				for (const item of req.url.query) {
+					if (item?.key && item?.value) {
+						queryParams[item.key] = item.value;
+					}
+				}
+			}
+			const split = splitURLAndQuery(url);
+			url = split.url;
+			queryParams = { ...split.queryParams, ...queryParams };
+			const resolvedSecurity = resolveEndpointSecurityHeaders(headers);
+			const toolSchema = buildHostedToolSchema(
+				item.name || `${method} ${url}`,
+				item.request?.description,
+				{},
+				[],
+			);
 			endpoints.push({
 				name: item.name || `${method} ${url}`,
 				method,
 				url,
-				headers,
+				headers: resolvedSecurity.headers,
+				queryParams,
+				authProfile: resolvedSecurity.authProfile,
 				body: req.body?.raw,
+				responseSchema: undefined,
+				responseExamples: undefined,
+				toolSchema,
 				selected: true,
 			});
 		}
@@ -112,7 +321,6 @@ function parseOpenAPISpec(text: string): ParsedEndpoint[] {
 	}
 
 	const endpoints: ParsedEndpoint[] = [];
-	const title = spec.info?.title || "API";
 	const paths = spec.paths || {};
 	const servers = spec.servers || [];
 	const baseUrl = servers[0]?.url || "";
@@ -123,30 +331,76 @@ function parseOpenAPISpec(text: string): ParsedEndpoint[] {
 			if (["get", "post", "put", "delete", "patch"].indexOf(method.toLowerCase()) === -1) continue;
 			const op = operation as any;
 			const headers: Record<string, string> = {};
-			if (Array.isArray(op.parameters)) {
-				for (const param of op.parameters) {
+			const queryParams: Record<string, string> = {};
+			const toolProperties: Record<string, any> = {};
+			const requiredArgs = new Set<string>();
+			let resolvedPath = path;
+			const combinedParameters = [
+				...((Array.isArray((methods as any).parameters) ? (methods as any).parameters : []) as any[]),
+				...(Array.isArray(op.parameters) ? op.parameters : []),
+			];
+			if (combinedParameters.length > 0) {
+				for (const param of combinedParameters) {
 					if (param.in === "header" && param.name) {
 						headers[param.name] = param.example || param.schema?.default || `{{req.header.${param.name.toLowerCase()}}}`;
+					} else if (param.in === "query" && param.name) {
+						queryParams[param.name] = param.example || param.schema?.default || `{{args.${param.name}}}`;
+						toolProperties[param.name] = buildToolPropertyFromOpenAPISchema(param.schema, spec);
+						if (param.required) requiredArgs.add(param.name);
+					} else if (param.in === "path" && param.name) {
+						resolvedPath = resolvedPath.replace(`{${param.name}}`, `{{args.${param.name}}}`);
+						toolProperties[param.name] = buildToolPropertyFromOpenAPISchema(param.schema, spec);
+						requiredArgs.add(param.name);
 					}
 				}
 			}
 			// Add security scheme headers
-			if (op.security || spec.security) {
+			const applicableSecurity = Array.isArray(op.security) ? op.security : Array.isArray(spec.security) ? spec.security : [];
+			if (applicableSecurity.length > 0) {
 				const schemes = spec.components?.securitySchemes || {};
-				for (const [name, scheme] of Object.entries(schemes)) {
-					const s = scheme as any;
-					if (s.type === "http" && s.scheme === "bearer") {
-						headers["Authorization"] = "{{req.header.authorization}}";
-					} else if (s.type === "apiKey" && s.in === "header") {
-						headers[s.name] = `{{req.header.${s.name.toLowerCase()}}}`;
+				for (const requirement of applicableSecurity) {
+					for (const name of Object.keys(requirement)) {
+						const scheme = schemes[name];
+						if (!scheme) {
+							continue;
+						}
+						const s = scheme as any;
+						if (s.type === "http" && s.scheme === "bearer") {
+							headers["Authorization"] = "{{req.header.authorization}}";
+						} else if (s.type === "apiKey" && s.in === "header") {
+							headers[s.name] = `{{req.header.${s.name.toLowerCase()}}}`;
+						}
 					}
 				}
 			}
+			const split = splitURLAndQuery(`${baseUrl}${resolvedPath}`);
+			const resolvedSecurity = resolveEndpointSecurityHeaders(headers);
+			let bodyTemplate: string | undefined;
+			const contentSchema = op.requestBody?.content?.["application/json"]?.schema;
+			if (contentSchema) {
+				const resolvedBodySchema = resolveOpenAPIRef(contentSchema, spec);
+				if (resolvedBodySchema?.type === "object" && resolvedBodySchema.properties) {
+					for (const [key, value] of Object.entries(resolvedBodySchema.properties)) {
+						toolProperties[key] = buildToolPropertyFromOpenAPISchema(value, spec);
+					}
+					for (const item of resolvedBodySchema.required || []) {
+						requiredArgs.add(String(item));
+					}
+					bodyTemplate = JSON.stringify(buildBodyTemplateFromOpenAPISchema(resolvedBodySchema, spec), null, 2);
+				}
+			}
+			const name = op.summary || op.operationId || `${method.toUpperCase()} ${path}`;
 			endpoints.push({
-				name: op.summary || op.operationId || `${method.toUpperCase()} ${path}`,
+				name,
 				method: method.toUpperCase(),
-				url: `${baseUrl}${path}`,
-				headers,
+				url: split.url,
+				headers: resolvedSecurity.headers,
+				queryParams: { ...split.queryParams, ...queryParams },
+				authProfile: resolvedSecurity.authProfile,
+				body: bodyTemplate,
+				responseSchema: extractOpenAPIResponseSchema(op, spec),
+				responseExamples: extractOpenAPIResponseExamples(op),
+				toolSchema: buildHostedToolSchema(name, op.description || op.summary, toolProperties, Array.from(requiredArgs)),
 				selected: true,
 			});
 		}
@@ -227,17 +481,26 @@ function parseCurlCommands(text: string): ParsedEndpoint[] {
 		}
 
 		// Derive name from URL path
+		const split = splitURLAndQuery(url);
+		url = split.url;
 		const urlObj = (() => {
 			try { return new URL(url); } catch { return null; }
 		})();
 		const pathName = urlObj ? urlObj.pathname.split("/").filter(Boolean).join(" ") : `endpoint-${i + 1}`;
+		const resolvedSecurity = resolveEndpointSecurityHeaders(headers);
+		const toolSchema = buildHostedToolSchema(`${method} ${pathName}`, undefined, {}, []);
 
 		return {
 			name: `${method} ${pathName}`,
 			method,
 			url,
-			headers,
+			headers: resolvedSecurity.headers,
+			queryParams: split.queryParams,
+			authProfile: resolvedSecurity.authProfile,
 			body,
+			responseSchema: undefined,
+			responseExamples: undefined,
+			toolSchema,
 			selected: true,
 		};
 	});
@@ -266,6 +529,87 @@ export function MCPImportDialog({ open, onOpenChange, onImported }: MCPImportDia
 	const [manualBody, setManualBody] = useState("");
 
 	const [createMCPClient] = useCreateMCPClientMutation();
+	const [createMCPHostedTool] = useCreateMCPHostedToolMutation();
+	const [validateMCPClient] = useValidateMCPClientMutation();
+
+	const validateEndpoint = async (ep: ParsedEndpoint): Promise<ValidateMCPClientResponse> => {
+		return await validateMCPClient({
+			name: ep.name,
+			connection_type: "http",
+			connection_string: envVar(ep.url),
+			auth_type: Object.keys(ep.headers).length > 0 ? "headers" : "none",
+			headers: Object.keys(ep.headers).length > 0 ? headersToEnvVars(ep.headers) : undefined,
+		}).unwrap();
+	};
+
+	const getValidationBadgeVariant = (status?: ValidateMCPClientResponse["status"]) => {
+		switch (status) {
+			case "compatible":
+				return "default";
+			case "unverified":
+				return "secondary";
+			case "incompatible":
+				return "destructive";
+			default:
+				return "outline";
+		}
+	};
+
+	const getValidationLabel = (status?: ValidateMCPClientResponse["status"]) => {
+		switch (status) {
+			case "compatible":
+				return "MCP-compatible";
+			case "unverified":
+				return "Hosted tool candidate";
+			case "incompatible":
+				return "Hosted tool candidate";
+			default:
+				return "Not validated";
+		}
+	};
+
+	const createHostedToolFromEndpoint = async (ep: ParsedEndpoint) => {
+		await createMCPHostedTool({
+			name: ep.name,
+			method: ep.method,
+			url: ep.url,
+			headers: Object.keys(ep.headers).length > 0 ? ep.headers : undefined,
+			query_params: ep.queryParams && Object.keys(ep.queryParams).length > 0 ? ep.queryParams : undefined,
+			auth_profile: ep.authProfile,
+			body_template: ep.body,
+			response_schema: ep.responseSchema,
+			response_examples: ep.responseExamples,
+			tool_schema: ep.toolSchema,
+		}).unwrap();
+	};
+
+	const handleValidateEndpoints = async () => {
+		const selected = endpoints.filter((ep) => ep.selected);
+		if (selected.length === 0) {
+			toast.error("No endpoints selected for validation");
+			return;
+		}
+
+		const results = await Promise.all(
+			endpoints.map(async (ep) => {
+				if (!ep.selected) return ep;
+				try {
+					const validation = await validateEndpoint(ep);
+					return { ...ep, validation };
+				} catch (err) {
+					return {
+						...ep,
+						validation: {
+							status: "incompatible" as const,
+							message: getErrorMessage(err),
+							reason: "validation_failed",
+						},
+					};
+				}
+			}),
+		);
+		setEndpoints(results);
+	};
 
 	const handleParse = () => {
 		setParseError("");
@@ -286,10 +630,10 @@ export function MCPImportDialog({ open, onOpenChange, onImported }: MCPImportDia
 					return;
 			}
 			if (parsed.length === 0) {
-				setParseError("No API endpoints found in the input.");
-				return;
-			}
-			setEndpoints(parsed);
+			setParseError("No API endpoints found in the input.");
+			return;
+		}
+			setEndpoints(parsed.map((ep) => ({ ...ep, validation: undefined })));
 		} catch (err: any) {
 			setParseError(err.message || "Failed to parse input");
 		}
@@ -309,33 +653,47 @@ export function MCPImportDialog({ open, onOpenChange, onImported }: MCPImportDia
 		}
 
 		setIsImporting(true);
-		let successCount = 0;
+		let mcpClientCount = 0;
+		let hostedToolCount = 0;
 		let errorCount = 0;
 
 		for (const ep of selected) {
 			try {
-				await createMCPClient({
-					name: ep.name,
-					connection_type: "http",
-					connection_string: envVar(ep.url),
-					auth_type: Object.keys(ep.headers).length > 0 ? "headers" : "none",
-					headers: Object.keys(ep.headers).length > 0 ? headersToEnvVars(ep.headers) : undefined,
-					is_ping_available: false,
-				}).unwrap();
-				successCount++;
+				const validation = ep.validation ?? await validateEndpoint(ep);
+				if (validation.status === "compatible") {
+					await createMCPClient({
+						name: ep.name,
+						connection_type: "http",
+						connection_string: envVar(ep.url),
+						auth_type: Object.keys(ep.headers).length > 0 ? "headers" : "none",
+						headers: Object.keys(ep.headers).length > 0 ? headersToEnvVars(ep.headers) : undefined,
+						is_ping_available: false,
+					}).unwrap();
+					mcpClientCount++;
+				} else {
+					await createHostedToolFromEndpoint(ep);
+					hostedToolCount++;
+				}
 			} catch {
 				errorCount++;
 			}
 		}
 
 		setIsImporting(false);
-		if (successCount > 0) {
-			toast.success(`Imported ${successCount} API endpoint${successCount > 1 ? "s" : ""} as MCP tools`);
+		if (mcpClientCount > 0 || hostedToolCount > 0) {
+			const parts: string[] = [];
+			if (mcpClientCount > 0) {
+				parts.push(`${mcpClientCount} MCP server${mcpClientCount > 1 ? "s" : ""}`);
+			}
+			if (hostedToolCount > 0) {
+				parts.push(`${hostedToolCount} hosted tool${hostedToolCount > 1 ? "s" : ""}`);
+			}
+			toast.success(`Imported ${parts.join(" and ")}`);
 		}
 		if (errorCount > 0) {
-			toast.error(`Failed to import ${errorCount} endpoint${errorCount > 1 ? "s" : ""}`);
+			toast.error(`Skipped or failed ${errorCount} endpoint${errorCount > 1 ? "s" : ""}`);
 		}
-		if (successCount > 0) {
+		if (mcpClientCount > 0 || hostedToolCount > 0) {
 			onImported?.();
 			onOpenChange(false);
 		}
@@ -352,15 +710,43 @@ export function MCPImportDialog({ open, onOpenChange, onImported }: MCPImportDia
 		}
 
 		try {
-			await createMCPClient({
+			const split = splitURLAndQuery(manualUrl);
+			const staticHeaders = Object.fromEntries(
+				Object.entries(headers).map(([key, value]) => [key, value.value || ""]),
+			);
+			const resolvedSecurity = resolveEndpointSecurityHeaders(staticHeaders);
+			const validation = await validateMCPClient({
 				name: manualName || `${manualMethod} API`,
 				connection_type: "http",
-				connection_string: envVar(manualUrl),
+				connection_string: envVar(split.url),
 				auth_type: Object.keys(headers).length > 0 ? "headers" : "none",
 				headers: Object.keys(headers).length > 0 ? headers : undefined,
-				is_ping_available: false,
 			}).unwrap();
-			toast.success("API endpoint added as MCP tool");
+			if (validation.status === "compatible") {
+				await createMCPClient({
+					name: manualName || `${manualMethod} API`,
+					connection_type: "http",
+					connection_string: envVar(split.url),
+					auth_type: Object.keys(headers).length > 0 ? "headers" : "none",
+					headers: Object.keys(headers).length > 0 ? headers : undefined,
+					is_ping_available: false,
+				}).unwrap();
+				toast.success("MCP server added successfully");
+			} else {
+				await createMCPHostedTool({
+					name: manualName || `${manualMethod} API`,
+					method: manualMethod,
+					url: split.url,
+					headers: Object.keys(resolvedSecurity.headers).length > 0 ? resolvedSecurity.headers : undefined,
+					query_params: Object.keys(split.queryParams).length > 0 ? split.queryParams : undefined,
+					auth_profile: resolvedSecurity.authProfile,
+					body_template: manualBody.trim() ? manualBody : undefined,
+					response_schema: undefined,
+					response_examples: undefined,
+					tool_schema: buildHostedToolSchema(manualName || `${manualMethod} API`, undefined, {}, []),
+				}).unwrap();
+				toast.success("Hosted MCP tool added successfully");
+			}
 			onImported?.();
 			onOpenChange(false);
 		} catch (err) {
@@ -383,9 +769,9 @@ export function MCPImportDialog({ open, onOpenChange, onImported }: MCPImportDia
 		<Dialog open={open} onOpenChange={(v) => { if (!v) resetState(); onOpenChange(v); }}>
 			<DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
 				<DialogHeader>
-					<DialogTitle>Import APIs as MCP Tools</DialogTitle>
+					<DialogTitle>Import MCP Servers or Hosted API Tools</DialogTitle>
 					<DialogDescription>
-						Transform your existing APIs into LLM-ready MCP tools. Import from Postman, OpenAPI, cURL, or configure manually.
+						Import streamable HTTP or SSE MCP servers directly. Ordinary enterprise APIs that are not MCP-compatible will be imported as hosted MCP tools and executed in-process with request header and environment-variable templating.
 					</DialogDescription>
 				</DialogHeader>
 
@@ -431,6 +817,9 @@ export function MCPImportDialog({ open, onOpenChange, onImported }: MCPImportDia
 								<Button onClick={handleParse} disabled={!inputText.trim()}>
 									Parse
 								</Button>
+								<Button variant="outline" onClick={handleValidateEndpoints} disabled={endpoints.filter((e) => e.selected).length === 0}>
+									Analyze Import Mode
+								</Button>
 							</div>
 
 							{/* Preview Table */}
@@ -445,6 +834,7 @@ export function MCPImportDialog({ open, onOpenChange, onImported }: MCPImportDia
 												<TableHead>Method</TableHead>
 												<TableHead>URL</TableHead>
 												<TableHead>Headers</TableHead>
+												<TableHead>Status</TableHead>
 											</TableRow>
 										</TableHeader>
 										<TableBody>
@@ -457,6 +847,14 @@ export function MCPImportDialog({ open, onOpenChange, onImported }: MCPImportDia
 													<TableCell><Badge variant="outline">{ep.method}</Badge></TableCell>
 													<TableCell className="font-mono text-xs max-w-xs truncate">{ep.url}</TableCell>
 													<TableCell className="text-xs">{Object.keys(ep.headers).length} header{Object.keys(ep.headers).length !== 1 ? "s" : ""}</TableCell>
+													<TableCell className="space-y-1">
+														<Badge variant={getValidationBadgeVariant(ep.validation?.status)}>
+															{getValidationLabel(ep.validation?.status)}
+														</Badge>
+														{ep.validation?.message ? (
+															<p className="text-muted-foreground max-w-xs text-[11px] leading-4">{ep.validation.message}</p>
+														) : null}
+													</TableCell>
 												</TableRow>
 											))}
 										</TableBody>
@@ -525,7 +923,7 @@ export function MCPImportDialog({ open, onOpenChange, onImported }: MCPImportDia
 
 						<div className="flex justify-end">
 							<Button onClick={handleManualAdd}>
-								<Upload className="h-4 w-4 mr-1" /> Add as MCP Tool
+								<Upload className="h-4 w-4 mr-1" /> Analyze & Add
 							</Button>
 						</div>
 					</TabsContent>

@@ -7,10 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/fasthttp/router"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/oauth2"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
@@ -37,9 +41,166 @@ func NewOAuthHandler(oauthProvider *oauth2.OAuth2Provider, client *bifrost.Bifro
 
 // RegisterRoutes registers all OAuth-related routes
 func (h *OAuthHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
+	r.GET("/api/oauth/configs", lib.ChainMiddlewares(h.getOAuthConfigs, middlewares...))
 	r.GET("/api/oauth/callback", lib.ChainMiddlewares(h.handleOAuthCallback, middlewares...))
 	r.GET("/api/oauth/config/{id}/status", lib.ChainMiddlewares(h.getOAuthConfigStatus, middlewares...))
 	r.DELETE("/api/oauth/config/{id}", lib.ChainMiddlewares(h.revokeOAuthConfig, middlewares...))
+}
+
+type oauthMCPClientSummary struct {
+	ClientID string  `json:"client_id"`
+	Name     string  `json:"name"`
+	State    *string `json:"state,omitempty"`
+	AuthType string  `json:"auth_type,omitempty"`
+}
+
+type oauthConfigListItem struct {
+	ID               string                 `json:"id"`
+	Status           string                 `json:"status"`
+	ClientID         string                 `json:"client_id"`
+	AuthorizeURL     string                 `json:"authorize_url"`
+	TokenURL         string                 `json:"token_url"`
+	RegistrationURL  *string                `json:"registration_url,omitempty"`
+	RedirectURI      string                 `json:"redirect_uri"`
+	ServerURL        string                 `json:"server_url"`
+	UseDiscovery     bool                   `json:"use_discovery"`
+	CreatedAt        string                 `json:"created_at"`
+	UpdatedAt        string                 `json:"updated_at"`
+	ExpiresAt        string                 `json:"expires_at"`
+	Scopes           []string               `json:"scopes,omitempty"`
+	TokenID          *string                `json:"token_id,omitempty"`
+	TokenExpiresAt   *string                `json:"token_expires_at,omitempty"`
+	TokenScopes      []string               `json:"token_scopes,omitempty"`
+	LinkedMCPClient  *oauthMCPClientSummary `json:"linked_mcp_client,omitempty"`
+	PendingMCPClient *oauthMCPClientSummary `json:"pending_mcp_client,omitempty"`
+	StatusURL        string                 `json:"status_url"`
+	CompleteURL      string                 `json:"complete_url"`
+	NextSteps        []string               `json:"next_steps,omitempty"`
+}
+
+func (h *OAuthHandler) getOAuthConfigs(ctx *fasthttp.RequestCtx) {
+	if h == nil || h.store == nil || h.store.ConfigStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "OAuth config management is unavailable: config store is disabled")
+		return
+	}
+
+	params := configstore.OAuthConfigsQueryParams{
+		Search: strings.TrimSpace(string(ctx.QueryArgs().Peek("search"))),
+		Status: strings.TrimSpace(string(ctx.QueryArgs().Peek("status"))),
+	}
+	if limitStr := strings.TrimSpace(string(ctx.QueryArgs().Peek("limit"))); limitStr != "" {
+		limit, err := strconv.Atoi(limitStr)
+		if err != nil {
+			SendError(ctx, fasthttp.StatusBadRequest, "Invalid limit parameter: must be a number")
+			return
+		}
+		params.Limit = limit
+	}
+	if offsetStr := strings.TrimSpace(string(ctx.QueryArgs().Peek("offset"))); offsetStr != "" {
+		offset, err := strconv.Atoi(offsetStr)
+		if err != nil {
+			SendError(ctx, fasthttp.StatusBadRequest, "Invalid offset parameter: must be a number")
+			return
+		}
+		params.Offset = offset
+	}
+
+	configs, totalCount, err := h.store.ConfigStore.GetOauthConfigsPaginated(ctx, params)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to get OAuth configs: %v", err))
+		return
+	}
+
+	linkedClients := make(map[string]*oauthMCPClientSummary)
+	if h.store.MCPConfig != nil {
+		runtimeStates := map[string]string{}
+		if h.client != nil {
+			if runtimeClients, runtimeErr := h.client.GetMCPClients(); runtimeErr == nil {
+				for _, runtimeClient := range runtimeClients {
+					runtimeStates[runtimeClient.Config.ID] = string(runtimeClient.State)
+				}
+			}
+		}
+		for _, client := range h.store.MCPConfig.ClientConfigs {
+			if client == nil || client.OauthConfigID == nil || strings.TrimSpace(*client.OauthConfigID) == "" {
+				continue
+			}
+			stateValue, hasState := runtimeStates[client.ID]
+			var state *string
+			if hasState {
+				state = &stateValue
+			}
+			linkedClients[*client.OauthConfigID] = &oauthMCPClientSummary{
+				ClientID: client.ID,
+				Name:     client.Name,
+				State:    state,
+				AuthType: string(client.AuthType),
+			}
+		}
+	}
+
+	items := make([]oauthConfigListItem, 0, len(configs))
+	for _, oauthConfig := range configs {
+		scopes := parseOAuthScopes(oauthConfig.Scopes)
+		item := oauthConfigListItem{
+			ID:              oauthConfig.ID,
+			Status:          oauthConfig.Status,
+			ClientID:        oauthConfig.ClientID,
+			AuthorizeURL:    oauthConfig.AuthorizeURL,
+			TokenURL:        oauthConfig.TokenURL,
+			RegistrationURL: cloneOptionalString(oauthConfig.RegistrationURL),
+			RedirectURI:     oauthConfig.RedirectURI,
+			ServerURL:       oauthConfig.ServerURL,
+			UseDiscovery:    oauthConfig.UseDiscovery,
+			CreatedAt:       oauthConfig.CreatedAt.UTC().Format(time.RFC3339),
+			UpdatedAt:       oauthConfig.UpdatedAt.UTC().Format(time.RFC3339),
+			ExpiresAt:       oauthConfig.ExpiresAt.UTC().Format(time.RFC3339),
+			Scopes:          scopes,
+			StatusURL:       buildAPIURL(ctx, fmt.Sprintf("/api/oauth/config/%s/status", oauthConfig.ID)),
+			CompleteURL:     buildAPIURL(ctx, fmt.Sprintf("/api/mcp/client/%s/complete-oauth", oauthConfig.ID)),
+		}
+		if oauthConfig.TokenID != nil {
+			tokenID := *oauthConfig.TokenID
+			item.TokenID = &tokenID
+			if token, tokenErr := h.store.ConfigStore.GetOauthTokenByID(ctx, tokenID); tokenErr == nil && token != nil {
+				tokenExpiry := token.ExpiresAt.UTC().Format(time.RFC3339)
+				item.TokenExpiresAt = &tokenExpiry
+				item.TokenScopes = parseOAuthScopes(token.Scopes)
+			}
+		}
+		if linkedClient := linkedClients[oauthConfig.ID]; linkedClient != nil {
+			item.LinkedMCPClient = linkedClient
+		}
+		if oauthConfig.MCPClientConfigJSON != nil && strings.TrimSpace(*oauthConfig.MCPClientConfigJSON) != "" {
+			var pendingConfig schemas.MCPClientConfig
+			if err := json.Unmarshal([]byte(*oauthConfig.MCPClientConfigJSON), &pendingConfig); err == nil {
+				item.PendingMCPClient = &oauthMCPClientSummary{
+					ClientID: pendingConfig.ID,
+					Name:     pendingConfig.Name,
+					AuthType: string(pendingConfig.AuthType),
+				}
+			}
+		}
+		item.NextSteps = buildOAuthConfigNextSteps(item)
+		items = append(items, item)
+	}
+
+	limit := params.Limit
+	if limit <= 0 {
+		limit = 25
+	}
+	offset := params.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	SendJSON(ctx, map[string]any{
+		"configs":     items,
+		"count":       len(items),
+		"total_count": totalCount,
+		"limit":       limit,
+		"offset":      offset,
+	})
 }
 
 // handleOAuthCallback handles the OAuth provider callback
@@ -198,6 +359,78 @@ func (h *OAuthHandler) revokeOAuthConfig(ctx *fasthttp.RequestCtx) {
 	SendJSON(ctx, map[string]interface{}{
 		"message": "OAuth token revoked successfully",
 	})
+}
+
+func parseOAuthScopes(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var scopes []string
+	if err := json.Unmarshal([]byte(raw), &scopes); err == nil {
+		return scopes
+	}
+	parts := strings.Split(raw, " ")
+	scopes = scopes[:0]
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			scopes = append(scopes, part)
+		}
+	}
+	if len(scopes) == 0 {
+		return nil
+	}
+	return scopes
+}
+
+func cloneOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func buildAPIURL(ctx *fasthttp.RequestCtx, path string) string {
+	if ctx == nil {
+		return path
+	}
+	scheme := "http"
+	if ctx.IsTLS() || strings.EqualFold(string(ctx.Request.Header.Peek("X-Forwarded-Proto")), "https") {
+		scheme = "https"
+	}
+	host := strings.TrimSpace(string(ctx.Host()))
+	if host == "" {
+		return path
+	}
+	return fmt.Sprintf("%s://%s%s", scheme, host, path)
+}
+
+func buildOAuthConfigNextSteps(item oauthConfigListItem) []string {
+	switch item.Status {
+	case "pending":
+		if item.PendingMCPClient != nil {
+			return []string{
+				"在 MCP Registry 中完成此 MCP Server 的 OAuth 授权。",
+				"授权成功后，Bifrost 会自动在任一节点完成状态同步，并可通过 Complete OAuth 完成挂载。",
+			}
+		}
+		return []string{"等待 OAuth 授权完成后，再由 MCP Registry 完成 MCP Server 挂载。"}
+	case "authorized":
+		if item.LinkedMCPClient != nil {
+			return []string{"此 OAuth 配置已经绑定到 MCP Server，可继续在 MCP Registry 中查看工具发现与连接状态。"}
+		}
+		return []string{"OAuth 已授权，但还没有绑定到已落库的 MCP Server。可以在 MCP Registry 中完成挂载。"}
+	case "failed":
+		return []string{"此 OAuth 流程已失败。建议在 MCP Registry 中重新发起授权。"}
+	case "expired":
+		return []string{"此 OAuth 流程已过期。建议在 MCP Registry 中重新发起授权。"}
+	case "revoked":
+		return []string{"此 OAuth 配置已撤销。如需恢复，请在 MCP Registry 中重新发起授权。"}
+	default:
+		return nil
+	}
 }
 
 // OAuthInitiationRequest represents the request to initiate an OAuth flow

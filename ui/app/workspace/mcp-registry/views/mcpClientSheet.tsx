@@ -46,6 +46,10 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 	const globalToolSyncInterval = bifrostConfig?.client_config?.mcp_tool_sync_interval ?? 10;
 	const { toast } = useToast();
 	const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+	const toolSnapshotSource = mcpClient.tool_snapshot_source ?? "none";
+	const hasPersistedSnapshot = toolSnapshotSource === "persisted";
+	const toolNameMapping = mcpClient.tool_name_mapping ?? {};
+	const hasToolNameMapping = Object.keys(toolNameMapping).length > 0;
 
 	const toggleToolExpanded = (toolName: string) => {
 		setExpandedTools((prev) => {
@@ -229,6 +233,7 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 									<SheetTitle className="flex w-fit items-center gap-2 font-medium">
 										{mcpClient.config.name}
 										<Badge className={MCP_STATUS_COLORS[mcpClient.state]}>{mcpClient.state}</Badge>
+										{hasPersistedSnapshot ? <Badge variant="secondary">ConfigStore snapshot</Badge> : null}
 									</SheetTitle>
 									<SheetDescription>MCP server configuration and available tools</SheetDescription>
 								</div>
@@ -244,6 +249,15 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 						</SheetHeader>
 
 						<div className="gap-6 space-y-6">
+							{hasPersistedSnapshot ? (
+								<div className="bg-muted/30 border-muted-foreground/20 rounded-sm border p-4">
+									<p className="text-sm font-medium">This server is currently showing a persisted discovery snapshot.</p>
+									<p className="text-muted-foreground mt-1 text-sm">
+										The MCP client is not returning live tools right now, so the UI is falling back to the last successful tool snapshot stored in
+										ConfigStore. This keeps the cluster view usable even when a node is reconnecting.
+									</p>
+								</div>
+							) : null}
 							{/* Name and Header Section */}
 							<div className="space-y-4">
 								<h3 className="font-semibold">Basic Information</h3>
@@ -411,6 +425,31 @@ export default function MCPClientSheet({ mcpClient, onClose, onSubmitSuccess }: 
 									/>
 								</div>
 							</div>
+							{hasToolNameMapping ? (
+								<div className="space-y-4">
+									<h3 className="font-semibold">Tool Discovery Snapshot</h3>
+									<div className="rounded-sm border">
+										<div className="bg-muted/50 text-muted-foreground border-b px-6 py-2 text-xs font-medium">
+											Sanitized tool name to original MCP tool name mapping
+										</div>
+										<CodeEditor
+											className="z-0 w-full"
+											shouldAdjustInitialHeight={true}
+											maxHeight={260}
+											wrap={true}
+											code={JSON.stringify(toolNameMapping, null, 2)}
+											lang="json"
+											readonly={true}
+											options={{
+												scrollBeyondLastLine: false,
+												collapsibleBlocks: true,
+												lineNumbers: "off",
+												alwaysConsumeMouseWheel: false,
+											}}
+										/>
+									</div>
+								</div>
+							) : null}
 							{/* Tools Section */}
 							<div className="space-y-4 pb-10">
 								<div className="flex items-center justify-between">

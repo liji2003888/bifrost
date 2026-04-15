@@ -37,6 +37,10 @@ func (mc *ModelCatalog) checkAndSyncPricing(ctx context.Context) error {
 
 // shouldSyncPricing determines if pricing data should be synced and returns the reason
 func (mc *ModelCatalog) shouldSyncPricing(ctx context.Context) (bool, string) {
+	if !mc.isRemotePricingSyncEnabled() {
+		return false, "remote pricing sync disabled"
+	}
+
 	config, err := mc.configStore.GetConfig(ctx, ConfigLastPricingSyncKey)
 	if err != nil {
 		return true, "no previous sync record found"
@@ -57,6 +61,11 @@ func (mc *ModelCatalog) shouldSyncPricing(ctx context.Context) (bool, string) {
 
 // syncPricing syncs pricing data from URL to database and updates cache
 func (mc *ModelCatalog) syncPricing(ctx context.Context) error {
+	if !mc.isRemotePricingSyncEnabled() {
+		mc.logger.Debug("pricing sync skipped: remote pricing sync disabled")
+		return nil
+	}
+
 	mc.logger.Debug("starting pricing data synchronization for governance")
 	if mc.shouldSyncPricingFunc != nil {
 		if !mc.shouldSyncPricingFunc(ctx) {
@@ -307,6 +316,10 @@ func (mc *ModelCatalog) checkAndSyncModelParameters(ctx context.Context) error {
 
 // shouldSyncModelParameters determines if model parameters data should be synced
 func (mc *ModelCatalog) shouldSyncModelParameters(ctx context.Context) (bool, string) {
+	if !mc.isRemotePricingSyncEnabled() {
+		return false, "remote pricing sync disabled"
+	}
+
 	config, err := mc.configStore.GetConfig(ctx, ConfigLastParamsSyncKey)
 	if err != nil {
 		return true, "no previous model parameters sync record found"
@@ -414,5 +427,3 @@ func (mc *ModelCatalog) loadModelParametersFromURL(ctx context.Context) (map[str
 	mc.logger.Debug("model-parameters-sync: successfully downloaded and parsed %d model parameters records", len(paramsData))
 	return paramsData, nil
 }
-
-

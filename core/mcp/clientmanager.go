@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -14,6 +15,38 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/maximhq/bifrost/core/schemas"
 )
+
+func cloneChatToolMap(in map[string]schemas.ChatTool) map[string]schemas.ChatTool {
+	if len(in) == 0 {
+		if in == nil {
+			return nil
+		}
+		return map[string]schemas.ChatTool{}
+	}
+	out := make(map[string]schemas.ChatTool, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func (m *MCPManager) persistDiscoveredToolState(clientID string, tools map[string]schemas.ChatTool, toolNameMapping map[string]string) {
+	if m == nil || m.persistDiscoveredTools == nil || strings.TrimSpace(clientID) == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := m.persistDiscoveredTools(
+		ctx,
+		clientID,
+		cloneChatToolMap(tools),
+		maps.Clone(toolNameMapping),
+	); err != nil {
+		m.logger.Warn("%s Failed to persist discovered tools for client %s: %v", MCPLogPrefix, clientID, err)
+	}
+}
 
 // GetClients returns all MCP clients managed by the manager.
 //
@@ -232,16 +265,18 @@ func (m *MCPManager) UpdateClient(id string, updatedConfig *schemas.MCPClientCon
 	// will continue to see consistent data.
 	newConfig := &schemas.MCPClientConfig{
 		// Immutable fields - copy from existing config
-		ID:               client.ExecutionConfig.ID,
-		ConnectionType:   client.ExecutionConfig.ConnectionType,
-		ConnectionString: client.ExecutionConfig.ConnectionString,
-		StdioConfig:      client.ExecutionConfig.StdioConfig,
-		AuthType:         client.ExecutionConfig.AuthType,
-		OauthConfigID:    client.ExecutionConfig.OauthConfigID,
-		State:            client.ExecutionConfig.State,
-		InProcessServer:  client.ExecutionConfig.InProcessServer,
-		ConfigHash:       client.ExecutionConfig.ConfigHash,
-		ToolPricing:      maps.Clone(client.ExecutionConfig.ToolPricing),
+		ID:                        client.ExecutionConfig.ID,
+		ConnectionType:            client.ExecutionConfig.ConnectionType,
+		ConnectionString:          client.ExecutionConfig.ConnectionString,
+		StdioConfig:               client.ExecutionConfig.StdioConfig,
+		AuthType:                  client.ExecutionConfig.AuthType,
+		OauthConfigID:             client.ExecutionConfig.OauthConfigID,
+		State:                     client.ExecutionConfig.State,
+		InProcessServer:           client.ExecutionConfig.InProcessServer,
+		ConfigHash:                client.ExecutionConfig.ConfigHash,
+		ToolPricing:               maps.Clone(client.ExecutionConfig.ToolPricing),
+		DiscoveredTools:           cloneChatToolMap(client.ExecutionConfig.DiscoveredTools),
+		DiscoveredToolNameMapping: maps.Clone(client.ExecutionConfig.DiscoveredToolNameMapping),
 		// Updatable fields - copy from updated config with proper cloning
 		Name:               updatedConfig.Name,
 		IsCodeModeClient:   updatedConfig.IsCodeModeClient,
@@ -250,6 +285,13 @@ func (m *MCPManager) UpdateClient(id string, updatedConfig *schemas.MCPClientCon
 		ToolsToAutoExecute: slices.Clone(updatedConfig.ToolsToAutoExecute),
 		IsPingAvailable:    updatedConfig.IsPingAvailable,
 		ToolSyncInterval:   updatedConfig.ToolSyncInterval,
+	}
+
+	if updatedConfig.DiscoveredTools != nil {
+		newConfig.DiscoveredTools = cloneChatToolMap(updatedConfig.DiscoveredTools)
+	}
+	if updatedConfig.DiscoveredToolNameMapping != nil {
+		newConfig.DiscoveredToolNameMapping = maps.Clone(updatedConfig.DiscoveredToolNameMapping)
 	}
 
 	// Atomically replace the config pointer
@@ -341,6 +383,12 @@ func stdioConfigEqual(a, b *schemas.MCPStdioConfig) bool {
 //	        return args.Message, nil
 //	    }, toolSchema)
 func (m *MCPManager) RegisterTool(name, description string, toolFunction MCPToolFunction[any], toolSchema schemas.ChatTool) error {
+	return m.RegisterToolWithContext(name, description, func(_ context.Context, args any) (string, error) {
+		return toolFunction(args)
+	}, toolSchema)
+}
+
+func (m *MCPManager) RegisterToolWithContext(name, description string, toolFunction MCPToolContextFunction[any], toolSchema schemas.ChatTool) error {
 	// Ensure local server is set up
 	if err := m.setupLocalHost(); err != nil {
 		return fmt.Errorf("failed to setup local host: %w", err)
@@ -385,7 +433,7 @@ func (m *MCPManager) RegisterTool(name, description string, toolFunction MCPTool
 	mcpHandler := func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		// Extract arguments from the request using the request's methods
 		args := request.GetArguments()
-		result, err := toolFunction(args)
+		result, err := toolFunction(ctx, args)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Error: %s", err.Error())), nil
 		}
@@ -403,6 +451,31 @@ func (m *MCPManager) RegisterTool(name, description string, toolFunction MCPTool
 	toolSchema.Function.Name = prefixedToolName
 	internalClient.ToolMap[prefixedToolName] = toolSchema
 
+	return nil
+}
+
+func (m *MCPManager) RemoveTool(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("tool name is required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	internalClient, ok := m.clientMap[BifrostMCPClientKey]
+	if !ok {
+		return fmt.Errorf("bifrost client not found")
+	}
+
+	prefixedToolName := fmt.Sprintf("%s-%s", BifrostMCPClientKey, name)
+	if _, exists := internalClient.ToolMap[prefixedToolName]; !exists {
+		return fmt.Errorf("tool '%s' is not registered", name)
+	}
+
+	if m.server != nil {
+		m.server.DeleteTools(name)
+	}
+	delete(internalClient.ToolMap, prefixedToolName)
 	return nil
 }
 
@@ -601,6 +674,7 @@ func (m *MCPManager) connectToMCPClient(config *schemas.MCPClientConfig) error {
 		tools = make(map[string]schemas.ChatTool)
 		toolNameMapping = make(map[string]string)
 	}
+	discoverySucceeded := err == nil
 	m.logger.Debug("%s [%s] Retrieved %d tools", MCPLogPrefix, config.Name, len(tools))
 
 	// Second lock: Update client with final connection details and tools
@@ -625,6 +699,8 @@ func (m *MCPManager) connectToMCPClient(config *schemas.MCPClientConfig) error {
 
 		// Store tool name mapping for execution (sanitized_name -> original_mcp_name)
 		client.ToolNameMapping = toolNameMapping
+		client.ExecutionConfig.DiscoveredTools = cloneChatToolMap(tools)
+		client.ExecutionConfig.DiscoveredToolNameMapping = maps.Clone(toolNameMapping)
 
 		m.logger.Debug("%s [%s] Registering %d tools. Client config - ID: %s, Name: %s, IsCodeModeClient: %v", MCPLogPrefix, config.Name, len(tools), config.ID, config.Name, config.IsCodeModeClient)
 		m.logger.Info("%s Connected to MCP server '%s'", MCPLogPrefix, config.Name)
@@ -660,6 +736,10 @@ func (m *MCPManager) connectToMCPClient(config *schemas.MCPClientConfig) error {
 			}
 			m.mu.Unlock()
 		})
+	}
+
+	if discoverySucceeded {
+		m.persistDiscoveredToolState(config.ID, tools, toolNameMapping)
 	}
 
 	// Start health monitoring for the client

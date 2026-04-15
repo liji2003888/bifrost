@@ -337,31 +337,61 @@ func TransportInterceptorMiddleware(config *lib.Config) schemas.BifrostHTTPMiddl
 			}
 			next(ctx)
 
-			// Skip HTTPTransportPostHook for streaming responses
-			// Streaming handlers set DeferTraceCompletion and use StreamChunkInterceptor for per-chunk hooks
 			if deferred, ok := ctx.UserValue(schemas.BifrostContextKeyDeferTraceCompletion).(bool); ok && deferred {
+				slot, ok := ctx.UserValue(schemas.BifrostContextKeyTransportPostHookCompleter).(*atomic.Value)
+				if !ok {
+					return
+				}
+				capturedReq := lib.BuildHTTPRequestFromFastHTTP(ctx)
+				capturedResp := lib.BuildHTTPResponseFromFastHTTP(ctx)
+				slot.Store(func() error {
+					defer schemas.ReleaseHTTPRequest(capturedReq)
+					defer schemas.ReleaseHTTPResponse(capturedResp)
+					return runTransportPostHooksCaptured(capturedReq, capturedResp, plugins, bifrostCtx)
+				})
 				return
 			}
 
-			// Acquire pooled response for post-hooks (non-streaming only)
-			httpResp := schemas.AcquireHTTPResponse()
-			defer schemas.ReleaseHTTPResponse(httpResp)
-			fasthttpResponseToHTTPResponse(ctx, httpResp)
-			// Run http post-hooks in reverse order
-			for i := len(plugins) - 1; i >= 0; i-- {
-				plugin := plugins[i]
-				err := plugin.HTTPTransportPostHook(bifrostCtx, req, httpResp)
-				if err != nil {
-					logger.Warn("error in HTTPTransportPostHook for plugin %s: %s", plugin.GetName(), err.Error())
-					// Short-circuit with response
-					applyHTTPResponseToCtx(ctx, httpResp)
-					return
-				}
-			}
-			// Apply modifications back to fasthttp context
-			applyHTTPResponseToCtx(ctx, httpResp)
+			_ = runTransportPostHooks(ctx, plugins, bifrostCtx, true)
 		}
 	}
+}
+
+func runTransportPostHooks(ctx *fasthttp.RequestCtx, plugins []schemas.HTTPTransportPlugin, bifrostCtx *schemas.BifrostContext, applyResponse bool) error {
+	req := schemas.AcquireHTTPRequest()
+	defer schemas.ReleaseHTTPRequest(req)
+	fasthttpToHTTPRequest(ctx, req)
+
+	httpResp := schemas.AcquireHTTPResponse()
+	defer schemas.ReleaseHTTPResponse(httpResp)
+	fasthttpResponseToHTTPResponse(ctx, httpResp)
+
+	for i := len(plugins) - 1; i >= 0; i-- {
+		plugin := plugins[i]
+		if err := plugin.HTTPTransportPostHook(bifrostCtx, req, httpResp); err != nil {
+			logger.Warn("error in HTTPTransportPostHook for plugin %s: %s", plugin.GetName(), err.Error())
+			if applyResponse {
+				applyHTTPResponseToCtx(ctx, httpResp)
+			}
+			return fmt.Errorf("transport post-hook plugin %s: %w", plugin.GetName(), err)
+		}
+	}
+
+	if applyResponse {
+		applyHTTPResponseToCtx(ctx, httpResp)
+	}
+	return nil
+}
+
+func runTransportPostHooksCaptured(capturedReq *schemas.HTTPRequest, capturedResp *schemas.HTTPResponse, plugins []schemas.HTTPTransportPlugin, bifrostCtx *schemas.BifrostContext) error {
+	for i := len(plugins) - 1; i >= 0; i-- {
+		plugin := plugins[i]
+		if err := plugin.HTTPTransportPostHook(bifrostCtx, capturedReq, capturedResp); err != nil {
+			logger.Warn("error in HTTPTransportPostHook for plugin %s: %s", plugin.GetName(), err.Error())
+			return fmt.Errorf("transport post-hook plugin %s: %w", plugin.GetName(), err)
+		}
+	}
+	return nil
 }
 
 // getBifrostContextFromFastHTTP gets or creates a BifrostContext from fasthttp context.

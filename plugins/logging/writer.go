@@ -309,6 +309,26 @@ func buildCompleteLogEntryFromPending(pending *PendingLogData) *logstore.Log {
 	return entry
 }
 
+// applyModelAlias stores the resolved model on the log entry and keeps the original
+// requested model separately when the provider actually executed a different model.
+func applyModelAlias(entry *logstore.Log, requestedModel, resolvedModel string) {
+	if entry == nil {
+		return
+	}
+	if resolvedModel == "" {
+		resolvedModel = requestedModel
+	}
+	if resolvedModel != "" {
+		entry.Model = resolvedModel
+	}
+	if requestedModel != "" && resolvedModel != "" && requestedModel != resolvedModel {
+		alias := requestedModel
+		entry.Alias = &alias
+	} else {
+		entry.Alias = nil
+	}
+}
+
 // applyOutputFieldsToEntry sets common output fields on a log entry.
 func applyOutputFieldsToEntry(
 	entry *logstore.Log,

@@ -2072,7 +2072,7 @@ func ResolveFrameworkPricingConfig(
 		if fileConfig.Pricing.PricingURL != nil {
 			filePricingURL = fileConfig.Pricing.PricingURL
 		}
-		if fileConfig.Pricing.PricingSyncInterval != nil && *fileConfig.Pricing.PricingSyncInterval > 0 {
+		if fileConfig.Pricing.PricingSyncInterval != nil && *fileConfig.Pricing.PricingSyncInterval >= 0 {
 			secs := int64((*fileConfig.Pricing.PricingSyncInterval).Seconds())
 			fileSyncSeconds = &secs
 		}
@@ -2097,7 +2097,7 @@ func ResolveFrameworkPricingConfig(
 		} else {
 			needsDBUpdate = true
 		}
-		if dbConfig.PricingSyncInterval != nil && *dbConfig.PricingSyncInterval > 0 {
+		if dbConfig.PricingSyncInterval != nil && *dbConfig.PricingSyncInterval >= 0 {
 			resolvedSyncSeconds = dbConfig.PricingSyncInterval
 		} else {
 			needsDBUpdate = true
@@ -3316,7 +3316,48 @@ func (c *Config) UpdateMCPClient(ctx context.Context, id string, updatedConfig *
 	c.MCPConfig.ClientConfigs[configIndex].ToolPricing = updatedConfig.ToolPricing
 	c.MCPConfig.ClientConfigs[configIndex].IsPingAvailable = updatedConfig.IsPingAvailable
 	c.MCPConfig.ClientConfigs[configIndex].ToolSyncInterval = updatedConfig.ToolSyncInterval
+	if updatedConfig.DiscoveredTools != nil {
+		c.MCPConfig.ClientConfigs[configIndex].DiscoveredTools = cloneMCPDiscoveredTools(updatedConfig.DiscoveredTools)
+	}
+	if updatedConfig.DiscoveredToolNameMapping != nil {
+		c.MCPConfig.ClientConfigs[configIndex].DiscoveredToolNameMapping = maps.Clone(updatedConfig.DiscoveredToolNameMapping)
+	}
 	return nil
+}
+
+func cloneMCPDiscoveredTools(in map[string]schemas.ChatTool) map[string]schemas.ChatTool {
+	if len(in) == 0 {
+		if in == nil {
+			return nil
+		}
+		return map[string]schemas.ChatTool{}
+	}
+	out := make(map[string]schemas.ChatTool, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+// UpdateMCPClientDiscoveredTools refreshes the last discovered tools snapshot in memory.
+func (c *Config) UpdateMCPClientDiscoveredTools(id string, tools map[string]schemas.ChatTool, toolNameMapping map[string]string) error {
+	c.muMCP.Lock()
+	defer c.muMCP.Unlock()
+
+	if c.MCPConfig == nil {
+		return fmt.Errorf("no MCP config found")
+	}
+
+	for _, clientConfig := range c.MCPConfig.ClientConfigs {
+		if clientConfig.ID != id {
+			continue
+		}
+		clientConfig.DiscoveredTools = cloneMCPDiscoveredTools(tools)
+		clientConfig.DiscoveredToolNameMapping = maps.Clone(toolNameMapping)
+		return nil
+	}
+
+	return configstore.ErrNotFound
 }
 
 // RemoveMCPClient removes an MCP client from the configuration.

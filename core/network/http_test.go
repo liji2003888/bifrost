@@ -54,6 +54,20 @@ func TestStaleConnectionRetryIfErr(t *testing.T) {
 			wantRetry: true,
 		},
 		{
+			name:      "retries on fasthttp connection closed error",
+			err:       fasthttp.ErrConnectionClosed,
+			attempts:  1,
+			wantReset: true,
+			wantRetry: true,
+		},
+		{
+			name:      "retries on closed-before-first-byte message",
+			err:       fmt.Errorf("the server closed connection before returning the first response byte. Make sure the server returns 'Connection: close' response header before closing the connection"),
+			attempts:  1,
+			wantReset: true,
+			wantRetry: true,
+		},
+		{
 			name:      "does not retry on second attempt",
 			err:       io.EOF,
 			attempts:  2,
@@ -411,7 +425,7 @@ func TestMaxConnWaitTimeoutAlignedWithReadTimeout(t *testing.T) {
 	defer server.Close()
 
 	client := &fasthttp.Client{
-		MaxConnsPerHost:    1,              // Only 1 connection allowed — second request must wait
+		MaxConnsPerHost:    1,               // Only 1 connection allowed — second request must wait
 		MaxConnWaitTimeout: 2 * time.Second, // Wait up to 2s for a free connection slot
 		ReadTimeout:        5 * time.Second,
 		WriteTimeout:       5 * time.Second,

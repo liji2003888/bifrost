@@ -18,7 +18,6 @@ export default function LoggingView() {
 	const config = bifrostConfig?.client_config;
 	const [updateCoreConfig, { isLoading }] = useUpdateCoreConfigMutation();
 	const [localConfig, setLocalConfig] = useState<CoreConfig>(DefaultCoreConfig);
-	const [needsRestart, setNeedsRestart] = useState<boolean>(false);
 	const [loggingHeadersText, setLoggingHeadersText] = useState<string>("");
 
 	useEffect(() => {
@@ -41,9 +40,6 @@ export default function LoggingView() {
 
 	const handleConfigChange = useCallback((field: keyof CoreConfig, value: boolean | number | string[]) => {
 		setLocalConfig((prev) => ({ ...prev, [field]: value }));
-		if (field === "enable_logging" || field === "disable_content_logging") {
-			setNeedsRestart(true);
-		}
 	}, []);
 
 	const handleLoggingHeadersChange = useCallback((value: string) => {
@@ -79,15 +75,17 @@ export default function LoggingView() {
 			</div>
 
 			<div className="space-y-4">
-				{/* Enable Logs */}
+				{/* Enable Full Logs */}
 				<div>
 					<div className="flex items-center justify-between space-x-2 rounded-lg border p-4">
 						<div className="space-y-0.5">
 							<label htmlFor="enable-logging" className="text-sm font-medium">
-								Enable Logs
+								Enable Full Content Logs
 							</label>
 							<p className="text-muted-foreground text-sm">
-								Enable logging of requests and responses to a SQL database. This can add 40-60mb of overhead to the system memory.
+								When enabled, request and response bodies are persisted to the logs store. When disabled, Bifrost still records operational
+								log metadata such as status, latency, routing context, headers, tokens, and cost for observability and cluster-safe
+								analytics.
 								{!bifrostConfig?.is_logs_connected && (
 									<span className="text-destructive font-medium"> Requires logs store to be configured and enabled in config.json.</span>
 								)}
@@ -105,7 +103,6 @@ export default function LoggingView() {
 							}}
 						/>
 					</div>
-					{needsRestart && <RestartWarning />}
 				</div>
 
 				{/* Disable Content Logging - Only show when logging is enabled */}
@@ -128,12 +125,11 @@ export default function LoggingView() {
 								onCheckedChange={(checked) => handleConfigChange("disable_content_logging", checked)}
 							/>
 						</div>
-						{needsRestart && <RestartWarning />}
 					</div>
 				)}
 
 				{/* Log Retention Days */}
-				{localConfig.enable_logging && bifrostConfig?.is_logs_connected && (
+				{bifrostConfig?.is_logs_connected && (
 					<div className="flex items-center justify-between space-x-2 rounded-lg border p-4">
 						<div className="space-y-0.5">
 							<Label htmlFor="log-retention-days" className="text-sm font-medium">
@@ -176,7 +172,7 @@ export default function LoggingView() {
 				</div>
 
 				{/* Logging Headers */}
-				{localConfig.enable_logging && bifrostConfig?.is_logs_connected && (
+				{bifrostConfig?.is_logs_connected && (
 					<div className="space-y-2 rounded-lg border p-4">
 						<label htmlFor="logging-headers" className="text-sm font-medium">
 							Logging Headers
@@ -206,7 +202,3 @@ export default function LoggingView() {
 		</div>
 	);
 }
-
-const RestartWarning = () => {
-	return <div className="text-muted-foreground mt-2 pl-4 text-xs font-semibold">Need to restart Bifrost to apply changes.</div>;
-};

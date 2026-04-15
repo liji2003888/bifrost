@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
@@ -25,6 +26,8 @@ func setupRDBTestStore(t *testing.T) *RDBConfigStore {
 	err = db.AutoMigrate(
 		&tables.TableProvider{},
 		&tables.TableKey{},
+		&tables.TableModelPricing{},
+		&tables.TableModelParameters{},
 		&tables.TableBudget{},
 		&tables.TableRateLimit{},
 		&tables.TableVirtualKey{},
@@ -35,6 +38,7 @@ func setupRDBTestStore(t *testing.T) *RDBConfigStore {
 		&tables.TableClientConfig{},
 		&tables.TablePlugin{},
 		&tables.TableMCPClient{},
+		&tables.TableMCPHostedTool{},
 		&tables.TableVirtualKeyMCPConfig{},
 		&tables.TableFolder{},
 		&tables.TablePrompt{},
@@ -53,6 +57,10 @@ func setupRDBTestStore(t *testing.T) *RDBConfigStore {
 		db:     db,
 		logger: nil,
 	}
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
 
 // =============================================================================
@@ -199,6 +207,132 @@ func TestUpdateProvidersConfig_MultipleKeys(t *testing.T) {
 	assert.Len(t, result, 2)
 	assert.Len(t, result["openai"].Keys, 2)
 	assert.Len(t, result["anthropic"].Keys, 1)
+}
+
+func TestMCPClientDiscoveredToolsPersistAcrossCreateAndUpdate(t *testing.T) {
+	store := setupRDBTestStore(t)
+	ctx := context.Background()
+
+	description := "Search enterprise docs"
+	initialTools := map[string]schemas.ChatTool{
+		"docs_client-search": {
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "docs_client-search",
+				Description: &description,
+			},
+		},
+	}
+	initialMapping := map[string]string{"docs_client_search": "docs-client-search"}
+
+	err := store.CreateMCPClientConfig(ctx, &schemas.MCPClientConfig{
+		ID:                        "mcp-client-1",
+		Name:                      "docs_client",
+		ConnectionType:            schemas.MCPConnectionTypeHTTP,
+		ConnectionString:          schemas.NewEnvVar("http://mcp.internal"),
+		AuthType:                  schemas.MCPAuthTypeNone,
+		ToolsToExecute:            []string{"*"},
+		ToolsToAutoExecute:        []string{},
+		IsPingAvailable:           true,
+		ToolSyncInterval:          5 * time.Minute,
+		DiscoveredTools:           initialTools,
+		DiscoveredToolNameMapping: initialMapping,
+	})
+	require.NoError(t, err)
+
+	cfg, err := store.GetMCPConfig(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Len(t, cfg.ClientConfigs, 1)
+	require.Len(t, cfg.ClientConfigs[0].DiscoveredTools, 1)
+	assert.Equal(t, "docs_client-search", cfg.ClientConfigs[0].DiscoveredTools["docs_client-search"].Function.Name)
+	assert.Equal(t, "docs-client-search", cfg.ClientConfigs[0].DiscoveredToolNameMapping["docs_client_search"])
+
+	row, err := store.GetMCPClientByID(ctx, "mcp-client-1")
+	require.NoError(t, err)
+	require.NotNil(t, row)
+
+	updatedDescription := "List enterprise docs"
+	row.DiscoveredTools = map[string]schemas.ChatTool{
+		"docs_client-list": {
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "docs_client-list",
+				Description: &updatedDescription,
+			},
+		},
+	}
+	row.ToolNameMapping = map[string]string{"docs_client_list": "docs-client-list"}
+
+	err = store.UpdateMCPClientConfig(ctx, "mcp-client-1", row)
+	require.NoError(t, err)
+
+	cfg, err = store.GetMCPConfig(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Len(t, cfg.ClientConfigs, 1)
+	require.Len(t, cfg.ClientConfigs[0].DiscoveredTools, 1)
+	assert.Equal(t, "docs_client-list", cfg.ClientConfigs[0].DiscoveredTools["docs_client-list"].Function.Name)
+	assert.Equal(t, "docs-client-list", cfg.ClientConfigs[0].DiscoveredToolNameMapping["docs_client_list"])
+}
+
+func TestUpsertModelPrices_UpdatesExistingRowAtomically(t *testing.T) {
+	store := setupRDBTestStore(t)
+	ctx := context.Background()
+
+	initial := &tables.TableModelPricing{
+		Model:              "gpt-4.1",
+		Provider:           "openai",
+		Mode:               "chat",
+		InputCostPerToken:  0.1,
+		OutputCostPerToken: 0.2,
+		ContextLength:      ptr(128000),
+		MaxInputTokens:     ptr(128000),
+		MaxOutputTokens:    ptr(4096),
+	}
+	require.NoError(t, store.UpsertModelPrices(ctx, initial))
+
+	updated := &tables.TableModelPricing{
+		Model:              "gpt-4.1",
+		Provider:           "openai",
+		Mode:               "chat",
+		InputCostPerToken:  0.3,
+		OutputCostPerToken: 0.4,
+		ContextLength:      ptr(272000),
+		MaxInputTokens:     ptr(272000),
+		MaxOutputTokens:    ptr(8192),
+	}
+	require.NoError(t, store.UpsertModelPrices(ctx, updated))
+
+	rows, err := store.GetModelPrices(ctx)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, 0.3, rows[0].InputCostPerToken)
+	assert.Equal(t, 0.4, rows[0].OutputCostPerToken)
+	require.NotNil(t, rows[0].ContextLength)
+	assert.Equal(t, 272000, *rows[0].ContextLength)
+}
+
+func TestUpsertModelParameters_UpdatesExistingRowAtomically(t *testing.T) {
+	store := setupRDBTestStore(t)
+	ctx := context.Background()
+
+	initial := &tables.TableModelParameters{
+		Model: "gpt-4.1",
+		Data:  `{"supports_tools":true}`,
+	}
+	require.NoError(t, store.UpsertModelParameters(ctx, initial))
+
+	updated := &tables.TableModelParameters{
+		Model: "gpt-4.1",
+		Data:  `{"supports_tools":true,"supports_responses":true}`,
+	}
+	require.NoError(t, store.UpsertModelParameters(ctx, updated))
+
+	params, err := store.GetModelParameters(ctx, "gpt-4.1")
+	require.NoError(t, err)
+	require.NotNil(t, params)
+	assert.JSONEq(t, `{"supports_tools":true,"supports_responses":true}`, params.Data)
 }
 
 // =============================================================================
@@ -1317,4 +1451,98 @@ func TestDeletePromptSession(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, versions, 2)
 	})
+}
+
+func TestMCPHostedToolPersistsQueryParamsAndResponseFormatting(t *testing.T) {
+	store := setupRDBTestStore(t)
+	ctx := context.Background()
+
+	description := "Search internal catalog"
+	bodyTemplate := `{"query":"{{args.query}}"}`
+	responseJSONPath := "data.summary"
+	responseTemplate := "Summary: {{response.data.summary}}"
+	responseExamples := []any{
+		map[string]any{"summary": "First example"},
+		map[string]any{"summary": "Second example"},
+	}
+	timeoutSeconds := 12
+	maxResponseBodyBytes := 4096
+	tool := &tables.TableMCPHostedTool{
+		ToolID:      "tool-1",
+		Name:        "search_catalog",
+		Description: &description,
+		Method:      "POST",
+		URL:         "https://api.internal/search",
+		Headers: map[string]string{
+			"Authorization": "{{req.header.authorization}}",
+		},
+		QueryParams: map[string]string{
+			"tenant_id": "{{args.tenant_id}}",
+		},
+		AuthProfile: &tables.MCPHostedToolAuthProfile{
+			Mode: tables.MCPHostedToolAuthModeHeaderPassthrough,
+			HeaderMappings: map[string]string{
+				"X-Tenant-ID": "x-tenant-id",
+			},
+		},
+		ExecutionProfile: &tables.MCPHostedToolExecutionProfile{
+			TimeoutSeconds:       &timeoutSeconds,
+			MaxResponseBodyBytes: &maxResponseBodyBytes,
+		},
+		BodyTemplate:     &bodyTemplate,
+		ResponseExamples: responseExamples,
+		ResponseJSONPath: &responseJSONPath,
+		ResponseTemplate: &responseTemplate,
+		ToolSchema: schemas.ChatTool{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name:        "search_catalog",
+				Description: &description,
+				Parameters: &schemas.ToolFunctionParameters{
+					Type:     "object",
+					Required: []string{"query", "tenant_id"},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, store.CreateMCPHostedTool(ctx, tool))
+
+	persisted, err := store.GetMCPHostedToolByID(ctx, "tool-1")
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	assert.Equal(t, "{{args.tenant_id}}", persisted.QueryParams["tenant_id"])
+	assert.Equal(t, responseJSONPath, *persisted.ResponseJSONPath)
+	assert.Equal(t, responseTemplate, *persisted.ResponseTemplate)
+	require.Len(t, persisted.ResponseExamples, 2)
+	firstExample, ok := persisted.ResponseExamples[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "First example", firstExample["summary"])
+	require.NotNil(t, persisted.AuthProfile)
+	assert.Equal(t, tables.MCPHostedToolAuthModeHeaderPassthrough, persisted.AuthProfile.Mode)
+	assert.Equal(t, "x-tenant-id", persisted.AuthProfile.HeaderMappings["X-Tenant-ID"])
+	require.NotNil(t, persisted.ExecutionProfile)
+	require.NotNil(t, persisted.ExecutionProfile.TimeoutSeconds)
+	assert.Equal(t, timeoutSeconds, *persisted.ExecutionProfile.TimeoutSeconds)
+	require.NotNil(t, persisted.ExecutionProfile.MaxResponseBodyBytes)
+	assert.Equal(t, maxResponseBodyBytes, *persisted.ExecutionProfile.MaxResponseBodyBytes)
+
+	updatedTemplate := "Result: {{response.data.summary}}"
+	persisted.QueryParams["tenant_id"] = "{{args.customer_id}}"
+	persisted.ResponseTemplate = &updatedTemplate
+	persisted.ResponseExamples = []any{map[string]any{"summary": "Updated example"}}
+	persisted.AuthProfile = &tables.MCPHostedToolAuthProfile{Mode: tables.MCPHostedToolAuthModeBearerPassthrough}
+	require.NoError(t, store.UpdateMCPHostedTool(ctx, persisted))
+
+	updated, err := store.GetMCPHostedToolByID(ctx, "tool-1")
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	assert.Equal(t, "{{args.customer_id}}", updated.QueryParams["tenant_id"])
+	assert.Equal(t, updatedTemplate, *updated.ResponseTemplate)
+	require.Len(t, updated.ResponseExamples, 1)
+	updatedExample, ok := updated.ResponseExamples[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "Updated example", updatedExample["summary"])
+	require.NotNil(t, updated.AuthProfile)
+	assert.Equal(t, tables.MCPHostedToolAuthModeBearerPassthrough, updated.AuthProfile.Mode)
 }

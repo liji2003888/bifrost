@@ -981,6 +981,10 @@ func (m *MockConfigStore) UpsertPlugin(ctx context.Context, plugin *tables.Table
 }
 
 // OAuth config
+func (m *MockConfigStore) GetOauthConfigsPaginated(ctx context.Context, params configstore.OAuthConfigsQueryParams) ([]tables.TableOauthConfig, int64, error) {
+	return nil, 0, nil
+}
+
 func (m *MockConfigStore) GetOauthConfigByID(ctx context.Context, id string) (*tables.TableOauthConfig, error) {
 	return nil, nil
 }
@@ -15964,20 +15968,38 @@ func TestResolveFrameworkPricingConfig(t *testing.T) {
 		require.Equal(t, modelcatalog.DefaultPricingSyncInterval, *normalizedModelCatalog.PricingSyncInterval)
 	})
 
-	t.Run("invalid db interval falls back and requests db update", func(t *testing.T) {
-		invalidDBSync := int64(0)
+	t.Run("explicit zero db interval disables remote pricing sync without fallback", func(t *testing.T) {
+		disabledDBSync := int64(0)
 		dbConfig := &tables.TableFrameworkConfig{
 			ID:                  5,
 			PricingURL:          &dbURL,
-			PricingSyncInterval: &invalidDBSync,
+			PricingSyncInterval: &disabledDBSync,
 		}
 
 		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(dbConfig, nil)
-		require.True(t, needsDBUpdate)
+		require.False(t, needsDBUpdate)
 		require.Equal(t, dbURL, *normalizedTable.PricingURL)
-		require.Equal(t, defaultSyncSeconds, *normalizedTable.PricingSyncInterval)
+		require.Equal(t, disabledDBSync, *normalizedTable.PricingSyncInterval)
 		require.Equal(t, dbURL, *normalizedModelCatalog.PricingURL)
-		require.Equal(t, modelcatalog.DefaultPricingSyncInterval, *normalizedModelCatalog.PricingSyncInterval)
+		require.Equal(t, time.Duration(0), *normalizedModelCatalog.PricingSyncInterval)
+	})
+
+	t.Run("explicit empty pricing url and zero interval from file disable remote pricing sync", func(t *testing.T) {
+		disabledURL := ""
+		disabledSync := time.Duration(0)
+		fileConfig := &framework.FrameworkConfig{
+			Pricing: &modelcatalog.Config{
+				PricingURL:          &disabledURL,
+				PricingSyncInterval: &disabledSync,
+			},
+		}
+
+		normalizedTable, normalizedModelCatalog, needsDBUpdate := ResolveFrameworkPricingConfig(nil, fileConfig)
+		require.False(t, needsDBUpdate)
+		require.Equal(t, disabledURL, *normalizedTable.PricingURL)
+		require.Equal(t, int64(0), *normalizedTable.PricingSyncInterval)
+		require.Equal(t, disabledURL, *normalizedModelCatalog.PricingURL)
+		require.Equal(t, time.Duration(0), *normalizedModelCatalog.PricingSyncInterval)
 	})
 }
 

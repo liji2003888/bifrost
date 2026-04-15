@@ -176,9 +176,11 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 	}
 	s.Config.SetPluginOrderInfo(telemetry.PluginName, builtinPlacement, schemas.Ptr(1))
 
-	// 2. Logging (if enabled)
-	if (s.Config.ClientConfig.EnableLogging == nil || *s.Config.ClientConfig.EnableLogging) && s.Config.LogsStore != nil {
+	// 2. Logging (always register when a logs store exists; runtime config controls
+	// whether full request/response bodies are captured or only operational metadata)
+	if s.Config.LogsStore != nil {
 		config := &logging.Config{
+			EnableLogging:         s.Config.ClientConfig.EnableLogging,
 			DisableContentLogging: &s.Config.ClientConfig.DisableContentLogging,
 			LoggingHeaders:        &s.Config.ClientConfig.LoggingHeaders,
 		}

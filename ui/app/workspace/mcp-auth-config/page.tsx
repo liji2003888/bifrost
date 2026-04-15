@@ -1,4 +1,4 @@
-import MCPAuthConfigView from "@enterprise/components/mcp-auth-config/mcpAuthConfigView";
+import MCPAuthConfigView from "./views/mcpAuthConfigView";
 
 export default function MCPAuthConfigPage() {
 	return (

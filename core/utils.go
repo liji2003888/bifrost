@@ -340,10 +340,24 @@ func IsFinalChunk(ctx *schemas.BifrostContext) bool {
 func GetResponseFields(result *schemas.BifrostResponse, err *schemas.BifrostError) (requestType schemas.RequestType, provider schemas.ModelProvider, model string) {
 	if result != nil {
 		extraFields := result.GetExtraFields()
-		return extraFields.RequestType, extraFields.Provider, extraFields.ModelRequested
+		model = extraFields.ResolvedModelUsed
+		if model == "" {
+			model = extraFields.OriginalModelRequested
+		}
+		if model == "" {
+			model = extraFields.ModelRequested
+		}
+		return extraFields.RequestType, extraFields.Provider, model
 	}
 	if err != nil {
-		return err.ExtraFields.RequestType, err.ExtraFields.Provider, err.ExtraFields.ModelRequested
+		model = err.ExtraFields.ResolvedModelUsed
+		if model == "" {
+			model = err.ExtraFields.OriginalModelRequested
+		}
+		if model == "" {
+			model = err.ExtraFields.ModelRequested
+		}
+		return err.ExtraFields.RequestType, err.ExtraFields.Provider, model
 	}
 	return
 }

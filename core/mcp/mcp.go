@@ -38,22 +38,28 @@ const (
 // It provides a bridge between Bifrost and various MCP servers, supporting
 // both local tool hosting and external MCP server connections.
 type MCPManager struct {
-	ctx                  context.Context
-	logger               schemas.Logger                     // Logger instance for this manager
-	oauth2Provider       schemas.OAuth2Provider             // Provider for OAuth2 functionality
-	toolsManager         *ToolsManager                      // Handler for MCP tools
-	server               *server.MCPServer                  // Local MCP server instance for hosting tools (STDIO-based)
-	clientMap            map[string]*schemas.MCPClientState // Map of MCP client names to their configurations
-	mu                   sync.RWMutex                       // Read-write mutex for thread-safe operations
-	serverRunning        bool                               // Track whether local MCP server is running
-	healthMonitorManager *HealthMonitorManager              // Manager for client health monitors
-	toolSyncManager      *ToolSyncManager                   // Manager for periodic tool synchronization
-	reconnectingClients  sync.Map                           // Tracks in-flight reconnect attempts per client ID (map[string]bool)
+	ctx                    context.Context
+	logger                 schemas.Logger         // Logger instance for this manager
+	oauth2Provider         schemas.OAuth2Provider // Provider for OAuth2 functionality
+	persistDiscoveredTools func(context.Context, string, map[string]schemas.ChatTool, map[string]string) error
+	toolsManager           *ToolsManager                      // Handler for MCP tools
+	server                 *server.MCPServer                  // Local MCP server instance for hosting tools (STDIO-based)
+	clientMap              map[string]*schemas.MCPClientState // Map of MCP client names to their configurations
+	mu                     sync.RWMutex                       // Read-write mutex for thread-safe operations
+	serverRunning          bool                               // Track whether local MCP server is running
+	healthMonitorManager   *HealthMonitorManager              // Manager for client health monitors
+	toolSyncManager        *ToolSyncManager                   // Manager for periodic tool synchronization
+	reconnectingClients    sync.Map                           // Tracks in-flight reconnect attempts per client ID (map[string]bool)
 }
 
 // MCPToolFunction is a generic function type for handling tool calls with typed arguments.
 // T represents the expected argument structure for the tool.
 type MCPToolFunction[T any] func(args T) (string, error)
+
+// MCPToolContextFunction is a generic function type for handling tool calls with
+// access to the execution context. This is used for hosted tools that need to
+// resolve federated auth headers or other request-scoped values at execution time.
+type MCPToolContextFunction[T any] func(ctx context.Context, args T) (string, error)
 
 // ============================================================================
 // CONSTRUCTOR AND INITIALIZATION
@@ -85,12 +91,13 @@ func NewMCPManager(ctx context.Context, config schemas.MCPConfig, oauth2Provider
 	}
 	// Creating new instance
 	manager := &MCPManager{
-		ctx:                  ctx,
-		logger:               logger,
-		clientMap:            make(map[string]*schemas.MCPClientState),
-		healthMonitorManager: NewHealthMonitorManager(),
-		toolSyncManager:      NewToolSyncManager(config.ToolSyncInterval),
-		oauth2Provider:       oauth2Provider,
+		ctx:                    ctx,
+		logger:                 logger,
+		clientMap:              make(map[string]*schemas.MCPClientState),
+		healthMonitorManager:   NewHealthMonitorManager(),
+		toolSyncManager:        NewToolSyncManager(config.ToolSyncInterval),
+		oauth2Provider:         oauth2Provider,
+		persistDiscoveredTools: config.PersistDiscoveredTools,
 	}
 	// Convert plugin pipeline provider functions to the interface expected by ToolsManager
 	var pluginPipelineProvider func() PluginPipeline

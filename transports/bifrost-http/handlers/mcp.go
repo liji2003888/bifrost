@@ -5,14 +5,21 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fasthttp/router"
 	"github.com/google/uuid"
+	mcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
+	mcpproto "github.com/mark3labs/mcp-go/mcp"
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/mcp"
 	"github.com/maximhq/bifrost/core/schemas"
@@ -27,6 +34,10 @@ type MCPManager interface {
 	RemoveMCPClient(ctx context.Context, id string) error
 	UpdateMCPClient(ctx context.Context, id string, updatedConfig *schemas.MCPClientConfig) error
 	ReconnectMCPClient(ctx context.Context, id string) error
+	AddMCPHostedTool(ctx context.Context, tool *configstoreTables.TableMCPHostedTool) error
+	UpdateMCPHostedTool(ctx context.Context, id string, tool *configstoreTables.TableMCPHostedTool) error
+	RemoveMCPHostedTool(ctx context.Context, id string) error
+	PreviewMCPHostedTool(ctx context.Context, id string, args map[string]any) (*configstoreTables.MCPHostedToolExecutionResult, error)
 }
 
 // MCPHandler manages HTTP requests for MCP tool operations
@@ -52,18 +63,59 @@ func NewMCPHandler(mcpManager MCPManager, client *bifrost.Bifrost, store *lib.Co
 // RegisterRoutes registers all MCP-related routes
 func (h *MCPHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
 	r.GET("/api/mcp/clients", lib.ChainMiddlewares(h.getMCPClients, middlewares...))
+	r.GET("/api/mcp/hosted-tools", lib.ChainMiddlewares(h.getMCPHostedTools, middlewares...))
 	r.POST("/api/mcp/client", lib.ChainMiddlewares(h.addMCPClient, middlewares...))
+	r.POST("/api/mcp/client/validate", lib.ChainMiddlewares(h.validateMCPClient, middlewares...))
+	r.POST("/api/mcp/hosted-tool", lib.ChainMiddlewares(h.addMCPHostedTool, middlewares...))
+	r.POST("/api/mcp/hosted-tool/{id}/preview", lib.ChainMiddlewares(h.previewMCPHostedTool, middlewares...))
+	r.PUT("/api/mcp/hosted-tool/{id}", lib.ChainMiddlewares(h.updateMCPHostedTool, middlewares...))
 	r.PUT("/api/mcp/client/{id}", lib.ChainMiddlewares(h.updateMCPClient, middlewares...))
 	r.DELETE("/api/mcp/client/{id}", lib.ChainMiddlewares(h.deleteMCPClient, middlewares...))
+	r.DELETE("/api/mcp/hosted-tool/{id}", lib.ChainMiddlewares(h.deleteMCPHostedTool, middlewares...))
 	r.POST("/api/mcp/client/{id}/reconnect", lib.ChainMiddlewares(h.reconnectMCPClient, middlewares...))
 	r.POST("/api/mcp/client/{id}/complete-oauth", lib.ChainMiddlewares(h.completeMCPClientOAuth, middlewares...))
 }
 
 // MCPClientResponse represents the response structure for MCP clients
 type MCPClientResponse struct {
-	Config *schemas.MCPClientConfig   `json:"config"`
-	Tools  []schemas.ChatToolFunction `json:"tools"`
-	State  schemas.MCPConnectionState `json:"state"`
+	Config             *schemas.MCPClientConfig   `json:"config"`
+	Tools              []schemas.ChatToolFunction `json:"tools"`
+	State              schemas.MCPConnectionState `json:"state"`
+	ToolSnapshotSource string                     `json:"tool_snapshot_source,omitempty"`
+	ToolNameMapping    map[string]string          `json:"tool_name_mapping,omitempty"`
+}
+
+func sortedToolFunctionsFromMap(clientName string, toolMap map[string]schemas.ChatTool) []schemas.ChatToolFunction {
+	if len(toolMap) == 0 {
+		return []schemas.ChatToolFunction{}
+	}
+	tools := make([]schemas.ChatToolFunction, 0, len(toolMap))
+	for _, tool := range toolMap {
+		if tool.Function != nil {
+			cloned := *tool.Function
+			cloned.Name = strings.TrimPrefix(cloned.Name, clientName+"-")
+			tools = append(tools, cloned)
+		}
+	}
+	sort.Slice(tools, func(i, j int) bool {
+		return tools[i].Name < tools[j].Name
+	})
+	return tools
+}
+
+func resolveMCPToolSnapshot(clientConfig *schemas.MCPClientConfig, liveTools []schemas.ChatToolFunction) ([]schemas.ChatToolFunction, string) {
+	if len(liveTools) > 0 {
+		sortedTools := make([]schemas.ChatToolFunction, len(liveTools))
+		copy(sortedTools, liveTools)
+		sort.Slice(sortedTools, func(i, j int) bool {
+			return sortedTools[i].Name < sortedTools[j].Name
+		})
+		return sortedTools, "live"
+	}
+	if clientConfig != nil && len(clientConfig.DiscoveredTools) > 0 {
+		return sortedToolFunctionsFromMap(clientConfig.Name, clientConfig.DiscoveredTools), "persisted"
+	}
+	return []schemas.ChatToolFunction{}, "none"
 }
 
 // getMCPClients handles GET /api/mcp/clients - Get all MCP clients
@@ -114,24 +166,24 @@ func (h *MCPHandler) getMCPClients(ctx *fasthttp.RequestCtx) {
 		// Redact sensitive fields before sending to UI
 		redactedConfig := h.store.RedactMCPClientConfig(configClient)
 		if connectedClient, exists := connectedClientsMap[configClient.ID]; exists {
-			// Sort tools alphabetically by name
-			sortedTools := make([]schemas.ChatToolFunction, len(connectedClient.Tools))
-			copy(sortedTools, connectedClient.Tools)
-			sort.Slice(sortedTools, func(i, j int) bool {
-				return sortedTools[i].Name < sortedTools[j].Name
-			})
+			sortedTools, snapshotSource := resolveMCPToolSnapshot(configClient, connectedClient.Tools)
 
 			clients = append(clients, MCPClientResponse{
-				Config: redactedConfig,
-				Tools:  sortedTools,
-				State:  connectedClient.State,
+				Config:             redactedConfig,
+				Tools:              sortedTools,
+				State:              connectedClient.State,
+				ToolSnapshotSource: snapshotSource,
+				ToolNameMapping:    maps.Clone(configClient.DiscoveredToolNameMapping),
 			})
 		} else {
 			// Client is in config but not connected, mark as errored
+			tools, snapshotSource := resolveMCPToolSnapshot(configClient, nil)
 			clients = append(clients, MCPClientResponse{
-				Config: redactedConfig,
-				Tools:  []schemas.ChatToolFunction{}, // No tools available since connection failed
-				State:  schemas.MCPConnectionStateError,
+				Config:             redactedConfig,
+				Tools:              tools,
+				State:              schemas.MCPConnectionStateError,
+				ToolSnapshotSource: snapshotSource,
+				ToolNameMapping:    maps.Clone(configClient.DiscoveredToolNameMapping),
 			})
 		}
 	}
@@ -200,38 +252,41 @@ func (h *MCPHandler) getMCPClientsPaginated(ctx *fasthttp.RequestCtx, limitStr, 
 			isPingAvailable = *dbClient.IsPingAvailable
 		}
 		clientConfig := &schemas.MCPClientConfig{
-			ID:                 dbClient.ClientID,
-			Name:               dbClient.Name,
-			IsCodeModeClient:   dbClient.IsCodeModeClient,
-			ConnectionType:     schemas.MCPConnectionType(dbClient.ConnectionType),
-			ConnectionString:   dbClient.ConnectionString,
-			StdioConfig:        dbClient.StdioConfig,
-			AuthType:           schemas.MCPAuthType(dbClient.AuthType),
-			OauthConfigID:      dbClient.OauthConfigID,
-			ToolsToExecute:     dbClient.ToolsToExecute,
-			ToolsToAutoExecute: dbClient.ToolsToAutoExecute,
-			Headers:            dbClient.Headers,
-			IsPingAvailable:    isPingAvailable,
-			ToolSyncInterval:   time.Duration(dbClient.ToolSyncInterval) * time.Minute,
-			ToolPricing:        dbClient.ToolPricing,
+			ID:                        dbClient.ClientID,
+			Name:                      dbClient.Name,
+			IsCodeModeClient:          dbClient.IsCodeModeClient,
+			ConnectionType:            schemas.MCPConnectionType(dbClient.ConnectionType),
+			ConnectionString:          dbClient.ConnectionString,
+			StdioConfig:               dbClient.StdioConfig,
+			AuthType:                  schemas.MCPAuthType(dbClient.AuthType),
+			OauthConfigID:             dbClient.OauthConfigID,
+			ToolsToExecute:            dbClient.ToolsToExecute,
+			ToolsToAutoExecute:        dbClient.ToolsToAutoExecute,
+			Headers:                   dbClient.Headers,
+			IsPingAvailable:           isPingAvailable,
+			ToolSyncInterval:          time.Duration(dbClient.ToolSyncInterval) * time.Minute,
+			ToolPricing:               dbClient.ToolPricing,
+			DiscoveredTools:           dbClient.DiscoveredTools,
+			DiscoveredToolNameMapping: dbClient.ToolNameMapping,
 		}
 		redactedConfig := h.store.RedactMCPClientConfig(clientConfig)
 		if connectedClient, exists := connectedClientsMap[clientConfig.ID]; exists {
-			sortedTools := make([]schemas.ChatToolFunction, len(connectedClient.Tools))
-			copy(sortedTools, connectedClient.Tools)
-			sort.Slice(sortedTools, func(i, j int) bool {
-				return sortedTools[i].Name < sortedTools[j].Name
-			})
+			sortedTools, snapshotSource := resolveMCPToolSnapshot(clientConfig, connectedClient.Tools)
 			clients = append(clients, MCPClientResponse{
-				Config: redactedConfig,
-				Tools:  sortedTools,
-				State:  connectedClient.State,
+				Config:             redactedConfig,
+				Tools:              sortedTools,
+				State:              connectedClient.State,
+				ToolSnapshotSource: snapshotSource,
+				ToolNameMapping:    maps.Clone(clientConfig.DiscoveredToolNameMapping),
 			})
 		} else {
+			tools, snapshotSource := resolveMCPToolSnapshot(clientConfig, nil)
 			clients = append(clients, MCPClientResponse{
-				Config: redactedConfig,
-				Tools:  []schemas.ChatToolFunction{},
-				State:  schemas.MCPConnectionStateError,
+				Config:             redactedConfig,
+				Tools:              tools,
+				State:              schemas.MCPConnectionStateError,
+				ToolSnapshotSource: snapshotSource,
+				ToolNameMapping:    maps.Clone(clientConfig.DiscoveredToolNameMapping),
 			})
 		}
 	}
@@ -280,6 +335,691 @@ type OAuthConfigRequest struct {
 type MCPClientRequest struct {
 	configstoreTables.TableMCPClient
 	OauthConfig *OAuthConfigRequest `json:"oauth_config,omitempty"`
+}
+
+type MCPClientValidationResponse struct {
+	Status          string   `json:"status"`
+	Message         string   `json:"message"`
+	Reason          string   `json:"reason,omitempty"`
+	DiscoveredTools []string `json:"discovered_tools,omitempty"`
+}
+
+type MCPHostedToolRequest struct {
+	Name             string                                           `json:"name"`
+	Description      *string                                          `json:"description,omitempty"`
+	Method           string                                           `json:"method"`
+	URL              string                                           `json:"url"`
+	Headers          map[string]string                                `json:"headers,omitempty"`
+	QueryParams      map[string]string                                `json:"query_params,omitempty"`
+	AuthProfile      *configstoreTables.MCPHostedToolAuthProfile      `json:"auth_profile,omitempty"`
+	ExecutionProfile *configstoreTables.MCPHostedToolExecutionProfile `json:"execution_profile,omitempty"`
+	BodyTemplate     *string                                          `json:"body_template,omitempty"`
+	ResponseJSONPath *string                                          `json:"response_json_path,omitempty"`
+	ResponseTemplate *string                                          `json:"response_template,omitempty"`
+	ResponseSchema   map[string]any                                   `json:"response_schema,omitempty"`
+	ResponseExamples []any                                            `json:"response_examples,omitempty"`
+	ToolSchema       *schemas.ChatTool                                `json:"tool_schema,omitempty"`
+}
+
+type MCPHostedToolPreviewRequest struct {
+	Args map[string]any `json:"args"`
+}
+
+type MCPHostedToolPreviewResponse struct {
+	Status  string                                          `json:"status"`
+	Preview *configstoreTables.MCPHostedToolExecutionResult `json:"preview"`
+}
+
+func normalizeHostedToolAuthProfile(profile *configstoreTables.MCPHostedToolAuthProfile) *configstoreTables.MCPHostedToolAuthProfile {
+	if profile == nil {
+		return nil
+	}
+	normalized := *profile
+	switch normalized.Mode {
+	case configstoreTables.MCPHostedToolAuthModeNone,
+		configstoreTables.MCPHostedToolAuthModeBearerPassthrough,
+		configstoreTables.MCPHostedToolAuthModeHeaderPassthrough:
+	default:
+		normalized.Mode = configstoreTables.MCPHostedToolAuthModeNone
+	}
+	if len(normalized.HeaderMappings) > 0 {
+		mappings := make(map[string]string, len(normalized.HeaderMappings))
+		for target, source := range normalized.HeaderMappings {
+			target = strings.TrimSpace(target)
+			source = strings.TrimSpace(strings.ToLower(source))
+			if target == "" || source == "" {
+				continue
+			}
+			mappings[target] = source
+		}
+		normalized.HeaderMappings = mappings
+	}
+	return &normalized
+}
+
+func normalizeHostedToolExecutionProfile(profile *configstoreTables.MCPHostedToolExecutionProfile) *configstoreTables.MCPHostedToolExecutionProfile {
+	if profile == nil {
+		return nil
+	}
+	normalized := *profile
+	if normalized.TimeoutSeconds != nil && *normalized.TimeoutSeconds <= 0 {
+		normalized.TimeoutSeconds = nil
+	}
+	if normalized.MaxResponseBodyBytes != nil && *normalized.MaxResponseBodyBytes <= 0 {
+		normalized.MaxResponseBodyBytes = nil
+	}
+	if normalized.TimeoutSeconds == nil && normalized.MaxResponseBodyBytes == nil {
+		return nil
+	}
+	return &normalized
+}
+
+func normalizeHostedToolSchema(name string, description *string, provided *schemas.ChatTool, argNames []string) schemas.ChatTool {
+	if provided == nil {
+		return buildHostedToolSchema(name, description, argNames)
+	}
+	normalized := *provided
+	normalized.Type = schemas.ChatToolTypeFunction
+	if normalized.Function == nil {
+		normalized.Function = &schemas.ChatToolFunction{}
+	}
+	normalized.Function.Name = name
+	normalized.Function.Description = description
+	if normalized.Function.Parameters == nil {
+		normalized.Function.Parameters = &schemas.ToolFunctionParameters{
+			Type:       "object",
+			Properties: schemas.NewOrderedMap(),
+			Required:   argNames,
+		}
+		return normalized
+	}
+	if strings.TrimSpace(normalized.Function.Parameters.Type) == "" {
+		normalized.Function.Parameters.Type = "object"
+	}
+	if normalized.Function.Parameters.Properties == nil {
+		normalized.Function.Parameters.Properties = schemas.NewOrderedMap()
+	}
+	if len(normalized.Function.Parameters.Required) == 0 {
+		normalized.Function.Parameters.Required = argNames
+	}
+	return normalized
+}
+
+type MCPHostedToolsResponse struct {
+	Tools []configstoreTables.TableMCPHostedTool `json:"tools"`
+	Count int                                    `json:"count"`
+}
+
+func envVarRequiresRuntimeTemplate(value *schemas.EnvVar) bool {
+	if value == nil {
+		return false
+	}
+	raw := strings.TrimSpace(value.GetValue())
+	if strings.Contains(raw, "{{") && strings.Contains(raw, "}}") {
+		return true
+	}
+	return false
+}
+
+func headersRequireRuntimeTemplate(headers map[string]schemas.EnvVar) bool {
+	for _, value := range headers {
+		if envVarRequiresRuntimeTemplate(&value) {
+			return true
+		}
+	}
+	return false
+}
+
+func probeMCPCompatibility(ctx context.Context, config *schemas.MCPClientConfig) ([]string, error) {
+	if config == nil || config.ConnectionString == nil || strings.TrimSpace(config.ConnectionString.GetValue()) == "" {
+		return nil, fmt.Errorf("connection string is required")
+	}
+
+	headers, err := config.HttpHeaders(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var externalClient *mcpclient.Client
+	switch config.ConnectionType {
+	case schemas.MCPConnectionTypeHTTP:
+		httpTransport, err := transport.NewStreamableHTTP(
+			config.ConnectionString.GetValue(),
+			transport.WithHTTPHeaders(headers),
+			transport.WithHTTPTimeout(5*time.Second),
+		)
+		if err != nil {
+			return nil, err
+		}
+		externalClient = mcpclient.NewClient(httpTransport)
+	case schemas.MCPConnectionTypeSSE:
+		sseTransport, err := transport.NewSSE(config.ConnectionString.GetValue(), transport.WithHeaders(headers))
+		if err != nil {
+			return nil, err
+		}
+		externalClient = mcpclient.NewClient(sseTransport)
+	default:
+		return nil, fmt.Errorf("validation only supports http or sse MCP connections")
+	}
+
+	defer externalClient.Close()
+
+	probeCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	if err := externalClient.Start(probeCtx); err != nil {
+		return nil, err
+	}
+
+	_, err = externalClient.Initialize(probeCtx, mcpproto.InitializeRequest{
+		Params: mcpproto.InitializeParams{
+			ProtocolVersion: mcpproto.LATEST_PROTOCOL_VERSION,
+			Capabilities:    mcpproto.ClientCapabilities{},
+			ClientInfo: mcpproto.Implementation{
+				Name:    "Bifrost-import-validator",
+				Version: "1.0.0",
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	toolsResult, err := externalClient.ListTools(probeCtx, mcpproto.ListToolsRequest{
+		PaginatedRequest: mcpproto.PaginatedRequest{
+			Request: mcpproto.Request{
+				Method: string(mcpproto.MethodToolsList),
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if toolsResult == nil || len(toolsResult.Tools) == 0 {
+		return []string{}, nil
+	}
+
+	discoveredTools := make([]string, 0, len(toolsResult.Tools))
+	for _, tool := range toolsResult.Tools {
+		discoveredTools = append(discoveredTools, tool.Name)
+	}
+	sort.Strings(discoveredTools)
+	return discoveredTools, nil
+}
+
+var hostedToolTemplatePattern = regexp.MustCompile(`\{\{\s*([^{}]+)\s*\}\}`)
+var hostedToolNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_]+`)
+
+func normalizeHostedToolName(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	name = strings.ReplaceAll(name, "-", "_")
+	name = strings.ReplaceAll(name, " ", "_")
+	name = hostedToolNameSanitizer.ReplaceAllString(name, "_")
+	name = strings.Trim(name, "_")
+	if name == "" {
+		return "hosted_tool"
+	}
+	if len(name) > 0 && name[0] >= '0' && name[0] <= '9' {
+		name = "tool_" + name
+	}
+	return name
+}
+
+func hostedToolArgumentNames(url string, headers map[string]string, queryParams map[string]string, bodyTemplate *string) []string {
+	seen := map[string]struct{}{}
+	add := func(value string) {
+		for _, match := range hostedToolTemplatePattern.FindAllStringSubmatch(value, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			token := strings.TrimSpace(match[1])
+			switch {
+			case strings.HasPrefix(token, "args."):
+				token = strings.TrimSpace(strings.TrimPrefix(token, "args."))
+			case strings.HasPrefix(token, "req.body."):
+				token = strings.TrimSpace(strings.TrimPrefix(token, "req.body."))
+			case strings.HasPrefix(token, "req.query."):
+				token = strings.TrimSpace(strings.TrimPrefix(token, "req.query."))
+			default:
+				continue
+			}
+			if token == "" {
+				continue
+			}
+			seen[token] = struct{}{}
+		}
+	}
+
+	add(url)
+	for _, value := range headers {
+		add(value)
+	}
+	for _, value := range queryParams {
+		add(value)
+	}
+	if bodyTemplate != nil {
+		add(*bodyTemplate)
+	}
+
+	result := make([]string, 0, len(seen))
+	for key := range seen {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func buildHostedToolSchema(name string, description *string, argNames []string) schemas.ChatTool {
+	properties := schemas.NewOrderedMapWithCapacity(len(argNames))
+	for _, argName := range argNames {
+		properties.Set(argName, schemas.NewOrderedMapFromPairs(
+			schemas.KV("type", "string"),
+		))
+	}
+	return schemas.ChatTool{
+		Type: schemas.ChatToolTypeFunction,
+		Function: &schemas.ChatToolFunction{
+			Name:        name,
+			Description: description,
+			Parameters: &schemas.ToolFunctionParameters{
+				Type:       "object",
+				Properties: properties,
+				Required:   argNames,
+			},
+		},
+	}
+}
+
+func (h *MCPHandler) validateMCPClient(ctx *fasthttp.RequestCtx) {
+	var req MCPClientRequest
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid request format: %v", err))
+		return
+	}
+
+	if req.ConnectionType != string(schemas.MCPConnectionTypeHTTP) && req.ConnectionType != string(schemas.MCPConnectionTypeSSE) {
+		SendJSON(ctx, MCPClientValidationResponse{
+			Status:  "incompatible",
+			Message: "Only MCP streamable HTTP or SSE endpoints can be validated in this flow.",
+			Reason:  "unsupported_connection_type",
+		})
+		return
+	}
+
+	if req.ConnectionString == nil || strings.TrimSpace(req.ConnectionString.GetValue()) == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "connection_string is required")
+		return
+	}
+
+	if req.AuthType == string(schemas.MCPAuthTypeOauth) {
+		SendJSON(ctx, MCPClientValidationResponse{
+			Status:  "unverified",
+			Message: "OAuth-backed MCP endpoints require interactive authorization before they can be probed.",
+			Reason:  "oauth_requires_authorization",
+		})
+		return
+	}
+
+	if envVarRequiresRuntimeTemplate(req.ConnectionString) || headersRequireRuntimeTemplate(req.Headers) {
+		SendJSON(ctx, MCPClientValidationResponse{
+			Status:  "unverified",
+			Message: "This endpoint uses runtime request templating (for example {{req.header.authorization}}), so offline validation is skipped. It must still point to an MCP-compatible server at runtime.",
+			Reason:  "runtime_templates_require_request_context",
+		})
+		return
+	}
+
+	schemasConfig := &schemas.MCPClientConfig{
+		Name:             req.Name,
+		ConnectionType:   schemas.MCPConnectionType(req.ConnectionType),
+		ConnectionString: req.ConnectionString,
+		AuthType:         schemas.MCPAuthType(req.AuthType),
+		Headers:          req.Headers,
+	}
+
+	discoveredTools, err := probeMCPCompatibility(ctx, schemasConfig)
+	if err != nil {
+		SendJSON(ctx, MCPClientValidationResponse{
+			Status:  "incompatible",
+			Message: fmt.Sprintf("Endpoint did not respond as an MCP-compatible server: %v", err),
+			Reason:  "probe_failed",
+		})
+		return
+	}
+
+	message := "Endpoint responded as an MCP-compatible server."
+	if len(discoveredTools) > 0 {
+		message = fmt.Sprintf("Endpoint responded as an MCP-compatible server and exposed %d tool(s).", len(discoveredTools))
+	}
+
+	SendJSON(ctx, MCPClientValidationResponse{
+		Status:          "compatible",
+		Message:         message,
+		Reason:          "validated",
+		DiscoveredTools: discoveredTools,
+	})
+}
+
+func (h *MCPHandler) getMCPHostedTools(ctx *fasthttp.RequestCtx) {
+	if h.store.ConfigStore == nil {
+		SendJSON(ctx, MCPHostedToolsResponse{
+			Tools: []configstoreTables.TableMCPHostedTool{},
+			Count: 0,
+		})
+		return
+	}
+
+	tools, err := h.store.ConfigStore.GetMCPHostedTools(ctx)
+	if err != nil {
+		logger.Error("failed to retrieve hosted MCP tools: %v", err)
+		SendError(ctx, fasthttp.StatusInternalServerError, "Failed to retrieve hosted MCP tools")
+		return
+	}
+
+	SendJSON(ctx, MCPHostedToolsResponse{
+		Tools: tools,
+		Count: len(tools),
+	})
+}
+
+func (h *MCPHandler) addMCPHostedTool(ctx *fasthttp.RequestCtx) {
+	if h.store.ConfigStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP hosted tools unavailable: config store is disabled")
+		return
+	}
+
+	var req MCPHostedToolRequest
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid request format: %v", err))
+		return
+	}
+
+	req.Name = normalizeHostedToolName(req.Name)
+	req.Method = strings.ToUpper(strings.TrimSpace(req.Method))
+	req.URL = strings.TrimSpace(req.URL)
+	if req.Name == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "name is required")
+		return
+	}
+	if err := mcp.ValidateMCPClientName(req.Name); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid tool name: %v", err))
+		return
+	}
+	if req.Method == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "method is required")
+		return
+	}
+	switch req.Method {
+	case fasthttp.MethodGet, fasthttp.MethodPost, fasthttp.MethodPut, fasthttp.MethodDelete, fasthttp.MethodPatch:
+	default:
+		SendError(ctx, fasthttp.StatusBadRequest, "method must be one of GET, POST, PUT, DELETE, PATCH")
+		return
+	}
+	if req.URL == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "url is required")
+		return
+	}
+	if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
+		SendError(ctx, fasthttp.StatusBadRequest, "url must start with http:// or https://")
+		return
+	}
+
+	argNames := hostedToolArgumentNames(req.URL, req.Headers, req.QueryParams, req.BodyTemplate)
+	tool := &configstoreTables.TableMCPHostedTool{
+		ToolID:           uuid.New().String(),
+		Name:             req.Name,
+		Description:      req.Description,
+		Method:           req.Method,
+		URL:              req.URL,
+		Headers:          maps.Clone(req.Headers),
+		QueryParams:      maps.Clone(req.QueryParams),
+		AuthProfile:      normalizeHostedToolAuthProfile(req.AuthProfile),
+		ExecutionProfile: normalizeHostedToolExecutionProfile(req.ExecutionProfile),
+		BodyTemplate:     req.BodyTemplate,
+		ResponseSchema:   cloneStringAnyMap(req.ResponseSchema),
+		ResponseExamples: cloneAnySlice(req.ResponseExamples),
+		ResponseJSONPath: req.ResponseJSONPath,
+		ResponseTemplate: req.ResponseTemplate,
+		ToolSchema:       normalizeHostedToolSchema(req.Name, req.Description, req.ToolSchema, argNames),
+	}
+
+	if err := h.mcpManager.AddMCPHostedTool(ctx, tool); err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to create hosted MCP tool: %v", err))
+		return
+	}
+
+	h.propagateClusterMCPHostedToolChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopeMCPHostedTool,
+		MCPHostedToolID: tool.ToolID,
+		MCPHostedTool:   tool,
+	})
+
+	SendJSON(ctx, map[string]any{
+		"status":  "success",
+		"message": "Hosted MCP tool created successfully",
+		"tool":    tool,
+	})
+}
+
+func (h *MCPHandler) deleteMCPHostedTool(ctx *fasthttp.RequestCtx) {
+	if h.store.ConfigStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP hosted tools unavailable: config store is disabled")
+		return
+	}
+
+	id, err := getIDFromCtx(ctx)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("invalid id: %v", err))
+		return
+	}
+
+	existing, err := h.store.ConfigStore.GetMCPHostedToolByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, configstore.ErrNotFound) {
+			SendError(ctx, fasthttp.StatusNotFound, "Hosted MCP tool not found")
+			return
+		}
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to load hosted MCP tool: %v", err))
+		return
+	}
+
+	if err := h.mcpManager.RemoveMCPHostedTool(ctx, id); err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to remove hosted MCP tool: %v", err))
+		return
+	}
+
+	h.propagateClusterMCPHostedToolChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopeMCPHostedTool,
+		MCPHostedToolID: id,
+		MCPHostedTool:   existing,
+		Delete:          true,
+	})
+
+	SendJSON(ctx, map[string]any{
+		"status":  "success",
+		"message": "Hosted MCP tool removed successfully",
+	})
+}
+
+func (h *MCPHandler) updateMCPHostedTool(ctx *fasthttp.RequestCtx) {
+	if h.store.ConfigStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP hosted tools unavailable: config store is disabled")
+		return
+	}
+
+	id, err := getIDFromCtx(ctx)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("invalid id: %v", err))
+		return
+	}
+
+	existing, err := h.store.ConfigStore.GetMCPHostedToolByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, configstore.ErrNotFound) {
+			SendError(ctx, fasthttp.StatusNotFound, "Hosted MCP tool not found")
+			return
+		}
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to load hosted MCP tool: %v", err))
+		return
+	}
+
+	var req MCPHostedToolRequest
+	if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid request format: %v", err))
+		return
+	}
+
+	req.Name = normalizeHostedToolName(req.Name)
+	req.Method = strings.ToUpper(strings.TrimSpace(req.Method))
+	req.URL = strings.TrimSpace(req.URL)
+	if req.Name == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "name is required")
+		return
+	}
+	if err := mcp.ValidateMCPClientName(req.Name); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid tool name: %v", err))
+		return
+	}
+	if req.Method == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "method is required")
+		return
+	}
+	switch req.Method {
+	case fasthttp.MethodGet, fasthttp.MethodPost, fasthttp.MethodPut, fasthttp.MethodDelete, fasthttp.MethodPatch:
+	default:
+		SendError(ctx, fasthttp.StatusBadRequest, "method must be one of GET, POST, PUT, DELETE, PATCH")
+		return
+	}
+	if req.URL == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "url is required")
+		return
+	}
+	if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
+		SendError(ctx, fasthttp.StatusBadRequest, "url must start with http:// or https://")
+		return
+	}
+
+	argNames := hostedToolArgumentNames(req.URL, req.Headers, req.QueryParams, req.BodyTemplate)
+	tool := &configstoreTables.TableMCPHostedTool{
+		ID:               existing.ID,
+		ToolID:           existing.ToolID,
+		Name:             req.Name,
+		Description:      req.Description,
+		Method:           req.Method,
+		URL:              req.URL,
+		Headers:          maps.Clone(req.Headers),
+		QueryParams:      maps.Clone(req.QueryParams),
+		AuthProfile:      normalizeHostedToolAuthProfile(req.AuthProfile),
+		ExecutionProfile: normalizeHostedToolExecutionProfile(req.ExecutionProfile),
+		BodyTemplate:     req.BodyTemplate,
+		ResponseSchema:   cloneStringAnyMap(req.ResponseSchema),
+		ResponseExamples: cloneAnySlice(req.ResponseExamples),
+		ResponseJSONPath: req.ResponseJSONPath,
+		ResponseTemplate: req.ResponseTemplate,
+		CreatedAt:        existing.CreatedAt,
+		UpdatedAt:        existing.UpdatedAt,
+		ToolSchema:       normalizeHostedToolSchema(req.Name, req.Description, req.ToolSchema, argNames),
+	}
+
+	if err := h.mcpManager.UpdateMCPHostedTool(ctx, id, tool); err != nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to update hosted MCP tool: %v", err))
+		return
+	}
+
+	h.propagateClusterMCPHostedToolChange(ctx, &ClusterConfigChange{
+		Scope:           ClusterConfigScopeMCPHostedTool,
+		MCPHostedToolID: tool.ToolID,
+		MCPHostedTool:   tool,
+	})
+
+	SendJSON(ctx, map[string]any{
+		"status":  "success",
+		"message": "Hosted MCP tool updated successfully",
+		"tool":    tool,
+	})
+}
+
+func cloneStringAnyMap(value map[string]any) map[string]any {
+	if len(value) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		cloned := make(map[string]any, len(value))
+		for key, item := range value {
+			cloned[key] = item
+		}
+		return cloned
+	}
+	var cloned map[string]any
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		cloned = make(map[string]any, len(value))
+		for key, item := range value {
+			cloned[key] = item
+		}
+	}
+	return cloned
+}
+
+func cloneAnySlice(value []any) []any {
+	if len(value) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		cloned := make([]any, len(value))
+		copy(cloned, value)
+		return cloned
+	}
+	var cloned []any
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		cloned = make([]any, len(value))
+		copy(cloned, value)
+	}
+	return cloned
+}
+
+func (h *MCPHandler) previewMCPHostedTool(ctx *fasthttp.RequestCtx) {
+	if h.store.ConfigStore == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "MCP hosted tools unavailable: config store is disabled")
+		return
+	}
+
+	id, err := getIDFromCtx(ctx)
+	if err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("invalid id: %v", err))
+		return
+	}
+
+	var req MCPHostedToolPreviewRequest
+	if len(ctx.PostBody()) > 0 {
+		if err := json.Unmarshal(ctx.PostBody(), &req); err != nil {
+			SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid request format: %v", err))
+			return
+		}
+	}
+	if req.Args == nil {
+		req.Args = map[string]any{}
+	}
+
+	bifrostCtx, cancel := lib.ConvertToBifrostContext(ctx, false, nil)
+	defer cancel()
+
+	preview, err := h.mcpManager.PreviewMCPHostedTool(bifrostCtx, id, req.Args)
+	if err != nil {
+		if errors.Is(err, configstore.ErrNotFound) {
+			SendError(ctx, fasthttp.StatusNotFound, "Hosted MCP tool not found")
+			return
+		}
+		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("Failed to preview hosted MCP tool: %v", err))
+		return
+	}
+
+	SendJSON(ctx, MCPHostedToolPreviewResponse{
+		Status:  "success",
+		Preview: preview,
+	})
 }
 
 // addMCPClient handles POST /api/mcp/client - Add a new MCP client
@@ -413,8 +1153,15 @@ func (h *MCPHandler) addMCPClient(ctx *fasthttp.RequestCtx) {
 			"message":         "OAuth authorization required",
 			"oauth_config_id": flowInitiation.OauthConfigID,
 			"authorize_url":   flowInitiation.AuthorizeURL,
-			"expires_at":      flowInitiation.ExpiresAt,
-			"mcp_client_id":   req.ClientID,
+			"status_url":      buildAPIURL(ctx, fmt.Sprintf("/api/oauth/config/%s/status", flowInitiation.OauthConfigID)),
+			"complete_url":    buildAPIURL(ctx, fmt.Sprintf("/api/mcp/client/%s/complete-oauth", flowInitiation.OauthConfigID)),
+			"next_steps": []string{
+				"打开 authorize_url 完成 OAuth 授权。",
+				"轮询 status_url，直到状态变为 authorized。",
+				"授权完成后调用 complete_url，让 MCP Server 正式落库并连接。",
+			},
+			"expires_at":    flowInitiation.ExpiresAt,
+			"mcp_client_id": req.ClientID,
 		})
 		return
 	}
@@ -862,5 +1609,14 @@ func (h *MCPHandler) propagateClusterMCPClientChange(ctx context.Context, change
 	}
 	if err := h.propagator.PropagateClusterConfigChange(ctx, change); err != nil {
 		logger.Warn("failed to propagate mcp client cluster config change for client %s: %v", change.MCPClientID, err)
+	}
+}
+
+func (h *MCPHandler) propagateClusterMCPHostedToolChange(ctx context.Context, change *ClusterConfigChange) {
+	if h == nil || h.propagator == nil || change == nil {
+		return
+	}
+	if err := h.propagator.PropagateClusterConfigChange(ctx, change); err != nil {
+		logger.Warn("failed to propagate hosted mcp tool cluster config change for tool %s: %v", change.MCPHostedToolID, err)
 	}
 }

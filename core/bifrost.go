@@ -3354,6 +3354,26 @@ func (bifrost *Bifrost) RegisterMCPTool(name, description string, handler func(a
 	return bifrost.MCPManager.RegisterTool(name, description, handler, toolSchema)
 }
 
+// RegisterMCPToolWithContext registers an MCP tool that can access request-scoped
+// context values during execution. This is used by hosted tools that need
+// federated-auth headers or other runtime values.
+func (bifrost *Bifrost) RegisterMCPToolWithContext(name, description string, handler func(ctx context.Context, args any) (string, error), toolSchema schemas.ChatTool) error {
+	if bifrost.MCPManager == nil {
+		return fmt.Errorf("MCP is not configured in this Bifrost instance")
+	}
+
+	return bifrost.MCPManager.RegisterToolWithContext(name, description, handler, toolSchema)
+}
+
+// RemoveMCPTool removes a previously registered local MCP tool from the in-process server.
+func (bifrost *Bifrost) RemoveMCPTool(name string) error {
+	if bifrost.MCPManager == nil {
+		return fmt.Errorf("MCP is not configured in this Bifrost instance")
+	}
+
+	return bifrost.MCPManager.RemoveTool(name)
+}
+
 // IMPORTANT: Running the MCP client management operations (GetMCPClients, AddMCPClient, RemoveMCPClient, EditMCPClientTools)
 // may temporarily increase latency for incoming requests while the operations are being processed.
 // These operations involve network I/O and connection management that require mutex locks
@@ -5027,6 +5047,17 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 			}, req.RequestType, provider.GetProviderKey(), model, &req.BifrostRequest, bifrost.logger)
 		}
 
+		resolvedModelUsed := model
+		if result != nil {
+			if actualModel := result.GetModelUsed(); actualModel != "" {
+				resolvedModelUsed = actualModel
+			}
+			result.PopulateExtraFields(req.RequestType, provider.GetProviderKey(), model, resolvedModelUsed)
+		}
+		if bifrostError != nil {
+			bifrostError.PopulateExtraFields(req.RequestType, provider.GetProviderKey(), model, resolvedModelUsed)
+		}
+
 		// Release pipeline immediately for non-streaming requests only
 		// For streaming, the pipeline is released in the postHookSpanFinalizer after streaming completes
 		// Exception: if streaming request has an error, release immediately since finalizer won't be called
@@ -5036,12 +5067,14 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 
 		if bifrostError != nil {
 			bifrostError.ExtraFields = schemas.BifrostErrorExtraFields{
-				Provider:       provider.GetProviderKey(),
-				ModelRequested: model,
-				RequestType:    req.RequestType,
-				RawRequest:     bifrostError.ExtraFields.RawRequest,
-				RawResponse:    bifrostError.ExtraFields.RawResponse,
-				KeyStatuses:    bifrostError.ExtraFields.KeyStatuses,
+				Provider:               provider.GetProviderKey(),
+				ModelRequested:         model,
+				OriginalModelRequested: bifrostError.ExtraFields.OriginalModelRequested,
+				ResolvedModelUsed:      bifrostError.ExtraFields.ResolvedModelUsed,
+				RequestType:            req.RequestType,
+				RawRequest:             bifrostError.ExtraFields.RawRequest,
+				RawResponse:            bifrostError.ExtraFields.RawResponse,
+				KeyStatuses:            bifrostError.ExtraFields.KeyStatuses,
 			}
 
 			// Send error with context awareness to prevent deadlock

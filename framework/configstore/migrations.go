@@ -221,6 +221,9 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationAddIsPingAvailableColumnToMCPClientTable(ctx, db); err != nil {
 		return err
 	}
+	if err := migrationAddDiscoveredToolsColumnsToMCPClientTable(ctx, db); err != nil {
+		return err
+	}
 	if err := migrationAddToolPricingJSONColumn(ctx, db); err != nil {
 		return err
 	}
@@ -303,6 +306,12 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 	if err := migrationAddPricingRefactorColumns(ctx, db); err != nil {
 		return err
 	}
+	if err := migrationAddPriorityTierPricingColumns(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddFlexTierPricingColumns(ctx, db); err != nil {
+		return err
+	}
 	if err := migrationRenameTruncatedPricingColumn(ctx, db); err != nil {
 		return err
 	}
@@ -346,6 +355,12 @@ func triggerMigrations(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	if err := migrationAddLogExportConfigTable(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddMCPHostedToolsTable(ctx, db); err != nil {
+		return err
+	}
+	if err := migrationAddMCPHostedToolEnhancementColumns(ctx, db); err != nil {
 		return err
 	}
 	return nil
@@ -3308,6 +3323,47 @@ func migrationAddIsPingAvailableColumnToMCPClientTable(ctx context.Context, db *
 	return nil
 }
 
+// migrationAddDiscoveredToolsColumnsToMCPClientTable adds persisted MCP tool discovery snapshot columns.
+func migrationAddDiscoveredToolsColumnsToMCPClientTable(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_discovered_tools_columns_to_mcp_clients",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if !migrator.HasColumn(&tables.TableMCPClient{}, "discovered_tools_json") {
+				if err := migrator.AddColumn(&tables.TableMCPClient{}, "discovered_tools_json"); err != nil {
+					return err
+				}
+			}
+			if !migrator.HasColumn(&tables.TableMCPClient{}, "tool_name_mapping_json") {
+				if err := migrator.AddColumn(&tables.TableMCPClient{}, "tool_name_mapping_json"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			migrator := tx.Migrator()
+			if migrator.HasColumn(&tables.TableMCPClient{}, "tool_name_mapping_json") {
+				if err := migrator.DropColumn(&tables.TableMCPClient{}, "tool_name_mapping_json"); err != nil {
+					return err
+				}
+			}
+			if migrator.HasColumn(&tables.TableMCPClient{}, "discovered_tools_json") {
+				if err := migrator.DropColumn(&tables.TableMCPClient{}, "discovered_tools_json"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while running discovered tools migration: %s", err.Error())
+	}
+	return nil
+}
+
 // migrationAddRoutingRulesTable adds the routing rules table for intelligent request routing
 func migrationAddRoutingRulesTable(ctx context.Context, db *gorm.DB) error {
 	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
@@ -4385,6 +4441,117 @@ func migrationAddPricingRefactorColumns(ctx context.Context, db *gorm.DB) error 
 	return nil
 }
 
+// migrationAddPriorityTierPricingColumns adds pricing columns for 272k token tier
+// and priority-specific 200k/cache variants.
+func migrationAddPriorityTierPricingColumns(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_priority_tier_pricing_columns",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+
+			columns := []string{
+				"input_cost_per_token_above_272k_tokens",
+				"input_cost_per_token_above_272k_tokens_priority",
+				"output_cost_per_token_above_272k_tokens",
+				"output_cost_per_token_above_272k_tokens_priority",
+				"cache_read_input_token_cost_above_272k_tokens",
+				"cache_read_input_token_cost_above_272k_tokens_priority",
+				"input_cost_per_token_above_200k_tokens_priority",
+				"output_cost_per_token_above_200k_tokens_priority",
+				"cache_read_input_token_cost_above_200k_tokens_priority",
+			}
+
+			for _, field := range columns {
+				if !mg.HasColumn(&tables.TableModelPricing{}, field) {
+					if err := mg.AddColumn(&tables.TableModelPricing{}, field); err != nil {
+						return fmt.Errorf("failed to add column %s: %w", field, err)
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+
+			columns := []string{
+				"input_cost_per_token_above_272k_tokens",
+				"input_cost_per_token_above_272k_tokens_priority",
+				"output_cost_per_token_above_272k_tokens",
+				"output_cost_per_token_above_272k_tokens_priority",
+				"cache_read_input_token_cost_above_272k_tokens",
+				"cache_read_input_token_cost_above_272k_tokens_priority",
+				"input_cost_per_token_above_200k_tokens_priority",
+				"output_cost_per_token_above_200k_tokens_priority",
+				"cache_read_input_token_cost_above_200k_tokens_priority",
+			}
+
+			for _, field := range columns {
+				if mg.HasColumn(&tables.TableModelPricing{}, field) {
+					if err := mg.DropColumn(&tables.TableModelPricing{}, field); err != nil {
+						return fmt.Errorf("failed to drop column %s: %w", field, err)
+					}
+				}
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while running priority tier pricing columns migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddFlexTierPricingColumns adds pricing columns for the flex service tier.
+func migrationAddFlexTierPricingColumns(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_flex_tier_pricing_columns",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+
+			columns := []string{
+				"input_cost_per_token_flex",
+				"output_cost_per_token_flex",
+				"cache_read_input_token_cost_flex",
+			}
+
+			for _, field := range columns {
+				if !mg.HasColumn(&tables.TableModelPricing{}, field) {
+					if err := mg.AddColumn(&tables.TableModelPricing{}, field); err != nil {
+						return fmt.Errorf("failed to add column %s: %w", field, err)
+					}
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+
+			columns := []string{
+				"input_cost_per_token_flex",
+				"output_cost_per_token_flex",
+				"cache_read_input_token_cost_flex",
+			}
+
+			for _, field := range columns {
+				if mg.HasColumn(&tables.TableModelPricing{}, field) {
+					if err := mg.DropColumn(&tables.TableModelPricing{}, field); err != nil {
+						return fmt.Errorf("failed to drop column %s: %w", field, err)
+					}
+				}
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while running flex tier pricing columns migration: %s", err.Error())
+	}
+	return nil
+}
+
 // migrationRenameTruncatedPricingColumn renames the output_cost_per_image_above_512_and_512_pixels_and_premium_image
 // column which at 64 chars exceeds PostgreSQL's 63-character identifier limit. PostgreSQL silently truncated
 // it to output_cost_per_image_above_512_and_512_pixels_and_premium_imag (63 chars), while SQLite kept the
@@ -5270,6 +5437,131 @@ func migrationAddLogExportConfigTable(ctx context.Context, db *gorm.DB) error {
 	}})
 	if err := m.Migrate(); err != nil {
 		return fmt.Errorf("error while running log_export_config_table migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddMCPHostedToolsTable creates the config_mcp_hosted_tools table.
+func migrationAddMCPHostedToolsTable(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_mcp_hosted_tools_table",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			if !mg.HasTable(&tables.TableMCPHostedTool{}) {
+				if err := mg.CreateTable(&tables.TableMCPHostedTool{}); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			if err := mg.DropTable(&tables.TableMCPHostedTool{}); err != nil {
+				return err
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while running mcp hosted tools migration: %s", err.Error())
+	}
+	return nil
+}
+
+func migrationAddMCPHostedToolEnhancementColumns(ctx context.Context, db *gorm.DB) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: "add_mcp_hosted_tool_enhancement_columns",
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			if !mg.HasTable(&tables.TableMCPHostedTool{}) {
+				return nil
+			}
+			if !mg.HasColumn(&tables.TableMCPHostedTool{}, "QueryParamsJSON") {
+				if err := mg.AddColumn(&tables.TableMCPHostedTool{}, "QueryParamsJSON"); err != nil {
+					return err
+				}
+			}
+			if !mg.HasColumn(&tables.TableMCPHostedTool{}, "AuthProfileJSON") {
+				if err := mg.AddColumn(&tables.TableMCPHostedTool{}, "AuthProfileJSON"); err != nil {
+					return err
+				}
+			}
+			if !mg.HasColumn(&tables.TableMCPHostedTool{}, "ExecutionProfileJSON") {
+				if err := mg.AddColumn(&tables.TableMCPHostedTool{}, "ExecutionProfileJSON"); err != nil {
+					return err
+				}
+			}
+			if !mg.HasColumn(&tables.TableMCPHostedTool{}, "ResponseSchemaJSON") {
+				if err := mg.AddColumn(&tables.TableMCPHostedTool{}, "ResponseSchemaJSON"); err != nil {
+					return err
+				}
+			}
+			if !mg.HasColumn(&tables.TableMCPHostedTool{}, "ResponseExamplesJSON") {
+				if err := mg.AddColumn(&tables.TableMCPHostedTool{}, "ResponseExamplesJSON"); err != nil {
+					return err
+				}
+			}
+			if !mg.HasColumn(&tables.TableMCPHostedTool{}, "ResponseJSONPath") {
+				if err := mg.AddColumn(&tables.TableMCPHostedTool{}, "ResponseJSONPath"); err != nil {
+					return err
+				}
+			}
+			if !mg.HasColumn(&tables.TableMCPHostedTool{}, "ResponseTemplate") {
+				if err := mg.AddColumn(&tables.TableMCPHostedTool{}, "ResponseTemplate"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			mg := tx.Migrator()
+			if !mg.HasTable(&tables.TableMCPHostedTool{}) {
+				return nil
+			}
+			if mg.HasColumn(&tables.TableMCPHostedTool{}, "ResponseTemplate") {
+				if err := mg.DropColumn(&tables.TableMCPHostedTool{}, "ResponseTemplate"); err != nil {
+					return err
+				}
+			}
+			if mg.HasColumn(&tables.TableMCPHostedTool{}, "ExecutionProfileJSON") {
+				if err := mg.DropColumn(&tables.TableMCPHostedTool{}, "ExecutionProfileJSON"); err != nil {
+					return err
+				}
+			}
+			if mg.HasColumn(&tables.TableMCPHostedTool{}, "ResponseSchemaJSON") {
+				if err := mg.DropColumn(&tables.TableMCPHostedTool{}, "ResponseSchemaJSON"); err != nil {
+					return err
+				}
+			}
+			if mg.HasColumn(&tables.TableMCPHostedTool{}, "ResponseExamplesJSON") {
+				if err := mg.DropColumn(&tables.TableMCPHostedTool{}, "ResponseExamplesJSON"); err != nil {
+					return err
+				}
+			}
+			if mg.HasColumn(&tables.TableMCPHostedTool{}, "AuthProfileJSON") {
+				if err := mg.DropColumn(&tables.TableMCPHostedTool{}, "AuthProfileJSON"); err != nil {
+					return err
+				}
+			}
+			if mg.HasColumn(&tables.TableMCPHostedTool{}, "ResponseJSONPath") {
+				if err := mg.DropColumn(&tables.TableMCPHostedTool{}, "ResponseJSONPath"); err != nil {
+					return err
+				}
+			}
+			if mg.HasColumn(&tables.TableMCPHostedTool{}, "QueryParamsJSON") {
+				if err := mg.DropColumn(&tables.TableMCPHostedTool{}, "QueryParamsJSON"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while running mcp hosted tool enhancement migration: %s", err.Error())
 	}
 	return nil
 }

@@ -214,6 +214,48 @@ func TestUpdateMCPToolLogSerializesStructEntry(t *testing.T) {
 	}
 }
 
+func TestGetDistinctMetadataKeysReturnsKeysOnly(t *testing.T) {
+	store := newTestSQLiteStore(t)
+	now := time.Now().UTC()
+	metadataOne := `{"x-user-id":"user-1001","x-project-id":"project-a","isAsyncRequest":true}`
+	metadataTwo := `{"x-user-id":"user-2002","x-project-id":"project-b","tenant.id":"tenant-1"}`
+
+	entries := []*Log{
+		{
+			ID:        "metadata-log-1",
+			Timestamp: now,
+			Object:    "chat_completion",
+			Provider:  "openai",
+			Model:     "gpt-4o-mini",
+			Status:    "success",
+			Metadata:  &metadataOne,
+		},
+		{
+			ID:        "metadata-log-2",
+			Timestamp: now.Add(-1 * time.Minute),
+			Object:    "chat_completion",
+			Provider:  "openai",
+			Model:     "gpt-4o-mini",
+			Status:    "success",
+			Metadata:  &metadataTwo,
+		},
+	}
+
+	if err := store.BatchCreateIfNotExists(context.Background(), entries); err != nil {
+		t.Fatalf("BatchCreateIfNotExists() error = %v", err)
+	}
+
+	keys, err := store.GetDistinctMetadataKeys(context.Background())
+	if err != nil {
+		t.Fatalf("GetDistinctMetadataKeys() error = %v", err)
+	}
+
+	expected := []string{"tenant.id", "x-project-id", "x-user-id"}
+	if !reflect.DeepEqual(keys, expected) {
+		t.Fatalf("metadata keys mismatch\n got: %#v\nwant: %#v", keys, expected)
+	}
+}
+
 func TestBulkUpdateCostSQLiteFallback(t *testing.T) {
 	store := newTestSQLiteStore(t)
 	now := time.Now().UTC()

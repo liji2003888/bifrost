@@ -4,9 +4,11 @@ import FullPageLoader from "@/components/fullPageLoader";
 import { useToast } from "@/hooks/use-toast";
 import { useDebouncedValue } from "@/hooks/useDebounce";
 import { getErrorMessage, useGetMCPClientsQuery } from "@/lib/store";
+import { useGetMCPHostedToolsQuery } from "@/lib/store/apis/mcpApi";
 import { useEffect, useState } from "react";
 import MCPClientsTable from "./views/mcpClientsTable";
 import { MCPImportDialog } from "./views/mcpImportDialog";
+import { MCPHostedToolsTable } from "./views/mcpHostedToolsTable";
 import { Button } from "@/components/ui/button";
 import { Upload } from "lucide-react";
 
@@ -34,9 +36,13 @@ export default function MCPServersPage() {
 			pollingInterval: POLLING_INTERVAL,
 		},
 	);
+	const { data: hostedToolsData, refetch: refetchHostedTools } = useGetMCPHostedToolsQuery(undefined, {
+		pollingInterval: POLLING_INTERVAL,
+	});
 
 	const mcpClients = mcpClientsData?.clients || [];
 	const totalCount = mcpClientsData?.total_count || 0;
+	const hostedTools = hostedToolsData?.tools || [];
 
 	// Snap offset back when total shrinks past current page (e.g. delete last item on last page)
 	useEffect(() => {
@@ -67,7 +73,7 @@ export default function MCPServersPage() {
 			<div className="mb-4 flex items-center justify-between">
 				<div />
 				<Button variant="outline" onClick={() => setImportOpen(true)}>
-					<Upload className="h-4 w-4" /> Import APIs
+					<Upload className="h-4 w-4" /> Import MCP Endpoints
 				</Button>
 			</div>
 			<MCPClientsTable
@@ -84,7 +90,14 @@ export default function MCPServersPage() {
 			<MCPImportDialog
 				open={importOpen}
 				onOpenChange={setImportOpen}
-				onImported={() => void refetch()}
+				onImported={() => {
+					void refetch();
+					void refetchHostedTools();
+				}}
+			/>
+			<MCPHostedToolsTable
+				tools={hostedTools}
+				refetch={() => Promise.all([refetch(), refetchHostedTools()])}
 			/>
 		</div>
 	);

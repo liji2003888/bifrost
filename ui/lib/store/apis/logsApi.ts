@@ -260,7 +260,7 @@ export const logsApi = baseApi.injectEndpoints({
 				virtual_keys: VirtualKey[];
 				routing_rules: RoutingRule[];
 				routing_engines: string[];
-				metadata_keys: Record<string, string[]>;
+				metadata_keys: string[];
 			},
 			void
 		>({

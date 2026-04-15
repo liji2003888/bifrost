@@ -35,12 +35,16 @@ export default function PricingConfigView() {
 	});
 
 	const formValues = watch();
+	const pricingSyncDisabled = useMemo(
+		() => !formValues.pricing_datasheet_url.trim() || formValues.pricing_sync_interval_hours === 0,
+		[formValues.pricing_datasheet_url, formValues.pricing_sync_interval_hours],
+	);
 
 	useEffect(() => {
 		if (bifrostConfig && config) {
 			reset({
 				pricing_datasheet_url: config.pricing_url || "",
-				pricing_sync_interval_hours: Math.round(config.pricing_sync_interval / 3600) || 24,
+				pricing_sync_interval_hours: config.pricing_sync_interval === 0 ? 0 : Math.round(config.pricing_sync_interval / 3600) || 24,
 			});
 		}
 	}, [config, bifrostConfig, reset]);
@@ -92,7 +96,9 @@ export default function PricingConfigView() {
 					<div className="space-y-2 rounded-sm border p-4">
 						<div className="space-y-0.5">
 							<Label htmlFor="pricing-datasheet-url">Pricing Datasheet URL</Label>
-							<p className="text-muted-foreground text-sm">URL to a custom pricing datasheet. Leave empty to use default pricing.</p>
+							<p className="text-muted-foreground text-sm">
+								URL to a pricing datasheet. Leave empty to disable remote pricing sync for internal deployments.
+							</p>
 						</div>
 						<Input
 							id="pricing-datasheet-url"
@@ -121,7 +127,9 @@ export default function PricingConfigView() {
 						<div className="space-y-2">
 							<div className="space-y-0.5">
 								<Label htmlFor="pricing-sync-interval">Pricing Sync Interval (hours)</Label>
-								<p className="text-muted-foreground text-sm">How often to sync pricing data from the datasheet URL.</p>
+								<p className="text-muted-foreground text-sm">
+									How often to sync pricing data from the datasheet URL. Set to 0 to disable remote pricing sync.
+								</p>
 							</div>
 							<Input
 								id="pricing-sync-interval"
@@ -130,8 +138,8 @@ export default function PricingConfigView() {
 								{...register("pricing_sync_interval_hours", {
 									required: "Pricing sync interval is required",
 									min: {
-										value: 1,
-										message: "Sync interval must be at least 1 hour",
+										value: 0,
+										message: "Sync interval must be at least 0 hours",
 									},
 									max: {
 										value: 8760,
@@ -147,7 +155,13 @@ export default function PricingConfigView() {
 					</div>
 				</div>
 				<div className="flex justify-end gap-2 pt-2">
-					<Button variant="outline" type="button" onClick={handleForceSync} disabled={isForceSyncing || !hasSettingsUpdateAccess} data-testid="pricing-force-sync-btn">
+					<Button
+						variant="outline"
+						type="button"
+						onClick={handleForceSync}
+						disabled={isForceSyncing || !hasSettingsUpdateAccess || pricingSyncDisabled}
+						data-testid="pricing-force-sync-btn"
+					>
 						{isForceSyncing ? "Syncing..." : "Force Sync Now"}
 					</Button>
 					<Button type="submit" disabled={!hasChanges || isLoading || !hasSettingsUpdateAccess} data-testid="pricing-save-btn">
