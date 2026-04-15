@@ -158,8 +158,10 @@ export interface NetworkConfig {
 	retry_backoff_max: number; // Duration in milliseconds
 	insecure_skip_verify?: boolean;
 	ca_cert_pem?: string;
+	stream_first_chunk_timeout_in_seconds?: number;
 	stream_idle_timeout_in_seconds?: number;
 	max_conns_per_host?: number;
+	max_idle_conn_duration_in_seconds?: number;
 	enforce_http2?: boolean;
 	beta_header_overrides?: Record<string, boolean>;
 }

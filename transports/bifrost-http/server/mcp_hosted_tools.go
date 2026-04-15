@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	neturl "net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -96,6 +98,427 @@ func cloneHostedToolSchemaMap(value map[string]any) map[string]any {
 		}
 	}
 	return cloned
+}
+
+func normalizeHostedToolValidationSchema(parameters *schemas.ToolFunctionParameters) (map[string]any, error) {
+	if parameters == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(parameters)
+	if err != nil {
+		return nil, err
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return nil, err
+	}
+	return schema, nil
+}
+
+func resolveHostedToolSchemaRef(root map[string]any, ref string) (map[string]any, error) {
+	ref = strings.TrimSpace(ref)
+	if root == nil || ref == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(ref, "#/") {
+		return nil, fmt.Errorf("unsupported hosted tool schema reference %q", ref)
+	}
+	current := any(root)
+	for _, part := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+		part = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+		nextMap, ok := current.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("invalid hosted tool schema reference %q", ref)
+		}
+		next, ok := nextMap[part]
+		if !ok {
+			return nil, fmt.Errorf("hosted tool schema reference %q not found", ref)
+		}
+		current = next
+	}
+	resolved, ok := current.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("hosted tool schema reference %q does not resolve to an object schema", ref)
+	}
+	return resolved, nil
+}
+
+func hostedToolSchemaMap(schema any, root map[string]any) (map[string]any, error) {
+	switch typed := schema.(type) {
+	case nil:
+		return nil, nil
+	case map[string]any:
+		if ref, ok := typed["$ref"].(string); ok && strings.TrimSpace(ref) != "" {
+			return resolveHostedToolSchemaRef(root, ref)
+		}
+		return typed, nil
+	default:
+		return nil, nil
+	}
+}
+
+func hostedToolSchemaString(node map[string]any, key string) string {
+	if node == nil {
+		return ""
+	}
+	value, _ := node[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func hostedToolSchemaBool(node map[string]any, key string) (bool, bool) {
+	if node == nil {
+		return false, false
+	}
+	value, ok := node[key].(bool)
+	return value, ok
+}
+
+func hostedToolSchemaFloat(node map[string]any, key string) (float64, bool) {
+	if node == nil {
+		return 0, false
+	}
+	switch value := node[key].(type) {
+	case float64:
+		return value, true
+	case float32:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case json.Number:
+		parsed, err := value.Float64()
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func hostedToolSchemaStringArray(node map[string]any, key string) []string {
+	if node == nil {
+		return nil
+	}
+	raw, ok := node[key].([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+			result = append(result, text)
+		}
+	}
+	return result
+}
+
+func hostedToolSchemaArray(node map[string]any, key string) []any {
+	if node == nil {
+		return nil
+	}
+	raw, ok := node[key].([]any)
+	if !ok {
+		return nil
+	}
+	return raw
+}
+
+func hostedToolValueAsObject(value any) (map[string]any, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		return typed, true
+	}
+	rv := reflect.ValueOf(value)
+	if !rv.IsValid() || rv.Kind() != reflect.Map || rv.Type().Key().Kind() != reflect.String {
+		return nil, false
+	}
+	result := make(map[string]any, rv.Len())
+	iter := rv.MapRange()
+	for iter.Next() {
+		result[iter.Key().String()] = iter.Value().Interface()
+	}
+	return result, true
+}
+
+func hostedToolValueAsArray(value any) ([]any, bool) {
+	switch typed := value.(type) {
+	case []any:
+		return typed, true
+	}
+	rv := reflect.ValueOf(value)
+	if !rv.IsValid() {
+		return nil, false
+	}
+	if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+		return nil, false
+	}
+	result := make([]any, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		result[i] = rv.Index(i).Interface()
+	}
+	return result, true
+}
+
+func hostedToolValueAsFloat(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int8:
+		return float64(typed), true
+	case int16:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case uint:
+		return float64(typed), true
+	case uint8:
+		return float64(typed), true
+	case uint16:
+		return float64(typed), true
+	case uint32:
+		return float64(typed), true
+	case uint64:
+		return float64(typed), true
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func hostedToolEnumMatches(expected, actual any) bool {
+	switch exp := expected.(type) {
+	case string:
+		act, ok := actual.(string)
+		return ok && act == exp
+	case bool:
+		act, ok := actual.(bool)
+		return ok && act == exp
+	default:
+		expNum, expOK := hostedToolValueAsFloat(expected)
+		actNum, actOK := hostedToolValueAsFloat(actual)
+		if expOK && actOK {
+			return expNum == actNum
+		}
+		return reflect.DeepEqual(expected, actual)
+	}
+}
+
+func validateHostedToolValueAgainstSchema(path string, value any, schema any, root map[string]any) error {
+	node, err := hostedToolSchemaMap(schema, root)
+	if err != nil {
+		return err
+	}
+	if len(node) == 0 {
+		return nil
+	}
+
+	if anyOf := hostedToolSchemaArray(node, "anyOf"); len(anyOf) > 0 {
+		var lastErr error
+		for _, candidate := range anyOf {
+			if err := validateHostedToolValueAgainstSchema(path, value, candidate, root); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		}
+		if lastErr != nil {
+			return fmt.Errorf("%s does not match any allowed schema: %w", path, lastErr)
+		}
+	}
+
+	if oneOf := hostedToolSchemaArray(node, "oneOf"); len(oneOf) > 0 {
+		matches := 0
+		var lastErr error
+		for _, candidate := range oneOf {
+			if err := validateHostedToolValueAgainstSchema(path, value, candidate, root); err == nil {
+				matches++
+			} else {
+				lastErr = err
+			}
+		}
+		if matches != 1 {
+			if lastErr != nil {
+				return fmt.Errorf("%s must match exactly one schema: %w", path, lastErr)
+			}
+			return fmt.Errorf("%s must match exactly one schema", path)
+		}
+	}
+
+	if allOf := hostedToolSchemaArray(node, "allOf"); len(allOf) > 0 {
+		for _, candidate := range allOf {
+			if err := validateHostedToolValueAgainstSchema(path, value, candidate, root); err != nil {
+				return err
+			}
+		}
+	}
+
+	if value == nil {
+		if nullable, ok := hostedToolSchemaBool(node, "nullable"); ok && nullable {
+			return nil
+		}
+		return fmt.Errorf("%s cannot be null", path)
+	}
+
+	if enumValues := hostedToolSchemaArray(node, "enum"); len(enumValues) > 0 {
+		matched := false
+		for _, candidate := range enumValues {
+			if hostedToolEnumMatches(candidate, value) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%s must be one of the configured enum values", path)
+		}
+	}
+
+	schemaType := hostedToolSchemaString(node, "type")
+	if schemaType == "" {
+		if _, ok := node["properties"]; ok {
+			schemaType = "object"
+		} else if _, ok := node["items"]; ok {
+			schemaType = "array"
+		}
+	}
+
+	switch schemaType {
+	case "", "null":
+		return nil
+	case "object":
+		objectValue, ok := hostedToolValueAsObject(value)
+		if !ok {
+			return fmt.Errorf("%s must be an object", path)
+		}
+		requiredFields := hostedToolSchemaStringArray(node, "required")
+		for _, key := range requiredFields {
+			if _, ok := objectValue[key]; !ok {
+				return fmt.Errorf("%s.%s is required", path, key)
+			}
+		}
+
+		propertiesNode, _ := node["properties"].(map[string]any)
+		for key, item := range objectValue {
+			childPath := path + "." + key
+			if propertySchema, ok := propertiesNode[key]; ok {
+				if err := validateHostedToolValueAgainstSchema(childPath, item, propertySchema, root); err != nil {
+					return err
+				}
+				continue
+			}
+			additional := node["additionalProperties"]
+			switch typed := additional.(type) {
+			case bool:
+				if !typed {
+					return fmt.Errorf("%s is not allowed by hosted tool schema", childPath)
+				}
+			case map[string]any:
+				if err := validateHostedToolValueAgainstSchema(childPath, item, typed, root); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	case "array":
+		items, ok := hostedToolValueAsArray(value)
+		if !ok {
+			return fmt.Errorf("%s must be an array", path)
+		}
+		if minItems, ok := hostedToolSchemaFloat(node, "minItems"); ok && float64(len(items)) < minItems {
+			return fmt.Errorf("%s must contain at least %d items", path, int(minItems))
+		}
+		if maxItems, ok := hostedToolSchemaFloat(node, "maxItems"); ok && float64(len(items)) > maxItems {
+			return fmt.Errorf("%s must contain at most %d items", path, int(maxItems))
+		}
+		if itemSchema, ok := node["items"]; ok {
+			for index, item := range items {
+				if err := validateHostedToolValueAgainstSchema(fmt.Sprintf("%s[%d]", path, index), item, itemSchema, root); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	case "string":
+		text, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("%s must be a string", path)
+		}
+		if minLength, ok := hostedToolSchemaFloat(node, "minLength"); ok && float64(len(text)) < minLength {
+			return fmt.Errorf("%s must be at least %d characters long", path, int(minLength))
+		}
+		if maxLength, ok := hostedToolSchemaFloat(node, "maxLength"); ok && float64(len(text)) > maxLength {
+			return fmt.Errorf("%s must be at most %d characters long", path, int(maxLength))
+		}
+		if pattern := hostedToolSchemaString(node, "pattern"); pattern != "" {
+			matched, err := regexp.MatchString(pattern, text)
+			if err != nil {
+				return fmt.Errorf("invalid hosted tool schema pattern for %s: %w", path, err)
+			}
+			if !matched {
+				return fmt.Errorf("%s does not match the required pattern", path)
+			}
+		}
+		return nil
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s must be a boolean", path)
+		}
+		return nil
+	case "integer":
+		number, ok := hostedToolValueAsFloat(value)
+		if !ok || math.Trunc(number) != number {
+			return fmt.Errorf("%s must be an integer", path)
+		}
+		if minimum, ok := hostedToolSchemaFloat(node, "minimum"); ok && number < minimum {
+			return fmt.Errorf("%s must be greater than or equal to %v", path, minimum)
+		}
+		if maximum, ok := hostedToolSchemaFloat(node, "maximum"); ok && number > maximum {
+			return fmt.Errorf("%s must be less than or equal to %v", path, maximum)
+		}
+		return nil
+	case "number":
+		number, ok := hostedToolValueAsFloat(value)
+		if !ok {
+			return fmt.Errorf("%s must be a number", path)
+		}
+		if minimum, ok := hostedToolSchemaFloat(node, "minimum"); ok && number < minimum {
+			return fmt.Errorf("%s must be greater than or equal to %v", path, minimum)
+		}
+		if maximum, ok := hostedToolSchemaFloat(node, "maximum"); ok && number > maximum {
+			return fmt.Errorf("%s must be less than or equal to %v", path, maximum)
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+func validateHostedToolArgs(tool *configstoreTables.TableMCPHostedTool, args map[string]any) error {
+	if tool == nil || tool.ToolSchema.Function == nil || tool.ToolSchema.Function.Parameters == nil {
+		return nil
+	}
+	schemaDoc, err := normalizeHostedToolValidationSchema(tool.ToolSchema.Function.Parameters)
+	if err != nil {
+		return fmt.Errorf("failed to normalize hosted tool schema: %w", err)
+	}
+	if len(schemaDoc) == 0 {
+		return nil
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	if err := validateHostedToolValueAgainstSchema("args", args, schemaDoc, schemaDoc); err != nil {
+		return fmt.Errorf("hosted tool input validation failed: %w", err)
+	}
+	return nil
 }
 
 func truncateHostedToolPreviewOutput(output string, limit int) (string, bool) {
@@ -317,6 +740,9 @@ func hostedToolClientForExecution(base *fasthttp.Client, profile *configstoreTab
 func (s *BifrostHTTPServer) executeHostedMCPToolWithMetadata(ctx context.Context, tool *configstoreTables.TableMCPHostedTool, args map[string]any) (*configstoreTables.MCPHostedToolExecutionResult, error) {
 	if tool == nil {
 		return nil, fmt.Errorf("hosted MCP tool config is required")
+	}
+	if err := validateHostedToolArgs(tool, args); err != nil {
+		return nil, err
 	}
 	startedAt := time.Now()
 

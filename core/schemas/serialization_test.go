@@ -893,8 +893,10 @@ func TestNetworkConfig_TLSFieldsRoundTrip(t *testing.T) {
 // round-trips correctly through JSON marshaling.
 func TestNetworkConfig_StreamIdleTimeoutRoundTrip(t *testing.T) {
 	nc := NetworkConfig{
-		DefaultRequestTimeoutInSeconds: 30,
-		StreamIdleTimeoutInSeconds:     120,
+		DefaultRequestTimeoutInSeconds:   30,
+		StreamFirstChunkTimeoutInSeconds: 45,
+		StreamIdleTimeoutInSeconds:       120,
+		MaxIdleConnDurationInSeconds:     15,
 	}
 
 	data, err := json.Marshal(nc)
@@ -904,8 +906,28 @@ func TestNetworkConfig_StreamIdleTimeoutRoundTrip(t *testing.T) {
 	err = json.Unmarshal(data, &decoded)
 	require.NoError(t, err)
 
+	assert.Equal(t, 45, decoded.StreamFirstChunkTimeoutInSeconds, "stream_first_chunk_timeout_in_seconds should round-trip")
 	assert.Equal(t, 120, decoded.StreamIdleTimeoutInSeconds, "stream_idle_timeout_in_seconds should round-trip")
+	assert.Equal(t, 15, decoded.MaxIdleConnDurationInSeconds, "max_idle_conn_duration_in_seconds should round-trip")
+	assert.Contains(t, string(data), `"stream_first_chunk_timeout_in_seconds":45`)
 	assert.Contains(t, string(data), `"stream_idle_timeout_in_seconds":120`)
+	assert.Contains(t, string(data), `"max_idle_conn_duration_in_seconds":15`)
+}
+
+func TestProviderConfig_CheckAndSetDefaultsAppliesMaxIdleConnDuration(t *testing.T) {
+	config := &ProviderConfig{}
+	config.CheckAndSetDefaults()
+
+	assert.Equal(t, DefaultMaxIdleConnDurationInSeconds, config.NetworkConfig.MaxIdleConnDurationInSeconds)
+
+	config = &ProviderConfig{
+		NetworkConfig: NetworkConfig{
+			MaxIdleConnDurationInSeconds: 12,
+		},
+	}
+	config.CheckAndSetDefaults()
+
+	assert.Equal(t, 12, config.NetworkConfig.MaxIdleConnDurationInSeconds)
 }
 
 // TestNormalizeResponsesToolType verifies that versioned/provider-specific tool type

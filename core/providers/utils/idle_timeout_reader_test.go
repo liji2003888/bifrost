@@ -282,3 +282,54 @@ func TestIdleTimeoutReader_ErrorFromClosedPipe(t *testing.T) {
 		t.Logf("got error: %v (acceptable)", err)
 	}
 }
+
+func TestStreamingTimeoutReader_FirstChunkTimeoutReturnsTypedError(t *testing.T) {
+	t.Parallel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	wrapped, cleanup := NewStreamingTimeoutReader(pr, pr, 50*time.Millisecond, 500*time.Millisecond)
+	defer cleanup()
+
+	buf := make([]byte, 64)
+	_, err := wrapped.Read(buf)
+	if err == nil {
+		t.Fatal("expected first-chunk timeout error")
+	}
+	if !IsStreamTimeoutError(err) {
+		t.Fatalf("expected stream timeout error, got %v", err)
+	}
+	if kind := GetStreamTimeoutKind(err); kind != StreamTimeoutKindFirstChunk {
+		t.Fatalf("expected first chunk timeout kind, got %s", kind)
+	}
+}
+
+func TestStreamingTimeoutReader_IdleTimeoutReturnsTypedError(t *testing.T) {
+	t.Parallel()
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	wrapped, cleanup := NewStreamingTimeoutReader(pr, pr, 500*time.Millisecond, 50*time.Millisecond)
+	defer cleanup()
+
+	go func() {
+		_, _ = pw.Write([]byte("chunk"))
+		// stop writing after first chunk; idle timeout should fire
+	}()
+
+	buf := make([]byte, 64)
+	if _, err := wrapped.Read(buf); err != nil {
+		t.Fatalf("expected first read to succeed, got %v", err)
+	}
+	_, err := wrapped.Read(buf)
+	if err == nil {
+		t.Fatal("expected idle timeout error")
+	}
+	if !IsStreamTimeoutError(err) {
+		t.Fatalf("expected stream timeout error, got %v", err)
+	}
+	if kind := GetStreamTimeoutKind(err); kind != StreamTimeoutKindIdle {
+		t.Fatalf("expected idle timeout kind, got %s", kind)
+	}
+}

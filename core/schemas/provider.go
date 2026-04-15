@@ -8,23 +8,27 @@ import (
 )
 
 const (
-	DefaultMaxRetries              = 0
-	DefaultRetryBackoffInitial     = 500 * time.Millisecond
-	DefaultRetryBackoffMax         = 5 * time.Second
-	DefaultRequestTimeoutInSeconds    = 30
-	DefaultMaxConnDurationInSeconds  = 300 // 5 minutes — forces connection recycling to prevent stale connections from NAT/LB silent drops
-	DefaultBufferSize                = 5000
-	DefaultConcurrency             = 1000
-	DefaultStreamBufferSize              = 256
-	DefaultStreamIdleTimeoutInSeconds    = 60 // Idle timeout per stream chunk — if no data for this many seconds, bifrost closes the connection
-	DefaultMaxConnsPerHost               = 5000
-	MaxConnsPerHostUpperBound            = 10000
-	DefaultMaxIdleConnsPerHost           = 40
+	DefaultMaxRetries                       = 0
+	DefaultRetryBackoffInitial              = 500 * time.Millisecond
+	DefaultRetryBackoffMax                  = 5 * time.Second
+	DefaultRequestTimeoutInSeconds          = 30
+	DefaultMaxConnDurationInSeconds         = 300 // 5 minutes — forces connection recycling to prevent stale connections from NAT/LB silent drops
+	DefaultMaxIdleConnDurationInSeconds     = 30  // 30 seconds — backward-compatible default for idle keep-alive connections
+	DefaultBufferSize                       = 5000
+	DefaultConcurrency                      = 1000
+	DefaultStreamBufferSize                 = 256
+	DefaultStreamFirstChunkTimeoutInSeconds = 0  // 0 = inherit stream_idle_timeout_in_seconds for backward compatibility
+	DefaultStreamIdleTimeoutInSeconds       = 60 // Idle timeout per stream chunk — if no data for this many seconds, bifrost closes the connection
+	DefaultMaxConnsPerHost                  = 5000
+	MaxConnsPerHostUpperBound               = 10000
+	DefaultMaxIdleConnsPerHost              = 40
 )
 
 // Pre-defined errors for provider operations
 const (
-	ErrProviderRequestTimedOut      = "request timed out (default is 30 seconds). You can increase it by setting the default_request_timeout_in_seconds in the network_config or in UI - Providers > Provider Name > Network Config."
+	ErrProviderRequestTimedOut      = "provider request exceeded the configured Request Timeout. Increase default_request_timeout_in_seconds in the network_config or in UI - Providers > Provider Name > Network Config."
+	ErrProviderFirstChunkTimedOut   = "provider stream did not emit the first chunk before the configured First Chunk Timeout elapsed"
+	ErrProviderStreamIdleTimedOut   = "provider stream stalled and did not emit the next chunk before the configured Stream Idle Timeout elapsed"
 	ErrRequestCancelled             = "request cancelled by caller"
 	ErrRequestBodyConversion        = "failed to convert bifrost request to the expected provider request body"
 	ErrProviderRequestMarshal       = "failed to marshal request body to JSON"
@@ -52,18 +56,20 @@ const (
 //   - When marshaling to JSON: a time.Duration is converted to milliseconds
 type NetworkConfig struct {
 	// BaseURL is supported for OpenAI, Anthropic, Cohere, Mistral, and Ollama providers (required for Ollama)
-	BaseURL                        string            `json:"base_url,omitempty"`                 // Base URL for the provider (optional)
-	ExtraHeaders                   map[string]string `json:"extra_headers,omitempty"`            // Additional headers to include in requests (optional)
-	DefaultRequestTimeoutInSeconds int               `json:"default_request_timeout_in_seconds"` // Default timeout for requests
-	MaxRetries                     int               `json:"max_retries"`                        // Maximum number of retries
-	RetryBackoffInitial            time.Duration     `json:"retry_backoff_initial"`              // Initial backoff duration (stored as nanoseconds, JSON as milliseconds)
-	RetryBackoffMax                time.Duration     `json:"retry_backoff_max"`                  // Maximum backoff duration (stored as nanoseconds, JSON as milliseconds)
-	InsecureSkipVerify             bool              `json:"insecure_skip_verify,omitempty"`     // Disables TLS certificate verification for provider connections
-	CACertPEM                      string            `json:"ca_cert_pem,omitempty"`              // PEM-encoded CA certificate to trust for provider endpoint connections
-	StreamIdleTimeoutInSeconds     int               `json:"stream_idle_timeout_in_seconds,omitempty"` // Idle timeout per stream chunk (0 = use default 60s)
-	MaxConnsPerHost                int               `json:"max_conns_per_host,omitempty"`              // Max TCP connections per provider host (default: 5000)
-	EnforceHTTP2                   bool              `json:"enforce_http2,omitempty"`                   // Force HTTP/2 on provider connections (relevant for net/http-based providers like Bedrock)
-	BetaHeaderOverrides            map[string]bool   `json:"beta_header_overrides,omitempty"`           // Override default beta header support per provider (keys are prefixes like "redact-thinking-")
+	BaseURL                          string            `json:"base_url,omitempty"`                              // Base URL for the provider (optional)
+	ExtraHeaders                     map[string]string `json:"extra_headers,omitempty"`                         // Additional headers to include in requests (optional)
+	DefaultRequestTimeoutInSeconds   int               `json:"default_request_timeout_in_seconds"`              // Default timeout for requests
+	MaxRetries                       int               `json:"max_retries"`                                     // Maximum number of retries
+	RetryBackoffInitial              time.Duration     `json:"retry_backoff_initial"`                           // Initial backoff duration (stored as nanoseconds, JSON as milliseconds)
+	RetryBackoffMax                  time.Duration     `json:"retry_backoff_max"`                               // Maximum backoff duration (stored as nanoseconds, JSON as milliseconds)
+	InsecureSkipVerify               bool              `json:"insecure_skip_verify,omitempty"`                  // Disables TLS certificate verification for provider connections
+	CACertPEM                        string            `json:"ca_cert_pem,omitempty"`                           // PEM-encoded CA certificate to trust for provider endpoint connections
+	StreamFirstChunkTimeoutInSeconds int               `json:"stream_first_chunk_timeout_in_seconds,omitempty"` // Time to wait for first streaming chunk; 0 = inherit stream idle timeout
+	StreamIdleTimeoutInSeconds       int               `json:"stream_idle_timeout_in_seconds,omitempty"`        // Idle timeout per stream chunk (0 = use default 60s)
+	MaxConnsPerHost                  int               `json:"max_conns_per_host,omitempty"`                    // Max TCP connections per provider host (default: 5000)
+	MaxIdleConnDurationInSeconds     int               `json:"max_idle_conn_duration_in_seconds,omitempty"`     // How long an idle keep-alive connection can be reused before Bifrost closes it
+	EnforceHTTP2                     bool              `json:"enforce_http2,omitempty"`                         // Force HTTP/2 on provider connections (relevant for net/http-based providers like Bedrock)
+	BetaHeaderOverrides              map[string]bool   `json:"beta_header_overrides,omitempty"`                 // Override default beta header support per provider (keys are prefixes like "redact-thinking-")
 }
 
 // UnmarshalJSON customizes JSON unmarshaling for NetworkConfig.
@@ -72,18 +78,20 @@ type NetworkConfig struct {
 func (nc *NetworkConfig) UnmarshalJSON(data []byte) error {
 	// Use an alias type to avoid infinite recursion
 	type NetworkConfigAlias struct {
-		BaseURL                        string            `json:"base_url,omitempty"`
-		ExtraHeaders                   map[string]string `json:"extra_headers,omitempty"`
-		DefaultRequestTimeoutInSeconds int               `json:"default_request_timeout_in_seconds"`
-		MaxRetries                     int               `json:"max_retries"`
-		RetryBackoffInitial            int64             `json:"retry_backoff_initial"` // milliseconds in JSON
-		RetryBackoffMax                int64             `json:"retry_backoff_max"`     // milliseconds in JSON
-		InsecureSkipVerify             bool              `json:"insecure_skip_verify,omitempty"`
-		CACertPEM                      string            `json:"ca_cert_pem,omitempty"`
-		StreamIdleTimeoutInSeconds     int               `json:"stream_idle_timeout_in_seconds,omitempty"`
-		MaxConnsPerHost                int               `json:"max_conns_per_host,omitempty"`
-		EnforceHTTP2                   bool              `json:"enforce_http2,omitempty"`
-		BetaHeaderOverrides            map[string]bool   `json:"beta_header_overrides,omitempty"`
+		BaseURL                          string            `json:"base_url,omitempty"`
+		ExtraHeaders                     map[string]string `json:"extra_headers,omitempty"`
+		DefaultRequestTimeoutInSeconds   int               `json:"default_request_timeout_in_seconds"`
+		MaxRetries                       int               `json:"max_retries"`
+		RetryBackoffInitial              int64             `json:"retry_backoff_initial"` // milliseconds in JSON
+		RetryBackoffMax                  int64             `json:"retry_backoff_max"`     // milliseconds in JSON
+		InsecureSkipVerify               bool              `json:"insecure_skip_verify,omitempty"`
+		CACertPEM                        string            `json:"ca_cert_pem,omitempty"`
+		StreamFirstChunkTimeoutInSeconds int               `json:"stream_first_chunk_timeout_in_seconds,omitempty"`
+		StreamIdleTimeoutInSeconds       int               `json:"stream_idle_timeout_in_seconds,omitempty"`
+		MaxConnsPerHost                  int               `json:"max_conns_per_host,omitempty"`
+		MaxIdleConnDurationInSeconds     int               `json:"max_idle_conn_duration_in_seconds,omitempty"`
+		EnforceHTTP2                     bool              `json:"enforce_http2,omitempty"`
+		BetaHeaderOverrides              map[string]bool   `json:"beta_header_overrides,omitempty"`
 	}
 
 	var alias NetworkConfigAlias
@@ -98,8 +106,10 @@ func (nc *NetworkConfig) UnmarshalJSON(data []byte) error {
 	nc.MaxRetries = alias.MaxRetries
 	nc.InsecureSkipVerify = alias.InsecureSkipVerify
 	nc.CACertPEM = alias.CACertPEM
+	nc.StreamFirstChunkTimeoutInSeconds = alias.StreamFirstChunkTimeoutInSeconds
 	nc.StreamIdleTimeoutInSeconds = alias.StreamIdleTimeoutInSeconds
 	nc.MaxConnsPerHost = alias.MaxConnsPerHost
+	nc.MaxIdleConnDurationInSeconds = alias.MaxIdleConnDurationInSeconds
 	nc.EnforceHTTP2 = alias.EnforceHTTP2
 	nc.BetaHeaderOverrides = alias.BetaHeaderOverrides
 
@@ -121,18 +131,20 @@ func (nc *NetworkConfig) UnmarshalJSON(data []byte) error {
 func (nc NetworkConfig) MarshalJSON() ([]byte, error) {
 	// Use an alias type to avoid infinite recursion
 	type NetworkConfigAlias struct {
-		BaseURL                        string            `json:"base_url,omitempty"`
-		ExtraHeaders                   map[string]string `json:"extra_headers,omitempty"`
-		DefaultRequestTimeoutInSeconds int               `json:"default_request_timeout_in_seconds"`
-		MaxRetries                     int               `json:"max_retries"`
-		RetryBackoffInitial            int64             `json:"retry_backoff_initial"` // milliseconds in JSON
-		RetryBackoffMax                int64             `json:"retry_backoff_max"`     // milliseconds in JSON
-		InsecureSkipVerify             bool              `json:"insecure_skip_verify,omitempty"`
-		CACertPEM                      string            `json:"ca_cert_pem,omitempty"`
-		StreamIdleTimeoutInSeconds     int               `json:"stream_idle_timeout_in_seconds,omitempty"`
-		MaxConnsPerHost                int               `json:"max_conns_per_host,omitempty"`
-		EnforceHTTP2                   bool              `json:"enforce_http2,omitempty"`
-		BetaHeaderOverrides            map[string]bool   `json:"beta_header_overrides,omitempty"`
+		BaseURL                          string            `json:"base_url,omitempty"`
+		ExtraHeaders                     map[string]string `json:"extra_headers,omitempty"`
+		DefaultRequestTimeoutInSeconds   int               `json:"default_request_timeout_in_seconds"`
+		MaxRetries                       int               `json:"max_retries"`
+		RetryBackoffInitial              int64             `json:"retry_backoff_initial"` // milliseconds in JSON
+		RetryBackoffMax                  int64             `json:"retry_backoff_max"`     // milliseconds in JSON
+		InsecureSkipVerify               bool              `json:"insecure_skip_verify,omitempty"`
+		CACertPEM                        string            `json:"ca_cert_pem,omitempty"`
+		StreamFirstChunkTimeoutInSeconds int               `json:"stream_first_chunk_timeout_in_seconds,omitempty"`
+		StreamIdleTimeoutInSeconds       int               `json:"stream_idle_timeout_in_seconds,omitempty"`
+		MaxConnsPerHost                  int               `json:"max_conns_per_host,omitempty"`
+		MaxIdleConnDurationInSeconds     int               `json:"max_idle_conn_duration_in_seconds,omitempty"`
+		EnforceHTTP2                     bool              `json:"enforce_http2,omitempty"`
+		BetaHeaderOverrides              map[string]bool   `json:"beta_header_overrides,omitempty"`
 	}
 
 	alias := NetworkConfigAlias{
@@ -141,14 +153,16 @@ func (nc NetworkConfig) MarshalJSON() ([]byte, error) {
 		DefaultRequestTimeoutInSeconds: nc.DefaultRequestTimeoutInSeconds,
 		MaxRetries:                     nc.MaxRetries,
 		// Convert time.Duration (nanoseconds) to milliseconds
-		RetryBackoffInitial:        int64(nc.RetryBackoffInitial / time.Millisecond),
-		RetryBackoffMax:            int64(nc.RetryBackoffMax / time.Millisecond),
-		InsecureSkipVerify:         nc.InsecureSkipVerify,
-		CACertPEM:                  nc.CACertPEM,
-		StreamIdleTimeoutInSeconds: nc.StreamIdleTimeoutInSeconds,
-		MaxConnsPerHost:            nc.MaxConnsPerHost,
-		EnforceHTTP2:               nc.EnforceHTTP2,
-		BetaHeaderOverrides:        nc.BetaHeaderOverrides,
+		RetryBackoffInitial:              int64(nc.RetryBackoffInitial / time.Millisecond),
+		RetryBackoffMax:                  int64(nc.RetryBackoffMax / time.Millisecond),
+		InsecureSkipVerify:               nc.InsecureSkipVerify,
+		CACertPEM:                        nc.CACertPEM,
+		StreamFirstChunkTimeoutInSeconds: nc.StreamFirstChunkTimeoutInSeconds,
+		StreamIdleTimeoutInSeconds:       nc.StreamIdleTimeoutInSeconds,
+		MaxConnsPerHost:                  nc.MaxConnsPerHost,
+		MaxIdleConnDurationInSeconds:     nc.MaxIdleConnDurationInSeconds,
+		EnforceHTTP2:                     nc.EnforceHTTP2,
+		BetaHeaderOverrides:              nc.BetaHeaderOverrides,
 	}
 
 	return json.Marshal(alias)
@@ -168,12 +182,14 @@ func (nc *NetworkConfig) Redacted() *NetworkConfig {
 
 // DefaultNetworkConfig is the default network configuration for provider connections.
 var DefaultNetworkConfig = NetworkConfig{
-	DefaultRequestTimeoutInSeconds: DefaultRequestTimeoutInSeconds,
-	MaxRetries:                     DefaultMaxRetries,
-	RetryBackoffInitial:            DefaultRetryBackoffInitial,
-	RetryBackoffMax:                DefaultRetryBackoffMax,
-	StreamIdleTimeoutInSeconds:     DefaultStreamIdleTimeoutInSeconds,
-	MaxConnsPerHost:                DefaultMaxConnsPerHost,
+	DefaultRequestTimeoutInSeconds:   DefaultRequestTimeoutInSeconds,
+	MaxRetries:                       DefaultMaxRetries,
+	RetryBackoffInitial:              DefaultRetryBackoffInitial,
+	RetryBackoffMax:                  DefaultRetryBackoffMax,
+	StreamFirstChunkTimeoutInSeconds: DefaultStreamFirstChunkTimeoutInSeconds,
+	StreamIdleTimeoutInSeconds:       DefaultStreamIdleTimeoutInSeconds,
+	MaxConnsPerHost:                  DefaultMaxConnsPerHost,
+	MaxIdleConnDurationInSeconds:     DefaultMaxIdleConnDurationInSeconds,
 }
 
 // ConcurrencyAndBufferSize represents configuration for concurrent operations and buffer sizes.
@@ -482,14 +498,14 @@ type ProviderConfig struct {
 	NetworkConfig            NetworkConfig            `json:"network_config"`              // Network configuration
 	ConcurrencyAndBufferSize ConcurrencyAndBufferSize `json:"concurrency_and_buffer_size"` // Concurrency settings
 	// Logger instance, can be provided by the user or bifrost default logger is used if not provided
-	Logger               Logger                    `json:"-"`
-	ProxyConfig          *ProxyConfig              `json:"proxy_config,omitempty"` // Proxy configuration
-	SendBackRawRequest        bool                      `json:"send_back_raw_request"`         // Send raw request back in the bifrost response (default: false)
-	SendBackRawResponse       bool                      `json:"send_back_raw_response"`        // Send raw response back in the bifrost response (default: false)
-	StoreRawRequestResponse   bool                      `json:"store_raw_request_response"`    // Capture raw request/response for internal logging only; strip from API responses returned to clients (default: false)
-	CustomProviderConfig *CustomProviderConfig     `json:"custom_provider_config,omitempty"`
-	OpenAIConfig         *OpenAIConfig             `json:"openai_config,omitempty"`
-	PricingOverrides     []ProviderPricingOverride `json:"pricing_overrides,omitempty"`
+	Logger                  Logger                    `json:"-"`
+	ProxyConfig             *ProxyConfig              `json:"proxy_config,omitempty"`     // Proxy configuration
+	SendBackRawRequest      bool                      `json:"send_back_raw_request"`      // Send raw request back in the bifrost response (default: false)
+	SendBackRawResponse     bool                      `json:"send_back_raw_response"`     // Send raw response back in the bifrost response (default: false)
+	StoreRawRequestResponse bool                      `json:"store_raw_request_response"` // Capture raw request/response for internal logging only; strip from API responses returned to clients (default: false)
+	CustomProviderConfig    *CustomProviderConfig     `json:"custom_provider_config,omitempty"`
+	OpenAIConfig            *OpenAIConfig             `json:"openai_config,omitempty"`
+	PricingOverrides        []ProviderPricingOverride `json:"pricing_overrides,omitempty"`
 }
 
 // OpenAIConfig holds OpenAI-specific provider configuration.
@@ -526,10 +542,18 @@ func (config *ProviderConfig) CheckAndSetDefaults() {
 		config.NetworkConfig.StreamIdleTimeoutInSeconds = DefaultStreamIdleTimeoutInSeconds
 	}
 
+	if config.NetworkConfig.StreamFirstChunkTimeoutInSeconds < 0 {
+		config.NetworkConfig.StreamFirstChunkTimeoutInSeconds = DefaultStreamFirstChunkTimeoutInSeconds
+	}
+
 	if config.NetworkConfig.MaxConnsPerHost <= 0 {
 		config.NetworkConfig.MaxConnsPerHost = DefaultMaxConnsPerHost
 	} else if config.NetworkConfig.MaxConnsPerHost > MaxConnsPerHostUpperBound {
 		config.NetworkConfig.MaxConnsPerHost = MaxConnsPerHostUpperBound
+	}
+
+	if config.NetworkConfig.MaxIdleConnDurationInSeconds <= 0 {
+		config.NetworkConfig.MaxIdleConnDurationInSeconds = DefaultMaxIdleConnDurationInSeconds
 	}
 
 	// Create a defensive copy of ExtraHeaders to prevent data races

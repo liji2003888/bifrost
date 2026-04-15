@@ -2612,3 +2612,215 @@ Current cluster auto-sync scope now includes:
   - `npm exec next build -- --no-lint` in `ui`
   - `npm exec next typegen` in `ui`
   - `npm exec tsc -- --noEmit` in `ui`
+
+### 2026-04-15 21:08:00 CST | Base Commit 3eb9c7364 | Hosted Tool：参数校验与执行前 Schema 校验
+
+- **目标**
+
+  - 在不影响普通 LLM 推理 hot path 的前提下，给 Hosted Tool 补上真正的输入参数校验
+  - 让 OpenAPI / 手工定义的 `tool_schema` 不只是展示用途，而是在执行前真正生效
+  - 继续保持集群部署下的共享 `ConfigStore` + cluster fanout 语义不变
+
+- **本轮完成**
+
+  - Hosted Tool 在执行前会按 `tool_schema.function.parameters` 做参数校验
+  - 当前支持的校验能力包括：
+    - `required`
+    - `type`
+    - `enum`
+    - `minimum / maximum`
+    - `minLength / maxLength`
+    - `pattern`
+    - `minItems / maxItems`
+    - `additionalProperties`
+    - `anyOf / oneOf / allOf`
+    - 本地 `$ref`（`#/$defs/*`、`#/definitions/*`）
+  - 如果参数不满足 schema，会在真正发起上游 HTTP 请求前直接失败，避免无效请求打到后端系统
+  - 这层校验仅作用于 Hosted Tool 执行链，不进入普通 provider inference 主链
+
+- **关键改动**
+
+  - 后端：
+    - `transports/bifrost-http/server/mcp_hosted_tools.go`
+    - `transports/bifrost-http/server/mcp_hosted_tools_test.go`
+
+- **集群、高可用与性能说明**
+
+  - 这轮没有新增后台 worker、poller、gossip 或额外 cluster 状态同步面
+  - 校验逻辑只在 Hosted Tool 被调用时运行一次，不影响普通模型请求路径
+  - 没有改共享 `ConfigStore` 的结构和 cluster fanout 语义，所以多节点下的配置一致性逻辑保持不变
+  - 参数校验发生在本地执行前，可以减少无效请求打到内网 API，从稳定性角度是收敛而不是放大风险
+
+- **数据表 / Migration / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮没有新增 migration**
+  - **本轮没有新增环境变量**
+
+- **部署注意**
+
+  - 这轮只涉及 Hosted Tool 执行层代码和测试
+  - 不需要额外变更数据库结构，按现有滚动更新方式部署即可
+
+- **本轮验证**
+
+  - `go test ./transports/bifrost-http/server -run 'Test(ExecuteHostedMCPToolAppliesQueryParamsAndExtractsJSONPath|ExecuteHostedMCPToolAppliesResponseTemplate|ExecuteHostedMCPToolSupportsResponseRawTemplate|ExecuteHostedMCPToolUsesRequestHeadersInQueryAndBodyTemplates|ExecuteHostedMCPToolRejectsMissingRequiredArgs|ExecuteHostedMCPToolRejectsWrongArgType|ExecuteHostedMCPToolRejectsUnknownArgsWhenAdditionalPropertiesDisabled|ExecuteHostedMCPToolAcceptsValidArgsAgainstSchema|ExecuteHostedMCPToolAppliesBearerPassthroughAuthProfile|ExecuteHostedMCPToolAppliesHeaderPassthroughAuthProfile|ExecuteHostedMCPToolRespectsExecutionProfileMaxResponseBodyBytes|ExecuteHostedMCPToolRespectsExecutionProfileTimeout|ExecuteHostedMCPToolWithMetadataCapturesExecutionDetails|PreviewMCPHostedToolTruncatesLargeOutput|ApplyClusterConfigChangeMCPHostedToolLifecycle|ApplyClusterConfigChangeMCPHostedToolRenameReplacesRuntimeRegistration|ApplyClusterConfigChangeMCPClientLifecycle|PersistMCPDiscoveredToolsUpdatesStoreAndRuntimeConfig)$'` in `transports`
+  - `go test ./transports/bifrost-http/handlers -run TestDoesNotExist` in `transports`
+  - `go test ./transports/bifrost-http -tags embedui -run TestDoesNotExist` in `transports`
+
+### 2026-04-15 22:06:00 CST | Base Commit 3eb9c7364 | Provider Network：超时语义说明增强与 LiteLLM 对照
+
+- **目标**
+
+  - 把 Provider Network 页里的 timeout 语义讲清楚，避免继续把 `timeout` 误解成“首 token 超时”
+  - 对照 LiteLLM 的 timeout 设计，确认当前 Bifrost 的行为边界与可参考方向
+
+- **本轮完成**
+
+  - Provider Network 页面把 `Timeout (seconds)` 明确改成了 `Request Timeout (seconds)`
+  - 新增了更直白的说明：
+    - `Request Timeout` 是上游 provider HTTP 请求的整体时间预算，不是首 token 专用超时
+    - `Stream Idle Timeout` 只约束 streaming 响应中 chunk 与 chunk 之间的静默间隔，不限制整条流总时长
+    - 请求如果先在队列里等待，再发往 provider，通常是“排队时间”和“provider 请求超时”分开计算
+    - 给出了长推理/长流式输出的建议起始值：`Request Timeout = 300-600s`、`Stream Idle Timeout = 60-120s`
+
+- **LiteLLM 对照结论**
+
+  - LiteLLM 官方文档把 `timeout` 明确解释为**整个调用的总时长上限**，并在 Router 级向下传递到 completion 调用层
+  - LiteLLM 还额外区分了 `stream_timeout`，官方文档把它定义成**流式请求等待首个 chunk / 首 token 的时间上限**
+  - LiteLLM Router 的超时优先级更细：
+    - 每次请求传入的 `timeout / request_timeout`
+    - deployment `litellm_params.timeout / request_timeout`
+    - Router 全局 `timeout`
+    - streaming 时还会优先取 `stream_timeout`
+  - LiteLLM 还支持更细粒度的 HTTP timeout/config 方式：
+    - 直接传 `httpx.Timeout`
+    - 注入自定义 `aiohttp.ClientSession`
+    - 自定义连接池、keepalive、limit_per_host、connect/read/total timeout 等
+  - 当前 Bifrost **没有** LiteLLM 这套“总超时 + 首 chunk 专用超时 + 细粒度 HTTP client timeout 对象”三层模型；当前是：
+    - `default_request_timeout_in_seconds`：更广义的 provider 请求级网络超时
+    - `stream_idle_timeout_in_seconds`：流建立后的 chunk 间空闲超时
+  - 这意味着当前 Bifrost 的 `stream_idle_timeout` **不是** LiteLLM 的 `stream_timeout` 等价物；它更接近“流中途卡住多久算异常”，而不是“首 token 最晚多久要出来”
+
+- **关键改动**
+
+  - 前端：
+    - `ui/app/workspace/providers/fragments/networkFormFragment.tsx`
+
+- **集群、高可用与性能说明**
+
+  - 这轮只改了 Provider 配置页说明文案，没有改 runtime timeout 逻辑
+  - 不影响 cluster fanout、自愈、provider hot reload、推理主链、队列或连接池行为
+  - 没有新增任何后台轮询、内存缓存或常驻 goroutine，不引入额外性能风险
+
+- **数据表 / Migration / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮没有新增 migration**
+  - **本轮没有新增环境变量**
+
+- **部署注意**
+
+  - 这轮只涉及 UI 文案增强，按现有前端部署方式更新即可
+
+- **本轮验证**
+
+  - `npm exec next build -- --no-lint` in `ui`
+  - `npm exec tsc -- --noEmit` in `ui`  
+    说明：当前仓库仍存在既有的 `.next/types` 缺失问题，`tsc` 会报 `TS6053`，不是这轮改动引入的问题
+
+### 2026-04-15 23:34:00 CST | Base Commit 3eb9c7364 | Provider Network：提取 Max Idle Connection Duration 并修正 stale keep-alive 根因
+
+- **问题根因**
+
+  - 这次 provider 提前报错的更底层根因，不只是 request timeout 语义，而是各个 provider client 原来都把 `MaxIdleConnDuration` 写死成了 `30s`
+  - 当上游 provider 网关、LB、Ingress 或私有化模型前面的代理更早关闭 idle keep-alive 连接时，Bifrost 仍可能在连接池里复用“看起来还活着、但实际上已被对端关闭”的连接
+  - 这类 stale keep-alive 连接在第一次读响应前就被对端断掉时，就会出现：
+    - `the server closed connection before returning the first response byte`
+    - `failed to execute HTTP request to provider API`
+
+- **本轮完成**
+
+  - `NetworkConfig` 新增：
+    - `max_idle_conn_duration_in_seconds`
+  - 默认值保持 **30 秒**，保证旧配置向下兼容
+  - Provider Network 页面新增 `Max Idle Connection Duration (seconds)`，并和 `Max Connections Per Host` 放在同一块调优窗口中
+  - 所有 provider 构造器不再写死 `30s`，统一改为读取 `network_config.max_idle_conn_duration_in_seconds`
+  - Bedrock 的 `net/http.Transport.IdleConnTimeout` 也改为同一套配置
+  - Provider Network 页的说明文案也同步补充了这层语义：
+    - `Request Timeout` 控制整次 upstream call 预算
+    - `First Chunk Timeout` 控制首 token / 首 chunk 等待
+    - `Stream Idle Timeout` 控制 streaming 过程中 chunk 间静默
+    - `Max Idle Connection Duration` 控制 idle keep-alive 连接在池中能存活多久
+
+- **配置建议**
+
+  - 如果上游是内网私有化模型、前面还有 Nginx / Envoy / API Gateway / LB，建议把 `Max Idle Connection Duration` 设得**不高于**上游 keep-alive timeout
+  - 如果不确定上游 idle keep-alive 时长，一个更稳的起点通常是：
+    - `Max Idle Connection Duration = 5s ~ 15s`
+  - 长时间、密集 streaming 推理时，建议继续配合：
+    - `Request Timeout = 300s ~ 600s`
+    - `First Chunk Timeout = 60s ~ 120s`
+    - `Stream Idle Timeout = 60s ~ 120s`
+
+- **关键改动**
+
+  - 后端：
+    - `core/schemas/provider.go`
+    - `core/providers/openai/openai.go`
+    - `core/providers/anthropic/anthropic.go`
+    - `core/providers/azure/azure.go`
+    - `core/providers/bedrock/bedrock.go`
+    - `core/providers/cohere/cohere.go`
+    - `core/providers/elevenlabs/elevenlabs.go`
+    - `core/providers/fireworks/fireworks.go`
+    - `core/providers/gemini/gemini.go`
+    - `core/providers/groq/groq.go`
+    - `core/providers/huggingface/huggingface.go`
+    - `core/providers/mistral/mistral.go`
+    - `core/providers/nebius/nebius.go`
+    - `core/providers/ollama/ollama.go`
+    - `core/providers/openrouter/openrouter.go`
+    - `core/providers/parasail/parasail.go`
+    - `core/providers/perplexity/perplexity.go`
+    - `core/providers/replicate/replicate.go`
+    - `core/providers/runway/runway.go`
+    - `core/providers/sgl/sgl.go`
+    - `core/providers/vllm/vllm.go`
+    - `core/providers/vertex/vertex.go`
+    - `core/providers/xai/xai.go`
+  - 前端：
+    - `ui/app/workspace/providers/fragments/networkFormFragment.tsx`
+    - `ui/lib/types/config.ts`
+    - `ui/lib/constants/config.ts`
+    - `ui/lib/types/schemas.ts`
+    - `ui/lib/schemas/providerForm.ts`
+  - Schema：
+    - `transports/config.schema.json`
+
+- **集群、高可用与性能说明**
+
+  - 这轮没有新增后台 worker、轮询器、队列或缓存
+  - 没有改普通 inference hot path 的业务路由逻辑，只是把 provider client 的 idle keep-alive 生命周期参数配置化
+  - Provider 配置本来就走现有的 ConfigStore + provider hot reload + cluster fanout 机制，所以集群下一致性语义不变
+  - 默认值仍然是 30 秒，老配置不需要改就能继续运行
+
+- **数据表 / Migration / 环境变量**
+
+  - **本轮没有新增数据表**
+  - **本轮没有新增 migration**
+  - **本轮没有新增环境变量**
+  - `max_idle_conn_duration_in_seconds` 只是 provider `network_config` 里的新增 JSON 字段，沿用现有 provider 配置存储结构
+
+- **部署注意**
+
+  - 这轮不需要数据库结构变更
+  - 如果要启用新配置，直接按现有方式滚动更新前后端即可
+  - 集群环境下更新 provider network 配置后，会沿用既有 provider config sync/hot reload 机制下发到其它节点
+
+- **本轮验证**
+
+  - `go test ./schemas ./providers/openai ./providers/anthropic ./providers/azure ./providers/bedrock ./providers/cohere ./providers/elevenlabs ./providers/fireworks ./providers/gemini ./providers/groq ./providers/huggingface ./providers/mistral ./providers/nebius ./providers/ollama ./providers/openrouter ./providers/parasail ./providers/perplexity ./providers/replicate ./providers/runway ./providers/sgl ./providers/vllm ./providers/vertex ./providers/xai -run 'Test(NetworkConfig_StreamIdleTimeoutRoundTrip|ProviderConfig_CheckAndSetDefaultsAppliesMaxIdleConnDuration|DoesNotExist)'` in `core`
+  - `go test ./bifrost-http -tags embedui -run TestDoesNotExist` in `transports`
+  - `npm exec next build -- --no-lint` in `ui`
+  - `npm exec tsc -- --noEmit` in `ui`

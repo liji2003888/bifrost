@@ -74,10 +74,16 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 				retry_backoff_max: provider.network_config?.retry_backoff_max ?? DefaultNetworkConfig.retry_backoff_max,
 				insecure_skip_verify: provider.network_config?.insecure_skip_verify ?? DefaultNetworkConfig.insecure_skip_verify,
 				ca_cert_pem: provider.network_config?.ca_cert_pem ?? DefaultNetworkConfig.ca_cert_pem,
+				stream_first_chunk_timeout_in_seconds:
+					provider.network_config?.stream_first_chunk_timeout_in_seconds ??
+					DefaultNetworkConfig.stream_first_chunk_timeout_in_seconds,
 				stream_idle_timeout_in_seconds:
 					provider.network_config?.stream_idle_timeout_in_seconds ?? DefaultNetworkConfig.stream_idle_timeout_in_seconds,
 				max_conns_per_host:
 					provider.network_config?.max_conns_per_host ?? DefaultNetworkConfig.max_conns_per_host,
+				max_idle_conn_duration_in_seconds:
+					provider.network_config?.max_idle_conn_duration_in_seconds ??
+					DefaultNetworkConfig.max_idle_conn_duration_in_seconds,
 				enforce_http2: provider.network_config?.enforce_http2 ?? DefaultNetworkConfig.enforce_http2,
 			},
 		},
@@ -110,10 +116,14 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 				retry_backoff_max: data.network_config?.retry_backoff_max ?? 10000,
 				insecure_skip_verify: data.network_config?.insecure_skip_verify ?? false,
 				ca_cert_pem: data.network_config?.ca_cert_pem?.trim() || undefined,
+				stream_first_chunk_timeout_in_seconds: data.network_config?.stream_first_chunk_timeout_in_seconds,
 				stream_idle_timeout_in_seconds:
 					data.network_config?.stream_idle_timeout_in_seconds ?? DefaultNetworkConfig.stream_idle_timeout_in_seconds,
 				max_conns_per_host:
 					data.network_config?.max_conns_per_host ?? DefaultNetworkConfig.max_conns_per_host,
+				max_idle_conn_duration_in_seconds:
+					data.network_config?.max_idle_conn_duration_in_seconds ??
+					DefaultNetworkConfig.max_idle_conn_duration_in_seconds,
 				enforce_http2: data.network_config?.enforce_http2 ?? DefaultNetworkConfig.enforce_http2,
 			},
 		};
@@ -143,10 +153,17 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 				retry_backoff_max: provider.network_config?.retry_backoff_max ?? DefaultNetworkConfig.retry_backoff_max,
 				insecure_skip_verify: provider.network_config?.insecure_skip_verify ?? DefaultNetworkConfig.insecure_skip_verify,
 				ca_cert_pem: provider.network_config?.ca_cert_pem ?? DefaultNetworkConfig.ca_cert_pem,
+				stream_first_chunk_timeout_in_seconds:
+					provider.network_config?.stream_first_chunk_timeout_in_seconds ??
+					DefaultNetworkConfig.stream_first_chunk_timeout_in_seconds,
 				stream_idle_timeout_in_seconds:
 					provider.network_config?.stream_idle_timeout_in_seconds ?? DefaultNetworkConfig.stream_idle_timeout_in_seconds,
 				max_conns_per_host:
 					provider.network_config?.max_conns_per_host ?? DefaultNetworkConfig.max_conns_per_host,
+				max_idle_conn_duration_in_seconds:
+					provider.network_config?.max_idle_conn_duration_in_seconds ??
+					DefaultNetworkConfig.max_idle_conn_duration_in_seconds,
+				enforce_http2: provider.network_config?.enforce_http2 ?? DefaultNetworkConfig.enforce_http2,
 			},
 		});
 	}, [form, provider.name, provider.network_config]);
@@ -186,7 +203,7 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 								name="network_config.default_request_timeout_in_seconds"
 								render={({ field }) => (
 									<FormItem className="flex-1">
-										<FormLabel>Timeout (seconds)</FormLabel>
+										<FormLabel>Request Timeout (seconds)</FormLabel>
 										<FormControl>
 											<Input
 												placeholder="30"
@@ -207,7 +224,46 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 												}}
 											/>
 										</FormControl>
-										<FormDescription>{secondsToHumanReadable(field.value)}</FormDescription>
+										<FormDescription>
+											{field.value ? `${secondsToHumanReadable(field.value)}. ` : ""}
+											Upper bound for the entire provider HTTP request after the gateway starts the upstream call. This is not a
+											&quot;first token timeout&quot;.
+										</FormDescription>
+										<FormMessage />
+									</FormItem>
+								)}
+							/>
+							<FormField
+								control={form.control}
+								name="network_config.stream_first_chunk_timeout_in_seconds"
+								render={({ field }) => (
+									<FormItem className="flex-1">
+										<FormLabel>First Chunk Timeout (seconds)</FormLabel>
+										<FormControl>
+											<Input
+												placeholder="inherit Stream Idle Timeout"
+												data-testid="network-config-first-chunk-timeout-input"
+												{...field}
+												value={field.value === undefined || Number.isNaN(field.value) ? '' : field.value}
+												disabled={!hasUpdateProviderAccess}
+												onChange={(e) => {
+													const value = e.target.value
+													if (value === '') {
+														field.onChange(undefined)
+														return
+													}
+													const parsed = Number(value)
+													if (!Number.isNaN(parsed)) {
+														field.onChange(parsed)
+													}
+													form.trigger("network_config");
+												}}
+											/>
+										</FormControl>
+										<FormDescription>
+											{field.value ? `${secondsToHumanReadable(field.value)}. ` : ""}
+											How long Bifrost waits for the very first streaming chunk. Leave blank to inherit the Stream Idle Timeout.
+										</FormDescription>
 										<FormMessage />
 									</FormItem>
 								)}
@@ -240,8 +296,9 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 											/>
 										</FormControl>
 										<FormDescription>
-											{field.value ? secondsToHumanReadable(field.value) : ""}
-											{" "}Max time to wait for next chunk before closing a stalled stream
+											{field.value ? `${secondsToHumanReadable(field.value)}. ` : ""}
+											Max silent gap allowed between streaming chunks after the provider has started streaming. This does not cap the
+											total stream duration.
 										</FormDescription>
 										<FormMessage />
 									</FormItem>
@@ -277,6 +334,36 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 									</FormItem>
 								)}
 							/>
+						</div>
+						<div className="rounded-lg border border-border/60 bg-muted/20 p-4 text-sm text-muted-foreground">
+							<p className="font-medium text-foreground">How these timeout settings work</p>
+							<ul className="mt-2 list-disc space-y-1 pl-5">
+								<li>
+									<strong>Request Timeout</strong> is the overall provider-call budget once Bifrost opens the upstream HTTP request. If
+									the full response takes longer than this, the gateway can cut the call even if the first token already arrived.
+								</li>
+								<li>
+									<strong>First Chunk Timeout</strong> is the maximum wait for the first token / first chunk after the upstream request has
+									been sent. If left blank, it inherits the Stream Idle Timeout to preserve older behavior.
+								</li>
+								<li>
+									<strong>Stream Idle Timeout</strong> only watches for inactivity between chunks after streaming has started. Each new
+									chunk resets the idle timer.
+								</li>
+								<li>
+									<strong>Max Idle Connection Duration</strong> controls how long Bifrost keeps an idle keep-alive connection in the
+									provider pool before recycling it. Lower this when an upstream gateway or load balancer closes idle connections
+									aggressively.
+								</li>
+								<li>
+									If a request waits in queues before Bifrost sends it upstream, that queue wait is generally separate from the provider
+									request timeout.
+								</li>
+								<li>
+									For long reasoning or dense streaming workloads, a safer starting point is <strong>Request Timeout = 300-600s</strong>,{" "}
+									<strong>First Chunk Timeout = 60-120s</strong>, and <strong>Stream Idle Timeout = 60-120s</strong>.
+								</li>
+							</ul>
 						</div>
 						<div className="flex w-full flex-row items-start gap-4">
 							<FormField
@@ -370,6 +457,41 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 										</FormControl>
 										<FormDescription>
 											Max TCP connections per provider host. For HTTP/2 providers (e.g. Bedrock), each connection supports ~100 concurrent streams.
+										</FormDescription>
+										<FormMessage />
+									</FormItem>
+								)}
+							/>
+							<FormField
+								control={form.control}
+								name="network_config.max_idle_conn_duration_in_seconds"
+								render={({ field }) => (
+									<FormItem className="flex-1">
+										<FormLabel>Max Idle Connection Duration (seconds)</FormLabel>
+										<FormControl>
+											<Input
+												data-testid="network-config-max-idle-conn-duration-input"
+												placeholder="30"
+												{...field}
+												value={field.value === undefined || Number.isNaN(field.value) ? '' : field.value}
+												disabled={!hasUpdateProviderAccess}
+												onChange={(e) => {
+													const value = e.target.value
+													if (value === '') {
+														field.onChange(undefined)
+														return
+													}
+													const parsed = Number(value)
+													if (!Number.isNaN(parsed)) {
+														field.onChange(parsed)
+													}
+													form.trigger("network_config");
+												}}
+											/>
+										</FormControl>
+										<FormDescription>
+											{field.value ? `${secondsToHumanReadable(field.value)}. ` : ""}
+											How long an idle keep-alive provider connection stays in the pool before Bifrost closes it. Lower this if an upstream gateway or load balancer closes idle connections early.
 										</FormDescription>
 										<FormMessage />
 									</FormItem>

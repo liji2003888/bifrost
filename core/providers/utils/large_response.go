@@ -313,7 +313,7 @@ func SetupStreamingPassthrough(ctx *schemas.BifrostContext, resp *fasthttp.Respo
 	reader, releaseGzip := DecompressStreamBody(resp)
 
 	// Wrap reader with idle timeout to detect stalled streams.
-	reader, stopIdleTimeout := NewIdleTimeoutReader(reader, resp.BodyStream(), GetStreamIdleTimeout(ctx))
+	reader, stopIdleTimeout := NewStreamingTimeoutReader(reader, resp.BodyStream(), GetStreamFirstChunkTimeout(ctx), GetStreamIdleTimeout(ctx))
 
 	closableReader := &LargeResponseReader{
 		Reader: reader,

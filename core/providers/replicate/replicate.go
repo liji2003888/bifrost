@@ -42,7 +42,7 @@ func NewReplicateProvider(config *schemas.ProviderConfig, logger schemas.Logger)
 		ReadTimeout:         requestTimeout,
 		WriteTimeout:        requestTimeout,
 		MaxConnsPerHost:     config.NetworkConfig.MaxConnsPerHost,
-		MaxIdleConnDuration: 30 * time.Second,
+		MaxIdleConnDuration: time.Second * time.Duration(config.NetworkConfig.MaxIdleConnDurationInSeconds),
 		MaxConnWaitTimeout:  requestTimeout,
 		MaxConnDuration:     time.Second * time.Duration(schemas.DefaultMaxConnDurationInSeconds),
 		ConnPoolStrategy:    fasthttp.FIFO,
@@ -583,7 +583,7 @@ func (provider *ReplicateProvider) TextCompletionStream(ctx *schemas.BifrostCont
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -602,7 +602,7 @@ func (provider *ReplicateProvider) TextCompletionStream(ctx *schemas.BifrostCont
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -958,7 +958,7 @@ func (provider *ReplicateProvider) ChatCompletionStream(ctx *schemas.BifrostCont
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -977,7 +977,7 @@ func (provider *ReplicateProvider) ChatCompletionStream(ctx *schemas.BifrostCont
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -1346,7 +1346,7 @@ func (provider *ReplicateProvider) ResponsesStream(ctx *schemas.BifrostContext, 
 	providerUtils.SetExtraHeaders(ctx, req, provider.networkConfig.ExtraHeaders, nil)
 
 	// Make the streaming request
-	streamErr := provider.client.Do(req, resp)
+	streamErr := providerUtils.DoRequestWithFreshConnectionFallback(provider.client, req, resp)
 	if streamErr != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(streamErr, context.Canceled) {
@@ -1385,7 +1385,7 @@ func (provider *ReplicateProvider) ResponsesStream(ctx *schemas.BifrostContext, 
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -1415,7 +1415,7 @@ func (provider *ReplicateProvider) ResponsesStream(ctx *schemas.BifrostContext, 
 		}
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -2005,7 +2005,7 @@ func (provider *ReplicateProvider) ImageGenerationStream(ctx *schemas.BifrostCon
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -2024,7 +2024,7 @@ func (provider *ReplicateProvider) ImageGenerationStream(ctx *schemas.BifrostCon
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -2441,7 +2441,7 @@ func (provider *ReplicateProvider) ImageEditStream(ctx *schemas.BifrostContext, 
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -2460,7 +2460,7 @@ func (provider *ReplicateProvider) ImageEditStream(ctx *schemas.BifrostContext, 
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,

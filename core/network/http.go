@@ -252,12 +252,9 @@ func (f *HTTPClientFactory) createFasthttpClient(purpose ClientPurpose) *fasthtt
 // use POST, so without this they fail immediately on stale connections. Retrying is safe here
 // because the error occurs during response header parsing — before the server processes the
 // new request, or on a connection the server has already closed.
-func StaleConnectionRetryIfErr(_ *fasthttp.Request, attempts int, err error) (resetTimeout bool, retry bool) {
-	if attempts > 1 {
-		return false, false
-	}
+func IsStaleConnectionError(err error) bool {
 	if err == nil {
-		return false, false
+		return false
 	}
 	errStr := err.Error()
 	// io.EOF — server closed the connection (fasthttp converts this to
@@ -268,15 +265,19 @@ func StaleConnectionRetryIfErr(_ *fasthttp.Request, attempts int, err error) (re
 	// "cannot find whitespace in the first line of response" — stale chunked data in buffer
 	// "connection reset by peer" — server RST'd the idle connection (read-side)
 	// "broken pipe" — server closed the idle connection (write-side EPIPE)
-	if err == io.EOF ||
+	return err == io.EOF ||
 		errors.Is(err, fasthttp.ErrConnectionClosed) ||
 		strings.Contains(errStr, "closed connection before returning the first response byte") ||
 		strings.Contains(errStr, "cannot find whitespace") ||
 		strings.Contains(errStr, "connection reset by peer") ||
-		strings.Contains(errStr, "broken pipe") {
-		return true, true
+		strings.Contains(errStr, "broken pipe")
+}
+
+func StaleConnectionRetryIfErr(_ *fasthttp.Request, attempts int, err error) (resetTimeout bool, retry bool) {
+	if attempts > 1 || !IsStaleConnectionError(err) {
+		return false, false
 	}
-	return false, false
+	return true, true
 }
 
 // buildProxyURLWithAuth adds authentication to a proxy URL if credentials are provided

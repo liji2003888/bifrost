@@ -36,7 +36,7 @@ func NewMistralProvider(config *schemas.ProviderConfig, logger schemas.Logger) *
 		ReadTimeout:         requestTimeout,
 		WriteTimeout:        requestTimeout,
 		MaxConnsPerHost:     config.NetworkConfig.MaxConnsPerHost,
-		MaxIdleConnDuration: 30 * time.Second,
+		MaxIdleConnDuration: time.Second * time.Duration(config.NetworkConfig.MaxIdleConnDurationInSeconds),
 		MaxConnWaitTimeout:  requestTimeout,
 		MaxConnDuration:     time.Second * time.Duration(schemas.DefaultMaxConnDurationInSeconds),
 		ConnPoolStrategy:    fasthttp.FIFO,
@@ -419,7 +419,7 @@ func (provider *MistralProvider) TranscriptionStream(ctx *schemas.BifrostContext
 	req.SetBody(body.Bytes())
 
 	// Make the request
-	err := provider.client.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(provider.client, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -458,7 +458,7 @@ func (provider *MistralProvider) TranscriptionStream(ctx *schemas.BifrostContext
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -476,7 +476,7 @@ func (provider *MistralProvider) TranscriptionStream(ctx *schemas.BifrostContext
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,

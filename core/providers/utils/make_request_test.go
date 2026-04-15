@@ -2,7 +2,10 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -67,6 +70,56 @@ func TestMakeRequestWithContext_SuccessReturnsNoopWait(t *testing.T) {
 	}
 	if resp.StatusCode() != 200 {
 		t.Fatalf("expected status 200, got %d", resp.StatusCode())
+	}
+}
+
+func TestMakeRequestWithContext_RetriesReplayableRequestOnStaleConnection(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	server.Config.IdleTimeout = 50 * time.Millisecond
+	server.Start()
+	defer server.Close()
+
+	client := &fasthttp.Client{
+		MaxIdleConnDuration: 500 * time.Millisecond,
+		ReadTimeout:         1 * time.Second,
+		WriteTimeout:        1 * time.Second,
+		// Intentionally no RetryIfErr; this test verifies the utility-level
+		// fresh-connection fallback for replayable requests.
+	}
+
+	doPost := func() error {
+		req := fasthttp.AcquireRequest()
+		resp := fasthttp.AcquireResponse()
+		defer fasthttp.ReleaseRequest(req)
+		defer fasthttp.ReleaseResponse(resp)
+
+		req.SetRequestURI(server.URL)
+		req.Header.SetMethod(http.MethodPost)
+		req.Header.SetContentType("application/json")
+		req.SetBodyString(`{"prompt":"hello"}`)
+
+		_, bifrostErr, wait := MakeRequestWithContext(context.Background(), client, req, resp)
+		defer wait()
+		if bifrostErr != nil {
+			return bifrostErr.Error.Error
+		}
+		if resp.StatusCode() != http.StatusOK {
+			return errors.New("unexpected status code")
+		}
+		return nil
+	}
+
+	if err := doPost(); err != nil {
+		t.Fatalf("warm-up POST failed: %v", err)
+	}
+
+	time.Sleep(120 * time.Millisecond)
+
+	if err := doPost(); err != nil {
+		t.Fatalf("second POST should succeed via fresh-connection fallback, got: %v", err)
 	}
 }
 

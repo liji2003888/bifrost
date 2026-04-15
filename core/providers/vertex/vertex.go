@@ -90,7 +90,7 @@ func NewVertexProvider(config *schemas.ProviderConfig, logger schemas.Logger) (*
 		ReadTimeout:         requestTimeout,
 		WriteTimeout:        requestTimeout,
 		MaxConnsPerHost:     config.NetworkConfig.MaxConnsPerHost,
-		MaxIdleConnDuration: 30 * time.Second,
+		MaxIdleConnDuration: time.Second * time.Duration(config.NetworkConfig.MaxIdleConnDurationInSeconds),
 		MaxConnWaitTimeout:  requestTimeout,
 		MaxConnDuration:     time.Second * time.Duration(schemas.DefaultMaxConnDurationInSeconds),
 		ConnPoolStrategy:    fasthttp.FIFO,
@@ -3439,11 +3439,11 @@ func (provider *VertexProvider) PassthroughStream(
 	}
 
 	// Set stream idle timeout from provider config.
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Wrap body with idle timeout to detect stalled streams.
 	rawBodyStream := bodyStream
-	bodyStream, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(bodyStream, rawBodyStream, providerUtils.GetStreamIdleTimeout(ctx))
+	bodyStream, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(bodyStream, rawBodyStream, providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 
 	// Cancellation must close the raw stream to unblock reads.
 	stopCancellation := providerUtils.SetupStreamCancellation(ctx, rawBodyStream, provider.logger)

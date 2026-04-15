@@ -173,6 +173,147 @@ func TestExecuteHostedMCPToolUsesRequestHeadersInQueryAndBodyTemplates(t *testin
 	}
 }
 
+func TestExecuteHostedMCPToolRejectsMissingRequiredArgs(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	server := &BifrostHTTPServer{}
+	tool := &configstoreTables.TableMCPHostedTool{
+		Name:   "required_args_tool",
+		Method: http.MethodPost,
+		URL:    "http://example.com/unused",
+		ToolSchema: schemas.ChatTool{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name: "required_args_tool",
+				Parameters: &schemas.ToolFunctionParameters{
+					Type: "object",
+					Properties: schemas.NewOrderedMapFromPairs(
+						schemas.KV("tenant_id", map[string]any{"type": "string"}),
+					),
+					Required: []string{"tenant_id"},
+				},
+			},
+		},
+	}
+
+	_, err := server.executeHostedMCPTool(context.Background(), tool, map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "args.tenant_id is required") {
+		t.Fatalf("expected required arg validation error, got %v", err)
+	}
+}
+
+func TestExecuteHostedMCPToolRejectsWrongArgType(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	server := &BifrostHTTPServer{}
+	tool := &configstoreTables.TableMCPHostedTool{
+		Name:   "typed_args_tool",
+		Method: http.MethodPost,
+		URL:    "http://example.com/unused",
+		ToolSchema: schemas.ChatTool{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name: "typed_args_tool",
+				Parameters: &schemas.ToolFunctionParameters{
+					Type: "object",
+					Properties: schemas.NewOrderedMapFromPairs(
+						schemas.KV("limit", map[string]any{"type": "integer"}),
+					),
+					Required: []string{"limit"},
+				},
+			},
+		},
+	}
+
+	_, err := server.executeHostedMCPTool(context.Background(), tool, map[string]any{
+		"limit": "10",
+	})
+	if err == nil || !strings.Contains(err.Error(), "args.limit must be an integer") {
+		t.Fatalf("expected integer validation error, got %v", err)
+	}
+}
+
+func TestExecuteHostedMCPToolRejectsUnknownArgsWhenAdditionalPropertiesDisabled(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	additionalProps := false
+	server := &BifrostHTTPServer{}
+	tool := &configstoreTables.TableMCPHostedTool{
+		Name:   "strict_args_tool",
+		Method: http.MethodPost,
+		URL:    "http://example.com/unused",
+		ToolSchema: schemas.ChatTool{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name: "strict_args_tool",
+				Parameters: &schemas.ToolFunctionParameters{
+					Type: "object",
+					Properties: schemas.NewOrderedMapFromPairs(
+						schemas.KV("query", map[string]any{"type": "string"}),
+					),
+					AdditionalProperties: &schemas.AdditionalPropertiesStruct{
+						AdditionalPropertiesBool: &additionalProps,
+					},
+				},
+			},
+		},
+	}
+
+	_, err := server.executeHostedMCPTool(context.Background(), tool, map[string]any{
+		"query":   "hello",
+		"unknown": "value",
+	})
+	if err == nil || !strings.Contains(err.Error(), "args.unknown is not allowed") {
+		t.Fatalf("expected additional properties validation error, got %v", err)
+	}
+}
+
+func TestExecuteHostedMCPToolAcceptsValidArgsAgainstSchema(t *testing.T) {
+	SetLogger(bifrost.NewNoOpLogger())
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	additionalProps := false
+	server := &BifrostHTTPServer{}
+	tool := &configstoreTables.TableMCPHostedTool{
+		Name:   "valid_schema_tool",
+		Method: http.MethodPost,
+		URL:    upstream.URL + "/lookup",
+		ToolSchema: schemas.ChatTool{
+			Type: schemas.ChatToolTypeFunction,
+			Function: &schemas.ChatToolFunction{
+				Name: "valid_schema_tool",
+				Parameters: &schemas.ToolFunctionParameters{
+					Type: "object",
+					Properties: schemas.NewOrderedMapFromPairs(
+						schemas.KV("query", map[string]any{"type": "string"}),
+						schemas.KV("limit", map[string]any{"type": "integer", "minimum": 1.0}),
+					),
+					Required: []string{"query", "limit"},
+					AdditionalProperties: &schemas.AdditionalPropertiesStruct{
+						AdditionalPropertiesBool: &additionalProps,
+					},
+				},
+			},
+		},
+	}
+
+	result, err := server.executeHostedMCPTool(context.Background(), tool, map[string]any{
+		"query": "hello",
+		"limit": 5,
+	})
+	if err != nil {
+		t.Fatalf("expected schema-valid execution to succeed, got %v", err)
+	}
+	if result == "" {
+		t.Fatal("expected non-empty response")
+	}
+}
+
 func TestExecuteHostedMCPToolAppliesBearerPassthroughAuthProfile(t *testing.T) {
 	SetLogger(bifrost.NewNoOpLogger())
 

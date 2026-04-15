@@ -85,7 +85,7 @@ func NewAnthropicProvider(config *schemas.ProviderConfig, logger schemas.Logger)
 		ReadTimeout:         requestTimeout,
 		WriteTimeout:        requestTimeout,
 		MaxConnsPerHost:     config.NetworkConfig.MaxConnsPerHost,
-		MaxIdleConnDuration: 30 * time.Second,
+		MaxIdleConnDuration: time.Second * time.Duration(config.NetworkConfig.MaxIdleConnDurationInSeconds),
 		MaxConnWaitTimeout:  requestTimeout,
 		MaxConnDuration:     time.Second * time.Duration(schemas.DefaultMaxConnDurationInSeconds),
 		ConnPoolStrategy:    fasthttp.FIFO,
@@ -546,7 +546,7 @@ func (provider *AnthropicProvider) ChatCompletionStream(ctx *schemas.BifrostCont
 		headers["x-api-key"] = key.Value.GetValue()
 	}
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Use shared Anthropic streaming logic
 	return HandleAnthropicChatCompletionStreaming(
@@ -617,7 +617,7 @@ func HandleAnthropicChatCompletionStreaming(
 	activeClient := providerUtils.PrepareResponseStreaming(ctx, client, resp)
 
 	// Make the request
-	err := activeClient.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(activeClient, req, resp)
 	if usedLargePayloadBody {
 		providerUtils.DrainLargePayloadRemainder(ctx)
 	}
@@ -690,7 +690,7 @@ func HandleAnthropicChatCompletionStreaming(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -1031,7 +1031,7 @@ func (provider *AnthropicProvider) ResponsesStream(ctx *schemas.BifrostContext, 
 		headers["x-api-key"] = key.Value.GetValue()
 	}
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	return HandleAnthropicResponsesStream(
 		ctx,
@@ -1103,7 +1103,7 @@ func HandleAnthropicResponsesStream(
 	activeClient := providerUtils.PrepareResponseStreaming(ctx, client, resp)
 
 	// Make the request
-	err := activeClient.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(activeClient, req, resp)
 	if usedLargePayloadBody {
 		providerUtils.DrainLargePayloadRemainder(ctx)
 	}
@@ -1178,7 +1178,7 @@ func HandleAnthropicResponsesStream(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -2720,9 +2720,9 @@ func (provider *AnthropicProvider) PassthroughStream(
 	}
 
 	// Wrap reader with idle timeout to detect stalled streams.
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 	rawBodyStream := bodyStream
-	bodyStream, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(bodyStream, rawBodyStream, providerUtils.GetStreamIdleTimeout(ctx))
+	bodyStream, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(bodyStream, rawBodyStream, providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 
 	// Cancellation must close the raw stream to unblock reads.
 	stopCancellation := providerUtils.SetupStreamCancellation(ctx, rawBodyStream, provider.logger)

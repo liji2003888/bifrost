@@ -80,7 +80,7 @@ func NewBedrockProvider(config *schemas.ProviderConfig, logger schemas.Logger) (
 		MaxConnsPerHost:       config.NetworkConfig.MaxConnsPerHost,
 		MaxIdleConns:          schemas.DefaultMaxIdleConnsPerHost,
 		MaxIdleConnsPerHost:   schemas.DefaultMaxIdleConnsPerHost,
-		IdleConnTimeout:       30 * time.Second,
+		IdleConnTimeout:       time.Second * time.Duration(config.NetworkConfig.MaxIdleConnDurationInSeconds),
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: requestTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -945,7 +945,7 @@ func (provider *BedrockProvider) TextCompletionStream(ctx *schemas.BifrostContex
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -960,7 +960,7 @@ func (provider *BedrockProvider) TextCompletionStream(ctx *schemas.BifrostContex
 		defer resp.Body.Close()
 
 		// Wrap body with idle timeout to detect stalled streams.
-		idleReader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(resp.Body, resp.Body, providerUtils.GetStreamIdleTimeout(ctx))
+		idleReader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(resp.Body, resp.Body, providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close body stream on ctx cancellation
@@ -1200,7 +1200,7 @@ func (provider *BedrockProvider) ChatCompletionStream(ctx *schemas.BifrostContex
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -1215,7 +1215,7 @@ func (provider *BedrockProvider) ChatCompletionStream(ctx *schemas.BifrostContex
 		defer resp.Body.Close()
 
 		// Wrap body with idle timeout to detect stalled streams.
-		idleReader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(resp.Body, resp.Body, providerUtils.GetStreamIdleTimeout(ctx))
+		idleReader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(resp.Body, resp.Body, providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close body stream on ctx cancellation
@@ -1588,7 +1588,7 @@ func (provider *BedrockProvider) ResponsesStream(ctx *schemas.BifrostContext, po
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -1604,7 +1604,7 @@ func (provider *BedrockProvider) ResponsesStream(ctx *schemas.BifrostContext, po
 		defer resp.Body.Close()
 
 		// Wrap body with idle timeout to detect stalled streams.
-		idleReader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(resp.Body, resp.Body, providerUtils.GetStreamIdleTimeout(ctx))
+		idleReader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(resp.Body, resp.Body, providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close body stream on ctx cancellation

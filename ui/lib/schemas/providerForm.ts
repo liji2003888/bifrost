@@ -36,6 +36,7 @@ const NetworkConfigSchema = z
 		max_retries: z.number().min(0, "Max retries cannot be negative"),
 		retry_backoff_initial: z.number(),
 		retry_backoff_max: z.number(),
+		max_idle_conn_duration_in_seconds: z.number().min(1).optional(),
 	})
 	.refine((v) => v.retry_backoff_initial <= v.retry_backoff_max, {
 		message: "Initial backoff must be <= max backoff",

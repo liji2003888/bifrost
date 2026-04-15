@@ -44,7 +44,7 @@ func NewOpenAIProvider(config *schemas.ProviderConfig, logger schemas.Logger) *O
 		ReadTimeout:         requestTimeout,
 		WriteTimeout:        requestTimeout,
 		MaxConnsPerHost:     config.NetworkConfig.MaxConnsPerHost,
-		MaxIdleConnDuration: 30 * time.Second,
+		MaxIdleConnDuration: time.Second * time.Duration(config.NetworkConfig.MaxIdleConnDurationInSeconds),
 		MaxConnWaitTimeout:  requestTimeout,
 		MaxConnDuration:     time.Second * time.Duration(schemas.DefaultMaxConnDurationInSeconds),
 		ConnPoolStrategy:    fasthttp.FIFO,
@@ -393,6 +393,7 @@ func (provider *OpenAIProvider) TextCompletionStream(ctx *schemas.BifrostContext
 	if err := providerUtils.CheckOperationAllowed(schemas.OpenAI, provider.customProviderConfig, schemas.TextCompletionStreamRequest); err != nil {
 		return nil, err
 	}
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 	var authHeader map[string]string
 	if key.Value.GetValue() != "" {
 		authHeader = map[string]string{"Authorization": "Bearer " + key.Value.GetValue()}
@@ -487,7 +488,7 @@ func HandleOpenAITextCompletionStreaming(
 	activeClient := providerUtils.PrepareResponseStreaming(ctx, client, resp)
 
 	// Make the request
-	err := activeClient.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(activeClient, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -545,7 +546,7 @@ func HandleOpenAITextCompletionStreaming(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -916,6 +917,7 @@ func (provider *OpenAIProvider) ChatCompletionStream(ctx *schemas.BifrostContext
 	if err := providerUtils.CheckOperationAllowed(schemas.OpenAI, provider.customProviderConfig, schemas.ChatCompletionStreamRequest); err != nil {
 		return nil, err
 	}
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 	var authHeader map[string]string
 	if key.Value.GetValue() != "" {
 		authHeader = map[string]string{"Authorization": "Bearer " + key.Value.GetValue()}
@@ -1040,7 +1042,7 @@ func HandleOpenAIChatCompletionStreaming(
 	activeClient := providerUtils.PrepareResponseStreaming(ctx, client, resp)
 
 	// Make the request
-	err := activeClient.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(activeClient, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -1106,7 +1108,7 @@ func HandleOpenAIChatCompletionStreaming(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -1545,6 +1547,7 @@ func (provider *OpenAIProvider) ResponsesStream(ctx *schemas.BifrostContext, pos
 	if err := providerUtils.CheckOperationAllowed(schemas.OpenAI, provider.customProviderConfig, schemas.ResponsesStreamRequest); err != nil {
 		return nil, err
 	}
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 	var authHeader map[string]string
 	if key.Value.GetValue() != "" {
 		authHeader = map[string]string{"Authorization": "Bearer " + key.Value.GetValue()}
@@ -1650,7 +1653,7 @@ func HandleOpenAIResponsesStreaming(
 	activeClient := providerUtils.PrepareResponseStreaming(ctx, client, resp)
 
 	// Make the request
-	err := activeClient.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(activeClient, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -1708,7 +1711,7 @@ func HandleOpenAIResponsesStreaming(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -2144,6 +2147,7 @@ func (provider *OpenAIProvider) SpeechStream(ctx *schemas.BifrostContext, postHo
 	if err := providerUtils.CheckOperationAllowed(schemas.OpenAI, provider.customProviderConfig, schemas.SpeechStreamRequest); err != nil {
 		return nil, err
 	}
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	for _, model := range providerUtils.UnsupportedSpeechStreamModels {
 		if model == request.Model {
@@ -2245,7 +2249,7 @@ func HandleOpenAISpeechStreamRequest(
 	activeClient := providerUtils.PrepareResponseStreaming(ctx, client, resp)
 
 	// Make the request
-	err := activeClient.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(activeClient, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -2300,7 +2304,7 @@ func HandleOpenAISpeechStreamRequest(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -2595,6 +2599,7 @@ func (provider *OpenAIProvider) TranscriptionStream(ctx *schemas.BifrostContext,
 	if err := providerUtils.CheckOperationAllowed(schemas.OpenAI, provider.customProviderConfig, schemas.TranscriptionStreamRequest); err != nil {
 		return nil, err
 	}
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	var authHeader map[string]string
 	if key.Value.GetValue() != "" {
@@ -2687,7 +2692,7 @@ func HandleOpenAITranscriptionStreamRequest(
 	req.SetBody(body.Bytes())
 
 	// Make the request
-	err := client.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(client, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -2742,7 +2747,7 @@ func HandleOpenAITranscriptionStreamRequest(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -3039,6 +3044,7 @@ func (provider *OpenAIProvider) ImageGenerationStream(
 	if err := providerUtils.CheckOperationAllowed(schemas.OpenAI, provider.customProviderConfig, schemas.ImageGenerationStreamRequest); err != nil {
 		return nil, err
 	}
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	var authHeader map[string]string
 	if value := key.Value.GetValue(); value != "" {
@@ -3139,7 +3145,7 @@ func HandleOpenAIImageGenerationStreaming(
 	activeClient := providerUtils.PrepareResponseStreaming(ctx, client, resp)
 
 	// Make the request
-	err := activeClient.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(activeClient, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -3194,7 +3200,7 @@ func HandleOpenAIImageGenerationStreaming(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -4310,6 +4316,7 @@ func (provider *OpenAIProvider) ImageEditStream(ctx *schemas.BifrostContext, pos
 	if err := providerUtils.CheckOperationAllowed(schemas.OpenAI, provider.customProviderConfig, schemas.ImageEditStreamRequest); err != nil {
 		return nil, err
 	}
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	var authHeader map[string]string
 	if value := key.Value.GetValue(); value != "" {
@@ -4399,7 +4406,7 @@ func HandleOpenAIImageEditStreamRequest(
 	req.SetBody(body.Bytes())
 
 	// Make the request
-	err := client.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(client, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -4453,7 +4460,7 @@ func HandleOpenAIImageEditStreamRequest(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -7095,6 +7102,7 @@ func (provider *OpenAIProvider) PassthroughStream(
 	if err := providerUtils.CheckOperationAllowed(schemas.OpenAI, provider.customProviderConfig, schemas.PassthroughStreamRequest); err != nil {
 		return nil, err
 	}
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	path := req.Path
 	if after, ok := strings.CutPrefix(path, "/v1"); ok {
@@ -7131,7 +7139,7 @@ func (provider *OpenAIProvider) PassthroughStream(
 
 	startTime := time.Now()
 
-	if err := activeClient.Do(fasthttpReq, resp); err != nil {
+	if err := providerUtils.DoRequestWithFreshConnectionFallback(activeClient, fasthttpReq, resp); err != nil {
 		providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
 			return nil, &schemas.BifrostError{
@@ -7166,7 +7174,7 @@ func (provider *OpenAIProvider) PassthroughStream(
 	}
 
 	// Wrap reader with idle timeout to detect stalled streams.
-	bodyStream, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(rawBodyStream, rawBodyStream, providerUtils.GetStreamIdleTimeout(ctx))
+	bodyStream, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(rawBodyStream, rawBodyStream, providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 
 	// Cancellation must close the raw stream to unblock reads.
 	stopCancellation := providerUtils.SetupStreamCancellation(ctx, rawBodyStream, provider.logger)

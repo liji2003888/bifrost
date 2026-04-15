@@ -109,6 +109,24 @@ var UnsupportedSpeechStreamModels = []string{"tts-1", "tts-1-hd"}
 // noop is a reusable no-op function returned by MakeRequestWithContext on the normal path.
 var noop = func() {}
 
+// DoRequestWithFreshConnectionFallback executes a request and, for replayable request
+// bodies, performs one extra attempt on a brand-new client instance when the first
+// attempt fails with a stale-connection error before any response bytes are received.
+// This keeps the hot path unchanged for healthy connections while hardening against
+// upstreams or load balancers that close keep-alive sockets abruptly.
+func DoRequestWithFreshConnectionFallback(client *fasthttp.Client, req *fasthttp.Request, resp *fasthttp.Response) error {
+	err := client.Do(req, resp)
+	if err == nil || req.IsBodyStream() || !network.IsStaleConnectionError(err) {
+		return err
+	}
+
+	resp.Reset()
+
+	retryClient := CloneFastHTTPClientConfig(client)
+	req.Header.SetConnectionClose()
+	return retryClient.Do(req, resp)
+}
+
 // MakeRequestWithContext makes a request with a context and returns the latency, error, and a
 // wait function. The wait function MUST be called (typically via defer) before releasing the
 // request or response objects. On the normal path it is a no-op. On the context-cancellation
@@ -126,7 +144,7 @@ func MakeRequestWithContext(ctx context.Context, client *fasthttp.Client, req *f
 	go func() {
 		// client.Do is a blocking call.
 		// It will send an error (or nil for success) to errChan when it completes.
-		errChan <- client.Do(req, resp)
+		errChan <- DoRequestWithFreshConnectionFallback(client, req, resp)
 	}()
 
 	select {
@@ -1937,17 +1955,91 @@ func SetupStreamCancellation(ctx context.Context, bodyStream io.Reader, logger s
 // (e.g., Azure TPM throttling).
 const DefaultStreamIdleTimeout = 60 * time.Second
 
+// DefaultStreamFirstChunkTimeout inherits the effective idle timeout unless
+// the provider config or request context supplies a dedicated first-chunk budget.
+const DefaultStreamFirstChunkTimeout = time.Duration(0)
+
+// StreamTimeoutKind identifies which phase of a streaming request timed out.
+type StreamTimeoutKind string
+
+const (
+	StreamTimeoutKindFirstChunk StreamTimeoutKind = "first_chunk"
+	StreamTimeoutKindIdle       StreamTimeoutKind = "idle"
+)
+
+// StreamTimeoutError reports a timeout while waiting for streaming data.
+type StreamTimeoutError struct {
+	Kind    StreamTimeoutKind
+	Timeout time.Duration
+}
+
+func (e *StreamTimeoutError) Error() string {
+	switch e.Kind {
+	case StreamTimeoutKindFirstChunk:
+		return fmt.Sprintf("%s after %s", schemas.ErrProviderFirstChunkTimedOut, e.Timeout)
+	case StreamTimeoutKindIdle:
+		return fmt.Sprintf("%s after %s", schemas.ErrProviderStreamIdleTimedOut, e.Timeout)
+	default:
+		return fmt.Sprintf("stream timed out after %s", e.Timeout)
+	}
+}
+
+func IsStreamTimeoutError(err error) bool {
+	var streamErr *StreamTimeoutError
+	return errors.As(err, &streamErr)
+}
+
+func GetStreamTimeoutKind(err error) StreamTimeoutKind {
+	var streamErr *StreamTimeoutError
+	if errors.As(err, &streamErr) {
+		return streamErr.Kind
+	}
+	return ""
+}
+
+// SetStreamFirstChunkTimeoutIfEmpty sets the first-chunk timeout on the context
+// from provider config, but only if no valid timeout is already present. If the
+// config value is unset, the effective stream idle timeout is reused.
+func SetStreamFirstChunkTimeoutIfEmpty(ctx *schemas.BifrostContext, configSeconds int) {
+	if existing, ok := ctx.Value(schemas.BifrostContextKeyStreamFirstChunkTimeout).(time.Duration); ok && existing > 0 {
+		return
+	}
+	if configSeconds > 0 {
+		ctx.SetValue(schemas.BifrostContextKeyStreamFirstChunkTimeout, time.Duration(configSeconds)*time.Second)
+		return
+	}
+	if idle := GetStreamIdleTimeout(ctx); idle > 0 {
+		ctx.SetValue(schemas.BifrostContextKeyStreamFirstChunkTimeout, idle)
+	}
+}
+
+// SetStreamTimeoutsIfEmpty applies both first-chunk and idle stream timeouts.
+// If no dedicated first-chunk timeout is configured, it inherits the effective
+// idle timeout so older configs preserve the previous single-timeout behavior.
+func SetStreamTimeoutsIfEmpty(ctx *schemas.BifrostContext, firstChunkSeconds int, idleSeconds int) {
+	if existing, ok := ctx.Value(schemas.BifrostContextKeyStreamIdleTimeout).(time.Duration); !ok || existing <= 0 {
+		if idleSeconds > 0 {
+			ctx.SetValue(schemas.BifrostContextKeyStreamIdleTimeout, time.Duration(idleSeconds)*time.Second)
+		}
+	}
+	SetStreamFirstChunkTimeoutIfEmpty(ctx, firstChunkSeconds)
+}
+
 // SetStreamIdleTimeoutIfEmpty sets the stream idle timeout on the context from
 // the provider's network config, but only if no valid timeout is already present.
 // This allows upstream layers (transport, headers) to set the timeout first,
 // with the provider config acting as a fallback.
 func SetStreamIdleTimeoutIfEmpty(ctx *schemas.BifrostContext, configSeconds int) {
-	if existing, ok := ctx.Value(schemas.BifrostContextKeyStreamIdleTimeout).(time.Duration); ok && existing > 0 {
-		return // already set from upstream (transport/header), respect it
+	SetStreamTimeoutsIfEmpty(ctx, 0, configSeconds)
+}
+
+// GetStreamFirstChunkTimeout reads the time budget for the first streaming chunk,
+// falling back to the effective stream idle timeout if not explicitly set.
+func GetStreamFirstChunkTimeout(ctx *schemas.BifrostContext) time.Duration {
+	if timeout, ok := ctx.Value(schemas.BifrostContextKeyStreamFirstChunkTimeout).(time.Duration); ok && timeout > 0 {
+		return timeout
 	}
-	if configSeconds > 0 {
-		ctx.SetValue(schemas.BifrostContextKeyStreamIdleTimeout, time.Duration(configSeconds)*time.Second)
-	}
+	return GetStreamIdleTimeout(ctx)
 }
 
 // GetStreamIdleTimeout reads the per-chunk idle timeout from context,
@@ -1963,11 +2055,43 @@ func GetStreamIdleTimeout(ctx *schemas.BifrostContext) time.Duration {
 // if no data arrives within the configured timeout. This unblocks any pending
 // Read() call on the wrapped reader.
 type idleTimeoutReader struct {
-	reader     io.Reader
-	bodyStream io.Reader // closed via type assertion to io.Closer on timeout
-	timeout    time.Duration
-	timer      *time.Timer
-	once       sync.Once
+	reader            io.Reader
+	bodyStream        io.Reader // closed via type assertion to io.Closer on timeout
+	firstChunkTimeout time.Duration
+	idleTimeout       time.Duration
+	armedTimeout      time.Duration
+	timer             *time.Timer
+	once              sync.Once
+	seenData          atomic.Bool
+	timeoutKind       atomic.Int32
+}
+
+func (r *idleTimeoutReader) closeOnTimeout(kind StreamTimeoutKind, timeout time.Duration) {
+	switch kind {
+	case StreamTimeoutKindFirstChunk:
+		r.timeoutKind.Store(1)
+	case StreamTimeoutKindIdle:
+		r.timeoutKind.Store(2)
+	default:
+		r.timeoutKind.Store(0)
+	}
+	r.once.Do(func() {
+		if closer, ok := r.bodyStream.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	})
+	r.armedTimeout = timeout
+}
+
+func (r *idleTimeoutReader) currentTimeoutError() error {
+	switch r.timeoutKind.Load() {
+	case 1:
+		return &StreamTimeoutError{Kind: StreamTimeoutKindFirstChunk, Timeout: r.armedTimeout}
+	case 2:
+		return &StreamTimeoutError{Kind: StreamTimeoutKindIdle, Timeout: r.armedTimeout}
+	default:
+		return nil
+	}
 }
 
 // NewIdleTimeoutReader wraps reader with idle detection. If reader.Read() returns
@@ -1977,20 +2101,31 @@ type idleTimeoutReader struct {
 // Returns the wrapped reader and a cleanup function that MUST be called (via defer)
 // when streaming is complete, to stop the timer and prevent premature closure.
 func NewIdleTimeoutReader(reader io.Reader, bodyStream io.Reader, timeout time.Duration) (io.Reader, func()) {
-	if timeout <= 0 {
-		timeout = DefaultStreamIdleTimeout
+	return NewStreamingTimeoutReader(reader, bodyStream, timeout, timeout)
+}
+
+// NewStreamingTimeoutReader applies a first-chunk timeout until the stream starts,
+// then switches to an idle timeout between subsequent chunks.
+func NewStreamingTimeoutReader(reader io.Reader, bodyStream io.Reader, firstChunkTimeout time.Duration, idleTimeout time.Duration) (io.Reader, func()) {
+	if idleTimeout <= 0 {
+		idleTimeout = DefaultStreamIdleTimeout
+	}
+	if firstChunkTimeout <= 0 {
+		firstChunkTimeout = idleTimeout
 	}
 	r := &idleTimeoutReader{
-		reader:     reader,
-		bodyStream: bodyStream,
-		timeout:    timeout,
+		reader:            reader,
+		bodyStream:        bodyStream,
+		firstChunkTimeout: firstChunkTimeout,
+		idleTimeout:       idleTimeout,
+		armedTimeout:      firstChunkTimeout,
 	}
-	r.timer = time.AfterFunc(timeout, func() {
-		r.once.Do(func() {
-			if closer, ok := r.bodyStream.(io.Closer); ok {
-				closer.Close()
-			}
-		})
+	r.timer = time.AfterFunc(firstChunkTimeout, func() {
+		if r.seenData.Load() {
+			r.closeOnTimeout(StreamTimeoutKindIdle, r.idleTimeout)
+			return
+		}
+		r.closeOnTimeout(StreamTimeoutKindFirstChunk, r.firstChunkTimeout)
 	})
 	return r, func() { r.timer.Stop() }
 }
@@ -1998,7 +2133,15 @@ func NewIdleTimeoutReader(reader io.Reader, bodyStream io.Reader, timeout time.D
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	if n > 0 {
-		r.timer.Reset(r.timeout)
+		if !r.seenData.Swap(true) {
+			r.armedTimeout = r.idleTimeout
+		}
+		r.timer.Reset(r.idleTimeout)
+	}
+	if err != nil {
+		if timeoutErr := r.currentTimeoutError(); timeoutErr != nil {
+			return n, timeoutErr
+		}
 	}
 	return n, err
 }
@@ -2100,19 +2243,25 @@ func ProcessAndSendError(
 	logger schemas.Logger,
 ) {
 	// Send scanner error through channel
-	bifrostError :=
-		&schemas.BifrostError{
-			IsBifrostError: true,
-			Error: &schemas.ErrorField{
-				Message: fmt.Sprintf("Error reading stream: %v", err),
-				Error:   err,
-			},
-			ExtraFields: schemas.BifrostErrorExtraFields{
-				RequestType:    requestType,
-				Provider:       providerName,
-				ModelRequested: model,
-			},
-		}
+	bifrostError := &schemas.BifrostError{
+		IsBifrostError: true,
+		Error: &schemas.ErrorField{
+			Message: fmt.Sprintf("Error reading stream: %v", err),
+			Error:   err,
+		},
+		ExtraFields: schemas.BifrostErrorExtraFields{
+			RequestType:    requestType,
+			Provider:       providerName,
+			ModelRequested: model,
+		},
+	}
+	if IsStreamTimeoutError(err) {
+		statusCode := 504
+		errorType := schemas.RequestTimedOut
+		bifrostError.StatusCode = &statusCode
+		bifrostError.Error.Type = &errorType
+		bifrostError.Error.Message = err.Error()
+	}
 	processedResponse, processedError := postHookRunner(ctx, nil, bifrostError)
 
 	if HandleStreamControlSkip(processedError) {

@@ -228,6 +228,12 @@ export const networkConfigSchema = z
 		retry_backoff_max: z.number().min(1000),
 		insecure_skip_verify: z.boolean().optional(),
 		ca_cert_pem: z.string().optional(),
+		stream_first_chunk_timeout_in_seconds: z
+			.number()
+			.int("First chunk timeout must be a whole number of seconds")
+			.min(1, "First chunk timeout must be at least 1 second")
+			.max(3600, "First chunk timeout must be at most 3600 seconds i.e. 60 minutes")
+			.optional(),
 		stream_idle_timeout_in_seconds: z
 			.number()
 			.int("Stream idle timeout must be a whole number of seconds")
@@ -239,6 +245,12 @@ export const networkConfigSchema = z
 			.int("Max connections must be a whole number")
 			.min(1, "Max connections must be at least 1")
 			.max(10000, "Max connections must be at most 10000")
+			.optional(),
+		max_idle_conn_duration_in_seconds: z
+			.number()
+			.int("Max idle connection duration must be a whole number of seconds")
+			.min(1, "Max idle connection duration must be at least 1 second")
+			.max(3600, "Max idle connection duration must be at most 3600 seconds i.e. 60 minutes")
 			.optional(),
 		enforce_http2: z.boolean().optional(),
 	})
@@ -280,6 +292,12 @@ export const networkFormConfigSchema = z
 			.max(1000000, "Retry backoff max must be at most 1000000ms"),
 		insecure_skip_verify: z.boolean().optional(),
 		ca_cert_pem: z.string().optional(),
+		stream_first_chunk_timeout_in_seconds: z.coerce
+			.number("First chunk timeout must be a number")
+			.int("First chunk timeout must be a whole number of seconds")
+			.min(1, "First chunk timeout must be at least 1 second")
+			.max(3600, "First chunk timeout must be at most 3600 seconds i.e. 60 minutes")
+			.optional(),
 		stream_idle_timeout_in_seconds: z.coerce
 			.number("Stream idle timeout must be a number")
 			.int("Stream idle timeout must be a whole number of seconds")
@@ -291,6 +309,12 @@ export const networkFormConfigSchema = z
 			.int("Max connections must be a whole number")
 			.min(1, "Max connections must be at least 1")
 			.max(10000, "Max connections must be at most 10000")
+			.optional(),
+		max_idle_conn_duration_in_seconds: z.coerce
+			.number("Max idle connection duration must be a number")
+			.int("Max idle connection duration must be a whole number of seconds")
+			.min(1, "Max idle connection duration must be at least 1 second")
+			.max(3600, "Max idle connection duration must be at most 3600 seconds i.e. 60 minutes")
 			.optional(),
 		enforce_http2: z.boolean().optional(),
 	})

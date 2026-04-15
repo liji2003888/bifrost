@@ -62,7 +62,7 @@ func NewGeminiProvider(config *schemas.ProviderConfig, logger schemas.Logger) *G
 		ReadTimeout:         requestTimeout,
 		WriteTimeout:        requestTimeout,
 		MaxConnsPerHost:     config.NetworkConfig.MaxConnsPerHost,
-		MaxIdleConnDuration: 30 * time.Second,
+		MaxIdleConnDuration: time.Second * time.Duration(config.NetworkConfig.MaxIdleConnDurationInSeconds),
 		MaxConnWaitTimeout:  requestTimeout,
 		MaxConnDuration:     time.Second * time.Duration(schemas.DefaultMaxConnDurationInSeconds),
 		ConnPoolStrategy:    fasthttp.FIFO,
@@ -378,7 +378,7 @@ func (provider *GeminiProvider) ChatCompletionStream(ctx *schemas.BifrostContext
 		headers["x-goog-api-key"] = key.Value.GetValue()
 	}
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Use shared Gemini streaming logic
 	return HandleGeminiChatCompletionStream(
@@ -436,7 +436,7 @@ func HandleGeminiChatCompletionStream(
 
 	// Make the request
 	streamingClient := buildStreamingResponseClient(client)
-	doErr := streamingClient.Do(req, resp)
+	doErr := providerUtils.DoRequestWithFreshConnectionFallback(streamingClient, req, resp)
 	if doErr != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(doErr, context.Canceled) {
@@ -507,7 +507,7 @@ func HandleGeminiChatCompletionStream(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		decompressedReader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(decompressedReader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		decompressedReader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(decompressedReader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -916,7 +916,7 @@ func (provider *GeminiProvider) ResponsesStream(ctx *schemas.BifrostContext, pos
 		headers["x-goog-api-key"] = key.Value.GetValue()
 	}
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	return HandleGeminiResponsesStream(
 		ctx,
@@ -973,7 +973,7 @@ func HandleGeminiResponsesStream(
 
 	// Make the request
 	streamingClient := buildStreamingResponseClient(client)
-	doErr := streamingClient.Do(req, resp)
+	doErr := providerUtils.DoRequestWithFreshConnectionFallback(streamingClient, req, resp)
 	if doErr != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(doErr, context.Canceled) {
@@ -1050,7 +1050,7 @@ func HandleGeminiResponsesStream(
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		decompressedReader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(decompressedReader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		decompressedReader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(decompressedReader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -1502,7 +1502,7 @@ func (provider *GeminiProvider) SpeechStream(ctx *schemas.BifrostContext, postHo
 
 	// Make the request
 	streamingClient := buildStreamingResponseClient(provider.client)
-	err := streamingClient.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(streamingClient, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -1544,7 +1544,7 @@ func (provider *GeminiProvider) SpeechStream(ctx *schemas.BifrostContext, postHo
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -1564,7 +1564,7 @@ func (provider *GeminiProvider) SpeechStream(ctx *schemas.BifrostContext, postHo
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -1820,7 +1820,7 @@ func (provider *GeminiProvider) TranscriptionStream(ctx *schemas.BifrostContext,
 
 	// Make the request
 	streamingClient := buildStreamingResponseClient(provider.client)
-	err := streamingClient.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(streamingClient, req, resp)
 	if err != nil {
 		defer providerUtils.ReleaseStreamingResponse(resp)
 		if errors.Is(err, context.Canceled) {
@@ -1862,7 +1862,7 @@ func (provider *GeminiProvider) TranscriptionStream(ctx *schemas.BifrostContext,
 	// Create response channel
 	responseChan := make(chan *schemas.BifrostStreamChunk, schemas.DefaultStreamBufferSize)
 
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 
 	// Start streaming in a goroutine
 	go func() {
@@ -1880,7 +1880,7 @@ func (provider *GeminiProvider) TranscriptionStream(ctx *schemas.BifrostContext,
 		defer releaseGzip()
 
 		// Wrap reader with idle timeout to detect stalled streams.
-		reader, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamIdleTimeout(ctx))
+		reader, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(reader, resp.BodyStream(), providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 		defer stopIdleTimeout()
 
 		// Setup cancellation handler to close the raw network stream on ctx cancellation,
@@ -4532,9 +4532,9 @@ func (provider *GeminiProvider) PassthroughStream(
 	}
 
 	// Wrap reader with idle timeout to detect stalled streams.
-	providerUtils.SetStreamIdleTimeoutIfEmpty(ctx, provider.networkConfig.StreamIdleTimeoutInSeconds)
+	providerUtils.SetStreamTimeoutsIfEmpty(ctx, provider.networkConfig.StreamFirstChunkTimeoutInSeconds, provider.networkConfig.StreamIdleTimeoutInSeconds)
 	rawBodyStream := bodyStream
-	bodyStream, stopIdleTimeout := providerUtils.NewIdleTimeoutReader(bodyStream, rawBodyStream, providerUtils.GetStreamIdleTimeout(ctx))
+	bodyStream, stopIdleTimeout := providerUtils.NewStreamingTimeoutReader(bodyStream, rawBodyStream, providerUtils.GetStreamFirstChunkTimeout(ctx), providerUtils.GetStreamIdleTimeout(ctx))
 
 	// Cancellation must close the raw stream to unblock reads.
 	stopCancellation := providerUtils.SetupStreamCancellation(ctx, rawBodyStream, provider.logger)

@@ -2125,7 +2125,13 @@
         "default_request_timeout_in_seconds": {
           "type": "integer",
           "minimum": 1,
-          "description": "Default request timeout in seconds"
+          "description": "Overall provider HTTP request timeout in seconds. This is the total upstream request budget once the gateway starts the provider call."
+        },
+        "stream_first_chunk_timeout_in_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "description": "Maximum time to wait for the first streaming chunk in seconds. If omitted or set to 0, Bifrost inherits stream_idle_timeout_in_seconds for backward compatibility."
         },
         "max_retries": {
           "type": "integer",
@@ -2161,6 +2167,12 @@
           "minimum": 1,
           "maximum": 10000,
           "description": "Maximum number of TCP connections per provider host. For HTTP/2 (e.g. Bedrock), each connection supports ~100 concurrent streams. Default: 5000."
+        },
+        "max_idle_conn_duration_in_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "description": "How long Bifrost keeps an idle keep-alive connection in the provider pool before closing it. Default: 30. Lower this if an upstream gateway or load balancer closes idle connections aggressively."
         },
         "beta_header_overrides": {
           "type": "object",

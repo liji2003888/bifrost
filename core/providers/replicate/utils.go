@@ -110,7 +110,7 @@ func listenToReplicateStreamURL(
 	}
 
 	// Make request
-	err := client.Do(req, resp)
+	err := providerUtils.DoRequestWithFreshConnectionFallback(client, req, resp)
 	fasthttp.ReleaseRequest(req)
 
 	if err != nil {
